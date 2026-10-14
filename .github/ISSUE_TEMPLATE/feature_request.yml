@@ -1,0 +1,79 @@
+name: "🚀 Feature / Phase Specification"
+description: "Propose or specify an architectural module or phase milestone"
+title: "feat: "
+labels: ["type: feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for contributing to Cadence! Please provide structured architectural details for this feature or phase.
+  - type: dropdown
+    id: phase
+    attributes:
+      label: Phase Milestone
+      description: Which roadmap phase does this feature belong to?
+      options:
+        - "phase: 0-foundation"
+        - "phase: 1-dictation-mvp"
+        - "phase: 2-streaming-asr"
+        - "phase: 3-context-ai"
+        - "phase: 4-voice-editing"
+        - "phase: 5-developer-workflows"
+        - "phase: 6-commands-and-agents"
+        - "phase: 7-meetings-and-knowledge"
+        - "phase: 8-ecosystem"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Subsystem Area
+      description: Primary component affected
+      options:
+        - "area: audio"
+        - "area: asr"
+        - "area: vad"
+        - "area: pipeline"
+        - "area: postprocess"
+        - "area: paste"
+        - "area: storage"
+        - "area: ipc"
+        - "area: cli"
+        - "area: security"
+    validations:
+      required: true
+  - type: textarea
+    id: objective
+    attributes:
+      label: 🎯 Objective
+      description: A brief summary of what capability this deliverable provides.
+      placeholder: "Establish the..."
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: 📋 Scope & Deliverables
+      description: Specific files, interfaces, and packages to create or modify.
+      placeholder: |
+        - [ ] `internal/<module>/file.go`: Implementation
+        - [ ] `internal/<module>/file_test.go`: Unit tests
+    validations:
+      required: true
+  - type: textarea
+    id: contracts
+    attributes:
+      label: 📐 Contracts & Architectural Invariants
+      description: Note any degradation rules, privacy gates, or non-leaking interface contracts.
+      placeholder: "Must respect network_mode = local_only and degrade gracefully..."
+  - type: checkboxes
+    id: criteria
+    attributes:
+      label: ✅ Acceptance Checklist
+      options:
+        - label: "Code compiles cleanly with zero warnings (`go vet ./...`)"
+          required: true
+        - label: "Code is formatted strictly (`gofmt`)"
+          required: true
+        - label: "All unit and race tests pass (`go test -race ./...`)"
+          required: true

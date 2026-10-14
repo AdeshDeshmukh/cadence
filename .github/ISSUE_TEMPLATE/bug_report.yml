@@ -1,0 +1,72 @@
+name: "🐛 Bug Report"
+description: "File an actionable bug report with reproduction details"
+title: "fix: "
+labels: ["type: bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please provide detailed reproduction steps so we can isolate and resolve the issue quickly.
+
+        > **Note**: For potential security vulnerabilities or privacy leaks, please do **NOT** open a public issue. Report privately via [GitHub Security Advisories](https://github.com/AdeshDeshmukh/cadence/security/advisories) or see `SECURITY.md`.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Subsystem Area
+      description: Where did the bug occur?
+      options:
+        - "area: audio"
+        - "area: asr"
+        - "area: vad"
+        - "area: pipeline"
+        - "area: postprocess"
+        - "area: paste"
+        - "area: storage"
+        - "area: ipc"
+        - "area: cli"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - "macOS (Apple Silicon)"
+        - "macOS (Intel)"
+        - "Linux (Ubuntu/Debian)"
+        - "Linux (Arch/Fedora)"
+        - "Windows 11"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: 🐛 Bug Description
+      description: Clear explanation of what went wrong.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 🔁 Reproduction Steps
+      description: Exact steps to reproduce.
+      placeholder: |
+        1. Start daemon `cadenced`
+        2. Execute `cadence dictate`
+        3. Speak `...`
+        4. Error occurs
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 🎯 Expected Behavior
+      description: What should have happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 📋 Logs & Terminal Output
+      description: Paste any error messages or trace logs.
+      render: shell
