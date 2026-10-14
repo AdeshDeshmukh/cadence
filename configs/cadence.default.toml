@@ -1,0 +1,18 @@
+[audio]
+sample_rate = 16000
+channels = 1
+
+[asr]
+engine = "whisper"
+model = "large-v3-turbo"
+language = "auto"
+streaming = true
+
+[postprocess]
+filler_removal = true
+punctuation = true
+custom_words = true
+
+[privacy]
+network_mode = "local_only"
+telemetry = false

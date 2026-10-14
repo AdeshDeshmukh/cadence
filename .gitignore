@@ -1,0 +1,36 @@
+# Root binaries
+/cadence
+/cadenced
+*.exe
+*.dll
+*.dylib
+*.so
+
+# Architecture / OS
+.DS_Store
+Thumbs.db
+
+# Test & coverage
+coverage.out
+coverage.html
+*.test
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+
+# IDE & editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local runtime data
+*.log
+scratch/
