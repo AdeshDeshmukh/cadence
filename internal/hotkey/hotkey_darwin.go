@@ -3,19 +3,18 @@
 package hotkey
 
 import (
-	"context"
 	"sync"
 	"time"
 )
 
-// DarwinListener provides global hotkey listening on macOS.
+// DarwinListener provides hotkey event delivery on macOS.
+// It delivers hotkey events via Emit to the dictation pipeline.
 type DarwinListener struct {
 	mu          sync.RWMutex
 	shortcut    string
 	mode        Mode
 	isListening bool
 	eventChan   chan Event
-	cancelFn    context.CancelFunc
 }
 
 // NewDarwinListener creates a macOS hotkey listener.
@@ -32,7 +31,7 @@ func NewDarwinListener(shortcut string, mode Mode) *DarwinListener {
 	}
 }
 
-// Start begins listening for global hotkeys.
+// Start prepares the event channel for hotkey event delivery.
 func (d *DarwinListener) Start() (<-chan Event, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -43,13 +42,10 @@ func (d *DarwinListener) Start() (<-chan Event, error) {
 
 	d.isListening = true
 	d.eventChan = make(chan Event, 32)
-	_, cancel := context.WithCancel(context.Background())
-	d.cancelFn = cancel
-
 	return d.eventChan, nil
 }
 
-// Stop terminates the global hotkey listener.
+// Stop terminates the hotkey listener and closes the event channel.
 func (d *DarwinListener) Stop() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -59,10 +55,6 @@ func (d *DarwinListener) Stop() error {
 	}
 
 	d.isListening = false
-	if d.cancelFn != nil {
-		d.cancelFn()
-		d.cancelFn = nil
-	}
 	if d.eventChan != nil {
 		close(d.eventChan)
 		d.eventChan = nil

@@ -106,7 +106,7 @@ func ParseShortcut(str string) (Shortcut, error) {
 	for _, rawPart := range parts {
 		part := strings.TrimSpace(rawPart)
 		if part == "" {
-			return Shortcut{}, ErrInvalidShortcut
+			return Shortcut{}, fmt.Errorf("%w: empty key segment in %q", ErrInvalidShortcut, str)
 		}
 		switch strings.ToLower(part) {
 		case "cmd", "command":
