@@ -253,14 +253,14 @@ type spAudioOutput struct {
 }
 
 type spAudioItem struct {
-	Name            string      `json:"_name"`
-	InputChannels   int         `json:"coreaudio_device_input"`
-	OutputChannels  int         `json:"coreaudio_device_output"`
-	SampleRate      interface{} `json:"coreaudio_device_srate"`
-	DefaultInput    string      `json:"coreaudio_default_audio_input_device"`
-	DefaultOutput   string      `json:"coreaudio_default_audio_output_device"`
-	Manufacturer    string      `json:"coreaudio_device_manufacturer"`
-	TransportType   string      `json:"coreaudio_device_transport"`
+	Name           string      `json:"_name"`
+	InputChannels  int         `json:"coreaudio_device_input"`
+	OutputChannels int         `json:"coreaudio_device_output"`
+	SampleRate     interface{} `json:"coreaudio_device_srate"`
+	DefaultInput   string      `json:"coreaudio_default_audio_input_device"`
+	DefaultOutput  string      `json:"coreaudio_default_audio_output_device"`
+	Manufacturer   string      `json:"coreaudio_device_manufacturer"`
+	TransportType  string      `json:"coreaudio_device_transport"`
 }
 
 func (d *DarwinAudioEnumerator) EnumerateDevices() ([]Device, error) {
