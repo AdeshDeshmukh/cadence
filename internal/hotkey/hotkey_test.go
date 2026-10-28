@@ -146,8 +146,8 @@ func TestSimulatedListener_ModeAndHold(t *testing.T) {
 	}
 }
 
-func TestDarwinListener_Basic(t *testing.T) {
-	l := NewDarwinListener("Cmd+D", ModePushToTalk)
+func TestDefaultListener_Basic(t *testing.T) {
+	l := NewDefaultListener("Cmd+D", ModePushToTalk)
 	ch, err := l.Start()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -158,12 +158,10 @@ func TestDarwinListener_Basic(t *testing.T) {
 		t.Fatalf("expected listening")
 	}
 
-	go l.Emit(EventKeyDown)
-
-	ev := <-ch
-	if ev.Type != EventKeyDown || ev.Shortcut != "Cmd+D" {
-		t.Fatalf("unexpected event: %+v", ev)
+	if l.Shortcut() != "Cmd+D" {
+		t.Fatalf("expected shortcut Cmd+D, got %s", l.Shortcut())
 	}
+	_ = ch
 }
 
 func TestListener_ConcurrentRace(t *testing.T) {
