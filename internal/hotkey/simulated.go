@@ -90,23 +90,20 @@ func (s *SimulatedListener) Shortcut() string {
 // Emit sends a simulated hotkey event to the listener's channel.
 func (s *SimulatedListener) Emit(eventType EventType) bool {
 	s.mu.RLock()
-	ch := s.eventChan
-	listening := s.isListening
-	sc := s.shortcut
-	s.mu.RUnlock()
+	defer s.mu.RUnlock()
 
-	if !listening || ch == nil {
+	if !s.isListening || s.eventChan == nil {
 		return false
 	}
 
 	ev := Event{
 		Type:      eventType,
 		Timestamp: time.Now(),
-		Shortcut:  sc,
+		Shortcut:  s.shortcut,
 	}
 
 	select {
-	case ch <- ev:
+	case s.eventChan <- ev:
 		return true
 	default:
 		return false

@@ -42,7 +42,10 @@ func TestParseShortcut_Invalid(t *testing.T) {
 	badInputs := []string{
 		"",
 		"   ",
-		"A+B", // Multiple primary keys without modifiers
+		"A+B",
+		"Cmd++Space",
+		"Cmd+",
+		"+Space",
 	}
 
 	for _, input := range badInputs {
@@ -170,43 +173,41 @@ func TestListener_ConcurrentRace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to start: %v", err)
 	}
-	defer l.Stop()
 
-	var wg sync.WaitGroup
+	var wgEmitters sync.WaitGroup
 	numGoroutines := 8
 	iterations := 100
 
-	// Concurrent emitters
+	var wgReader sync.WaitGroup
+	wgReader.Add(1)
+	go func() {
+		defer wgReader.Done()
+		for range ch {
+		}
+	}()
+
 	for i := 0; i < numGoroutines; i++ {
-		wg.Add(1)
+		wgEmitters.Add(1)
 		go func(id int) {
-			defer wg.Done()
+			defer wgEmitters.Done()
 			for j := 0; j < iterations; j++ {
 				l.Emit(EventKeyDown)
 				_ = l.IsListening()
 				_ = l.Mode()
 				_ = l.Shortcut()
-				if j%20 == 0 {
+				switch j % 20 {
+				case 0:
 					l.SetMode(ModeToggle)
-				} else if j%20 == 10 {
+				case 10:
 					l.SetMode(ModePushToTalk)
 				}
 			}
 		}(i)
 	}
 
-	// Concurrent reader
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		received := 0
-		for range ch {
-			received++
-			if received >= 200 {
-				return
-			}
-		}
-	}()
-
-	wg.Wait()
+	wgEmitters.Wait()
+	if err := l.Stop(); err != nil {
+		t.Fatalf("unexpected error stopping listener: %v", err)
+	}
+	wgReader.Wait()
 }

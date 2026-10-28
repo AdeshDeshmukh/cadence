@@ -102,23 +102,20 @@ func (d *DarwinListener) Shortcut() string {
 // Emit sends an event to the listener channel (used by native taps or tests).
 func (d *DarwinListener) Emit(eventType EventType) bool {
 	d.mu.RLock()
-	ch := d.eventChan
-	listening := d.isListening
-	sc := d.shortcut
-	d.mu.RUnlock()
+	defer d.mu.RUnlock()
 
-	if !listening || ch == nil {
+	if !d.isListening || d.eventChan == nil {
 		return false
 	}
 
 	ev := Event{
 		Type:      eventType,
 		Timestamp: time.Now(),
-		Shortcut:  sc,
+		Shortcut:  d.shortcut,
 	}
 
 	select {
-	case ch <- ev:
+	case d.eventChan <- ev:
 		return true
 	default:
 		return false
