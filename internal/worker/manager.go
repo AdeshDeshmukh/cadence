@@ -279,6 +279,7 @@ func (m *Manager) readLoop(stdout io.ReadCloser, cmd *exec.Cmd) {
 func (m *Manager) supervise() {
 	delay := m.cfg.InitialRestartDelay
 	restarts := 0
+	lastSpawn := time.Now()
 
 	for {
 		select {
@@ -289,6 +290,11 @@ func (m *Manager) supervise() {
 			if m.stopped {
 				m.mu.Unlock()
 				return
+			}
+
+			if time.Since(lastSpawn) > 10*time.Second {
+				restarts = 0
+				delay = m.cfg.InitialRestartDelay
 			}
 
 			if restarts >= m.cfg.MaxRestarts {
@@ -311,7 +317,16 @@ func (m *Manager) supervise() {
 
 			m.mu.Lock()
 			if !m.stopped {
-				_ = m.spawnLocked()
+				if err := m.spawnLocked(); err != nil {
+					if restarts < m.cfg.MaxRestarts {
+						select {
+						case m.restartCh <- struct{}{}:
+						default:
+						}
+					}
+				} else {
+					lastSpawn = time.Now()
+				}
 			}
 			m.mu.Unlock()
 		}
@@ -320,12 +335,35 @@ func (m *Manager) supervise() {
 
 func (m *Manager) Ping(ctx context.Context) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.pingLocked(ctx)
+	if m.stopped {
+		m.mu.Unlock()
+		return ErrWorkerStopped
+	}
+	if m.cmd == nil || m.stdin == nil {
+		m.mu.Unlock()
+		return ErrWorkerCrashed
+	}
+	stdin := m.stdin
+	m.mu.Unlock()
+
+	resp, err := m.executeCall(ctx, stdin, "ping", nil)
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("ping rejected: %s", resp.Error)
+	}
+	return nil
 }
 
 func (m *Manager) pingLocked(ctx context.Context) error {
-	resp, err := m.callLocked(ctx, "ping", nil)
+	if m.stopped {
+		return ErrWorkerStopped
+	}
+	if m.cmd == nil || m.stdin == nil {
+		return ErrWorkerCrashed
+	}
+	resp, err := m.executeCall(ctx, m.stdin, "ping", nil)
 	if err != nil {
 		return err
 	}
@@ -337,18 +375,21 @@ func (m *Manager) pingLocked(ctx context.Context) error {
 
 func (m *Manager) Call(ctx context.Context, method string, params map[string]any) (*Response, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.callLocked(ctx, method, params)
-}
-
-func (m *Manager) callLocked(ctx context.Context, method string, params map[string]any) (*Response, error) {
 	if m.stopped {
+		m.mu.Unlock()
 		return nil, ErrWorkerStopped
 	}
 	if m.cmd == nil || m.stdin == nil {
+		m.mu.Unlock()
 		return nil, ErrWorkerCrashed
 	}
+	stdin := m.stdin
+	m.mu.Unlock()
 
+	return m.executeCall(ctx, stdin, method, params)
+}
+
+func (m *Manager) executeCall(ctx context.Context, stdin io.Writer, method string, params map[string]any) (*Response, error) {
 	reqID := fmt.Sprintf("req-%d", atomic.AddUint64(&m.seq, 1))
 
 	reqData := make(map[string]any)
@@ -371,7 +412,7 @@ func (m *Manager) callLocked(ctx context.Context, method string, params map[stri
 	m.pendingMu.Unlock()
 
 	m.writeMu.Lock()
-	_, writeErr := m.stdin.Write(line)
+	_, writeErr := stdin.Write(line)
 	m.writeMu.Unlock()
 
 	if writeErr != nil {

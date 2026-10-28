@@ -16,7 +16,7 @@ SUPPORTED_MODELS: dict[str, dict[str, str]] = {
     "small.en": {"repo": "Systran/faster-whisper-small.en"},
     "medium": {"repo": "Systran/faster-whisper-medium"},
     "medium.en": {"repo": "Systran/faster-whisper-medium.en"},
-    "large-v3-turbo": {"repo": "deepdml/faster-whisper-large-v3-turbo"},
+    "large-v3-turbo": {"repo": "deepdml/faster-whisper-large-v3-turbo-ct2"},
 }
 
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "cadence" / "models"
@@ -42,15 +42,21 @@ def download_model(
     model_dir = target_dir / model_name
 
     try:
-        from faster_whisper import download_model as fw_download
-        model_path = fw_download(
-            SUPPORTED_MODELS[model_name]["repo"],
-            output_dir=str(model_dir),
-        )
-        return Path(model_path)
-    except ImportError:
-        model_dir.mkdir(parents=True, exist_ok=True)
-        return model_dir
+        from faster_whisper import download_model as fw_download  # type: ignore[import-untyped, import-not-found]
+    except ImportError as exc:
+        raise RuntimeError(
+            "faster-whisper is required for model downloading: pip install faster-whisper"
+        ) from exc
+
+    model_path = fw_download(
+        SUPPORTED_MODELS[model_name]["repo"],
+        output_dir=str(model_dir),
+    )
+    result_path = Path(model_path)
+    if not result_path.exists():
+        raise FileNotFoundError(f"Model download failed: directory not found at {result_path}")
+
+    return result_path
 
 def main() -> None:
     parser = argparse.ArgumentParser(

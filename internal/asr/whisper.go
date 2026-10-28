@@ -34,9 +34,15 @@ func (w *WhisperEngine) Transcribe(
 		return Result{Final: true}, nil
 	}
 
-	sampleRate := chunks[0].SampleRate
-	if sampleRate <= 0 {
-		sampleRate = 16000
+	sampleRate := 16000
+	for _, chunk := range chunks {
+		if chunk.SampleRate > 0 {
+			if sampleRate == 16000 {
+				sampleRate = chunk.SampleRate
+			} else if chunk.SampleRate != sampleRate {
+				return Result{}, fmt.Errorf("inconsistent sample rate across chunks: %d vs %d", chunk.SampleRate, sampleRate)
+			}
+		}
 	}
 
 	totalSamples := 0
@@ -51,6 +57,11 @@ func (w *WhisperEngine) Transcribe(
 
 	if len(samples) == 0 {
 		return Result{Final: true}, nil
+	}
+
+	if sampleRate != 16000 {
+		samples = resampleLinear(samples, sampleRate, 16000)
+		sampleRate = 16000
 	}
 
 	params := map[string]any{
@@ -111,6 +122,9 @@ func (w *WhisperEngine) Stream(
 		defer close(out)
 
 		var chunks []audio.Chunk
+		bufferedSamples := 0
+		const maxBufferedSamples = 16000 * 5
+
 		for {
 			select {
 			case <-ctx.Done():
@@ -135,9 +149,44 @@ func (w *WhisperEngine) Stream(
 					return
 				}
 				chunks = append(chunks, chunk)
+				bufferedSamples += len(chunk.Samples)
+				if bufferedSamples >= maxBufferedSamples {
+					if res, err := w.Transcribe(ctx, chunks); err == nil && res.Text != "" {
+						select {
+						case out <- PartialResult{
+							Text:     res.Text,
+							Language: res.Language,
+							Final:    false,
+						}:
+						case <-ctx.Done():
+							return
+						}
+					}
+					bufferedSamples = 0
+				}
 			}
 		}
 	}()
 
 	return out, nil
+}
+
+func resampleLinear(samples []float32, inRate, outRate int) []float32 {
+	if inRate == outRate || inRate <= 0 || outRate <= 0 || len(samples) == 0 {
+		return samples
+	}
+	ratio := float64(inRate) / float64(outRate)
+	outLen := int(float64(len(samples)) / ratio)
+	resampled := make([]float32, outLen)
+	for i := 0; i < outLen; i++ {
+		origPos := float64(i) * ratio
+		idx := int(origPos)
+		frac := float32(origPos - float64(idx))
+		if idx+1 < len(samples) {
+			resampled[i] = samples[idx]*(1-frac) + samples[idx+1]*frac
+		} else if idx < len(samples) {
+			resampled[i] = samples[idx]
+		}
+	}
+	return resampled
 }
