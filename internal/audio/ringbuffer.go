@@ -47,7 +47,7 @@ func NewPreRollBuffer(duration time.Duration, sampleRate int) *RingBuffer {
 	}
 	samples := int(duration.Seconds() * float64(sampleRate))
 	if samples <= 0 {
-		samples = sampleRate / 2
+		samples = 1
 	}
 	return NewRingBuffer(samples)
 }
