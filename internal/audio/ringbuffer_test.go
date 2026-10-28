@@ -36,6 +36,11 @@ func TestNewPreRollBuffer(t *testing.T) {
 	if rbDefault.Capacity() != expectedDefault {
 		t.Fatalf("expected default capacity %d, got %d", expectedDefault, rbDefault.Capacity())
 	}
+
+	small := NewPreRollBuffer(time.Nanosecond, 2)
+	if small.Capacity() != 1 {
+		t.Fatalf("expected small-duration fallback capacity 1, got %d", small.Capacity())
+	}
 }
 
 func TestRingBuffer_Write_Read_Basic(t *testing.T) {
@@ -192,6 +197,18 @@ func TestRingBuffer_Peek_Reset(t *testing.T) {
 	if !reflect.DeepEqual(peeked, expected) {
 		t.Fatalf("expected %v, got %v", expected, peeked)
 	}
+	if got := rb.Peek(10); !reflect.DeepEqual(got, []float32{1, 2, 3}) {
+		t.Fatalf("expected all available samples, got %v", got)
+	}
+
+	wrapped := NewRingBuffer(5)
+	wrapped.Write([]float32{1, 2, 3, 4})
+	wrapped.Read(make([]float32, 3))
+	wrapped.Write([]float32{5, 6, 7})
+	if got := wrapped.Peek(4); !reflect.DeepEqual(got, []float32{4, 5, 6, 7}) {
+		t.Fatalf("expected wrapped samples, got %v", got)
+	}
+
 	// Peek should not change length
 	if rb.Len() != 3 {
 		t.Fatalf("expected len 3, got %d", rb.Len())
@@ -204,6 +221,9 @@ func TestRingBuffer_Peek_Reset(t *testing.T) {
 	rb.Reset()
 	if rb.Len() != 0 {
 		t.Fatalf("expected len 0 after Reset, got %d", rb.Len())
+	}
+	if rb.Peek(1) != nil {
+		t.Fatalf("expected nil peek from empty buffer")
 	}
 	if rb.ReadAll() != nil {
 		t.Fatalf("expected nil from ReadAll on empty buffer")
