@@ -64,12 +64,10 @@ func (c *ClipboardKeystrokeTier) Paste(text string) error {
 		originalClipboard, _ = GetSystemClipboard()
 	}
 
-	// 1. Set text into system clipboard
 	if err := SetSystemClipboard(text); err != nil {
 		return fmt.Errorf("failed to copy text to clipboard: %w", err)
 	}
 
-	// 2. Synthesize Cmd+V keystroke
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
@@ -78,7 +76,6 @@ func (c *ClipboardKeystrokeTier) Paste(text string) error {
 		return fmt.Errorf("synthesize Cmd+V keystroke failed: %w", err)
 	}
 
-	// 3. Restore previous clipboard if requested
 	if c.PreserveClipboard && originalClipboard != "" {
 		go func(restoreText string) {
 			time.Sleep(c.RestoreDelay)
