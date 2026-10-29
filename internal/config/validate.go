@@ -10,6 +10,13 @@ func Validate(c Config) error {
 		return fmt.Errorf("audio.channels must be positive")
 	}
 
+	if c.Hotkey.Shortcut == "" {
+		return fmt.Errorf("hotkey.shortcut must not be empty")
+	}
+	if c.Hotkey.Mode != "" && c.Hotkey.Mode != "push_to_talk" && c.Hotkey.Mode != "toggle" {
+		return fmt.Errorf("invalid hotkey.mode")
+	}
+
 	switch c.Privacy.NetworkMode {
 	case "local_only", "hybrid", "cloud":
 		return nil

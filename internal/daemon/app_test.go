@@ -1,0 +1,261 @@
+package daemon
+
+import (
+	"context"
+	"net"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/AdeshDeshmukh/cadence/internal/asr"
+	"github.com/AdeshDeshmukh/cadence/internal/audio"
+	"github.com/AdeshDeshmukh/cadence/internal/config"
+	"github.com/AdeshDeshmukh/cadence/internal/hotkey"
+	"github.com/AdeshDeshmukh/cadence/internal/ipc"
+	"github.com/AdeshDeshmukh/cadence/internal/paste"
+	"github.com/AdeshDeshmukh/cadence/internal/postprocess"
+	"github.com/AdeshDeshmukh/cadence/internal/storage"
+)
+
+type recordingPaster struct {
+	lastText string
+}
+
+func (r *recordingPaster) Paste(text string) (paste.Result, error) {
+	r.lastText = text
+	return paste.Result{Method: "mock", Success: true}, nil
+}
+
+type testLiveCapture struct {
+	mu     sync.Mutex
+	stopCh chan struct{}
+	chunk  audio.Chunk
+}
+
+func (t *testLiveCapture) Devices() ([]audio.Device, error) { return nil, nil }
+
+func (t *testLiveCapture) Start() (<-chan audio.Chunk, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.stopCh = make(chan struct{})
+	ch := make(chan audio.Chunk, 10)
+	ch <- t.chunk
+	go func(stopCh chan struct{}) {
+		<-stopCh
+		close(ch)
+	}(t.stopCh)
+	return ch, nil
+}
+
+func (t *testLiveCapture) Stop() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.stopCh != nil {
+		select {
+		case <-t.stopCh:
+		default:
+			close(t.stopCh)
+		}
+	}
+	return nil
+}
+
+func setupTestApp(t *testing.T, mode hotkey.Mode) (*App, *hotkey.SimulatedListener, *recordingPaster, storage.Store, net.Listener) {
+	t.Helper()
+
+	cfg := config.Default()
+	cfg.Hotkey.Mode = string(mode)
+
+	simHotkey := hotkey.NewSimulatedListener("Cmd+Shift+Space", mode)
+	paster := &recordingPaster{}
+	store := storage.NewMemory()
+
+	chunk := audio.Chunk{
+		Samples:    []float32{0.1, 0.2, -0.1},
+		SampleRate: 16000,
+		Timestamp:  time.Now(),
+	}
+	capture := &testLiveCapture{chunk: chunk}
+	engine := asr.MockEngine{Text: "um hello world period"}
+
+	pipe := postprocess.New(
+		postprocess.NewFillerRemoval(),
+		postprocess.NewPunctuation(),
+	)
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to bind test listener: %v", err)
+	}
+
+	app := NewApp(
+		cfg,
+		WithCapture(capture),
+		WithASR(engine),
+		WithPaster(paster),
+		WithStore(store),
+		WithPostprocess(pipe),
+		WithHotkeyListener(simHotkey),
+		WithIPCListener(l),
+	)
+
+	return app, simHotkey, paster, store, l
+}
+
+func TestApp_LifecycleAndIPC(t *testing.T) {
+	app, _, _, _, listener := setupTestApp(t, hotkey.ModePushToTalk)
+	defer listener.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := app.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer app.Stop()
+
+	client := ipc.Client{
+		Network: "tcp",
+		Address: listener.Addr().String(),
+	}
+
+	callCtx, callCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer callCancel()
+
+	resp, err := client.Call(callCtx, "ping", nil)
+	if err != nil {
+		t.Fatalf("call ping failed: %v", err)
+	}
+	if resp != "pong" {
+		t.Fatalf("expected 'pong', got %v", resp)
+	}
+
+	statusResp, err := client.Call(callCtx, "status", nil)
+	if err != nil {
+		t.Fatalf("call status failed: %v", err)
+	}
+	statusMap, ok := statusResp.(map[string]any)
+	if !ok || statusMap["status"] != "running" {
+		t.Fatalf("unexpected status response: %v", statusResp)
+	}
+}
+
+func TestApp_PushToTalkSession(t *testing.T) {
+	app, simHotkey, paster, store, listener := setupTestApp(t, hotkey.ModePushToTalk)
+	defer listener.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := app.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer app.Stop()
+
+	// Simulate KeyDown (user presses hotkey)
+	simHotkey.Emit(hotkey.EventKeyDown)
+
+	// Verify recording state
+	time.Sleep(50 * time.Millisecond)
+	if !app.IsRecording() {
+		t.Fatal("expected app to be recording after press")
+	}
+
+	// Simulate KeyUp (user releases hotkey)
+	simHotkey.Emit(hotkey.EventKeyUp)
+
+	// Wait for pipeline execution (capture stop -> asr -> postprocess -> paste)
+	time.Sleep(200 * time.Millisecond)
+
+	if app.IsRecording() {
+		t.Fatal("expected app to stop recording after release")
+	}
+
+	if paster.lastText != "Hello world." {
+		t.Fatalf("expected pasted text 'Hello world.', got %q", paster.lastText)
+	}
+
+	history, err := store.ListTranscripts(10)
+	if err != nil {
+		t.Fatalf("ListTranscripts failed: %v", err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("expected 1 saved transcript, got %d", len(history))
+	}
+	if history[0].Text != "Hello world." {
+		t.Fatalf("expected stored text 'Hello world.', got %q", history[0].Text)
+	}
+}
+
+func TestApp_ToggleSession(t *testing.T) {
+	app, simHotkey, paster, _, listener := setupTestApp(t, hotkey.ModeToggle)
+	defer listener.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := app.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer app.Stop()
+
+	// First press: start recording
+	simHotkey.Emit(hotkey.EventKeyDown)
+	time.Sleep(50 * time.Millisecond)
+	if !app.IsRecording() {
+		t.Fatal("expected recording on first toggle press")
+	}
+
+	// Second press: stop recording
+	simHotkey.Emit(hotkey.EventKeyDown)
+	time.Sleep(200 * time.Millisecond)
+
+	if app.IsRecording() {
+		t.Fatal("expected stopped recording on second toggle press")
+	}
+
+	if paster.lastText != "Hello world." {
+		t.Fatalf("expected pasted text 'Hello world.', got %q", paster.lastText)
+	}
+}
+
+func TestApp_IPCDictateCommands(t *testing.T) {
+	app, _, _, _, listener := setupTestApp(t, hotkey.ModePushToTalk)
+	defer listener.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := app.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer app.Stop()
+
+	client := ipc.Client{
+		Network: "tcp",
+		Address: listener.Addr().String(),
+	}
+
+	callCtx, callCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer callCancel()
+
+	// Trigger programmatic start
+	_, err := client.Call(callCtx, "dictate_start", nil)
+	if err != nil {
+		t.Fatalf("dictate_start failed: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if !app.IsRecording() {
+		t.Fatal("expected recording after dictate_start")
+	}
+
+	// Trigger programmatic stop
+	_, err = client.Call(callCtx, "dictate_stop", nil)
+	if err != nil {
+		t.Fatalf("dictate_stop failed: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if app.IsRecording() {
+		t.Fatal("expected stopped recording after dictate_stop")
+	}
+}
