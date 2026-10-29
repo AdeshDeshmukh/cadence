@@ -304,3 +304,73 @@ func TestApp_EarlyKeyUpBeforeCaptureReady(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+func TestApp_IPCHistoryAndVocabulary(t *testing.T) {
+	app, _, _, store, listener := setupTestApp(t, hotkey.ModePushToTalk)
+	defer listener.Close()
+
+	_ = store.SaveTranscript(storage.Transcript{
+		ID:        "history-1",
+		RawText:   "history test",
+		Text:      "History test.",
+		CreatedAt: time.Now().UTC(),
+	})
+	_ = store.SetVocabulary(storage.VocabularyEntry{
+		Spoken:    "k8s",
+		Canonical: "Kubernetes",
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := app.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer app.Stop()
+
+	client := ipc.Client{
+		Network: "tcp",
+		Address: listener.Addr().String(),
+	}
+
+	callCtx, callCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer callCancel()
+
+	histResp, err := client.Call(callCtx, "history", map[string]any{"limit": float64(5)})
+	if err != nil {
+		t.Fatalf("call history failed: %v", err)
+	}
+	histList, ok := histResp.([]any)
+	if !ok || len(histList) == 0 {
+		t.Fatalf("expected non-empty history list, got: %v", histResp)
+	}
+
+	vocabResp, err := client.Call(callCtx, "vocabulary", nil)
+	if err != nil {
+		t.Fatalf("call vocabulary failed: %v", err)
+	}
+	vocabList, ok := vocabResp.([]any)
+	if !ok || len(vocabList) == 0 {
+		t.Fatalf("expected non-empty vocabulary list, got: %v", vocabResp)
+	}
+}
+
+func TestApp_PersistentSQLite(t *testing.T) {
+	cfg := config.Default()
+	cfg.Storage.DBPath = ":memory:"
+
+	app := NewApp(cfg)
+	if app.store == nil {
+		t.Fatal("expected non-nil store in App with SQLite config")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := app.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	if err := app.Stop(); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+}

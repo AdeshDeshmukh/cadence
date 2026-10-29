@@ -12,6 +12,7 @@ type Config struct {
 	Privacy PrivacyConfig
 	Hotkey  HotkeyConfig
 	IPC     IPCConfig
+	Storage StorageConfig
 }
 
 type AudioConfig struct {
@@ -46,6 +47,20 @@ type IPCConfig struct {
 	SocketPath string
 }
 
+type StorageConfig struct {
+	DBPath string
+}
+
+func DefaultDBPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return filepath.Join(os.TempDir(), "cadence.db")
+	}
+	cadenceDir := filepath.Join(home, ".cache", "cadence")
+	_ = os.MkdirAll(cadenceDir, 0755)
+	return filepath.Join(cadenceDir, "cadence.db")
+}
+
 func DefaultSocketPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
@@ -78,6 +93,9 @@ func Default() Config {
 		},
 		IPC: IPCConfig{
 			SocketPath: DefaultSocketPath(),
+		},
+		Storage: StorageConfig{
+			DBPath: DefaultDBPath(),
 		},
 	}
 }
