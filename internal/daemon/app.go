@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -111,7 +112,15 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 	}
 
 	if a.store == nil {
-		a.store = storage.NewMemory()
+		if cfg.Storage.DBPath != "" {
+			if s, err := storage.Open(cfg.Storage.DBPath); err == nil {
+				a.store = s
+			} else {
+				a.store = storage.NewMemory()
+			}
+		} else {
+			a.store = storage.NewMemory()
+		}
 	}
 
 	if a.process == nil {
@@ -367,6 +376,16 @@ func (a *App) Handle(_ context.Context, req ipc.Request) (any, error) {
 	case "dictate_stop":
 		a.stopDictation()
 		return map[string]any{"ok": true, "action": "stopped"}, nil
+	case "history":
+		limit := 20
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if limVal, ok := params["limit"].(float64); ok && limVal > 0 {
+				limit = int(limVal)
+			}
+		}
+		return a.store.ListTranscripts(limit)
+	case "vocabulary":
+		return a.store.Vocabulary()
 	default:
 		return nil, errors.New("unknown method: " + req.Method)
 	}
@@ -411,6 +430,12 @@ func (a *App) Stop() error {
 
 	if a.workerMgr != nil {
 		_ = a.workerMgr.Stop()
+	}
+
+	if a.store != nil {
+		if c, ok := a.store.(io.Closer); ok {
+			_ = c.Close()
+		}
 	}
 
 	a.wg.Wait()

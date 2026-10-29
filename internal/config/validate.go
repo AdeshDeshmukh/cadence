@@ -17,6 +17,10 @@ func Validate(c Config) error {
 		return fmt.Errorf("invalid hotkey.mode")
 	}
 
+	if c.Storage.DBPath == "" {
+		return fmt.Errorf("storage.db_path must not be empty")
+	}
+
 	switch c.Privacy.NetworkMode {
 	case "local_only", "hybrid", "cloud":
 		return nil

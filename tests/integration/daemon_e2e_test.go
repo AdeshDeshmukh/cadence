@@ -3,6 +3,7 @@ package integration_test
 import (
 	"context"
 	"net"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -159,6 +160,78 @@ func TestDaemonEndToEndDictation(t *testing.T) {
 	}
 	if history[0].Text != expectedText {
 		t.Fatalf("expected stored transcript %q, got %q", expectedText, history[0].Text)
+	}
+}
+
+func TestDaemonEndToEnd_SQLitePersistence(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "e2e_test.db")
+	store, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("storage.Open failed: %v", err)
+	}
+	defer store.Close()
+
+	cfg := config.Default()
+	cfg.Storage.DBPath = dbPath
+	cfg.Hotkey.Mode = "push_to_talk"
+
+	simHotkey := hotkey.NewSimulatedListener("Cmd+Shift+Space", hotkey.ModePushToTalk)
+	paster := &mockPaster{}
+
+	mockEngine := asr.MockEngine{Text: "Persisted to sqlite test"}
+	simCapture := &controllableCapture{
+		chunk: audio.Chunk{
+			Samples: make([]float32, 1600),
+		},
+	}
+
+	ipcListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("create test listener failed: %v", err)
+	}
+	defer ipcListener.Close()
+
+	app := daemon.NewApp(
+		cfg,
+		WithCapture(simCapture),
+		WithASR(mockEngine),
+		WithPaster(paster),
+		WithStore(store),
+		WithHotkeyListener(simHotkey),
+		WithIPCListener(ipcListener),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := app.Start(ctx); err != nil {
+		t.Fatalf("daemon Start failed: %v", err)
+	}
+	defer app.Stop()
+
+	// Trigger push to talk dictation
+	simHotkey.Emit(hotkey.EventKeyDown)
+	time.Sleep(50 * time.Millisecond)
+	simHotkey.Emit(hotkey.EventKeyUp)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for app.IsRecording() {
+		if time.Now().After(deadline) {
+			t.Fatal("expected recording to finish")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Verify transcript was saved in SQLite
+	history, err := store.ListTranscripts(10)
+	if err != nil {
+		t.Fatalf("ListTranscripts failed: %v", err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("expected 1 transcript stored in SQLite, got %d", len(history))
+	}
+	if history[0].Text != "Persisted to sqlite test." {
+		t.Errorf("expected stored text %q, got %q", "Persisted to sqlite test.", history[0].Text)
 	}
 }
 
