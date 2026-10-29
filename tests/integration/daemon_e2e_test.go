@@ -134,11 +134,13 @@ func TestDaemonEndToEndDictation(t *testing.T) {
 	// 3. User releases hotkey (Push-to-Talk KeyUp)
 	simHotkey.Emit(hotkey.EventKeyUp)
 
-	// Wait for pipeline completion (transcribe -> postprocess -> paste cascade -> store)
-	time.Sleep(200 * time.Millisecond)
-
-	if app.IsRecording() {
-		t.Fatal("expected daemon to stop recording after hotkey release")
+	// Wait for pipeline completion (transcribe -> postprocess -> paste cascade -> store).
+	deadline := time.Now().Add(5 * time.Second)
+	for app.IsRecording() {
+		if time.Now().After(deadline) {
+			t.Fatal("expected daemon to stop recording after hotkey release")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	// 4. Verify text was post-processed and pasted

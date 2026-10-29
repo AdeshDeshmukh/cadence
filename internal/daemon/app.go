@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/AdeshDeshmukh/cadence/internal/asr"
 	"github.com/AdeshDeshmukh/cadence/internal/audio"
@@ -40,11 +41,12 @@ type App struct {
 	ipcSocket    string
 	ownsListener bool
 
-	mu           sync.Mutex
-	isRecording  bool
-	activeCancel context.CancelFunc
-	activeSess   *pipeline.Session
-	sessionSeq   uint64
+	mu            sync.Mutex
+	isRecording   bool
+	stopRequested bool
+	activeCancel  context.CancelFunc
+	activeSess    *pipeline.Session
+	sessionSeq    uint64
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -260,6 +262,7 @@ func (a *App) startDictation() {
 	}
 
 	a.isRecording = true
+	a.stopRequested = false
 	sessID := fmt.Sprintf("sess-%d", atomic.AddUint64(&a.sessionSeq, 1))
 	sess := pipeline.NewSession(sessID)
 	a.activeSess = sess
@@ -274,9 +277,33 @@ func (a *App) startDictation() {
 		defer func() {
 			a.mu.Lock()
 			a.isRecording = false
+			a.stopRequested = false
 			a.activeCancel = nil
 			a.activeSess = nil
 			a.mu.Unlock()
+		}()
+
+		stopWatcher := make(chan struct{})
+		defer close(stopWatcher)
+		go func() {
+			ticker := time.NewTicker(5 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopWatcher:
+					return
+				case <-sessCtx.Done():
+					return
+				case <-ticker.C:
+					a.mu.Lock()
+					stopped := a.stopRequested
+					a.mu.Unlock()
+					if stopped {
+						_ = a.capture.Stop()
+						return
+					}
+				}
+			}
 		}()
 
 		pc := postprocess.Context{
@@ -288,11 +315,12 @@ func (a *App) startDictation() {
 
 func (a *App) stopDictation() {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-
 	if !a.isRecording {
+		a.mu.Unlock()
 		return
 	}
+	a.stopRequested = true
+	a.mu.Unlock()
 
 	_ = a.capture.Stop()
 }

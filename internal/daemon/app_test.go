@@ -18,12 +18,21 @@ import (
 )
 
 type recordingPaster struct {
+	mu       sync.Mutex
 	lastText string
 }
 
 func (r *recordingPaster) Paste(text string) (paste.Result, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.lastText = text
 	return paste.Result{Method: "mock", Success: true}, nil
+}
+
+func (r *recordingPaster) Text() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastText
 }
 
 type testLiveCapture struct {
@@ -165,14 +174,16 @@ func TestApp_PushToTalkSession(t *testing.T) {
 	simHotkey.Emit(hotkey.EventKeyUp)
 
 	// Wait for pipeline execution (capture stop -> asr -> postprocess -> paste)
-	time.Sleep(200 * time.Millisecond)
-
-	if app.IsRecording() {
-		t.Fatal("expected app to stop recording after release")
+	deadline := time.Now().Add(5 * time.Second)
+	for app.IsRecording() {
+		if time.Now().After(deadline) {
+			t.Fatal("expected app to stop recording after release")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
-	if paster.lastText != "Hello world." {
-		t.Fatalf("expected pasted text 'Hello world.', got %q", paster.lastText)
+	if paster.Text() != "Hello world." {
+		t.Fatalf("expected pasted text 'Hello world.', got %q", paster.Text())
 	}
 
 	history, err := store.ListTranscripts(10)
@@ -208,14 +219,16 @@ func TestApp_ToggleSession(t *testing.T) {
 
 	// Second press: stop recording
 	simHotkey.Emit(hotkey.EventKeyDown)
-	time.Sleep(200 * time.Millisecond)
-
-	if app.IsRecording() {
-		t.Fatal("expected stopped recording on second toggle press")
+	deadline := time.Now().Add(5 * time.Second)
+	for app.IsRecording() {
+		if time.Now().After(deadline) {
+			t.Fatal("expected stopped recording on second toggle press")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
-	if paster.lastText != "Hello world." {
-		t.Fatalf("expected pasted text 'Hello world.', got %q", paster.lastText)
+	if paster.Text() != "Hello world." {
+		t.Fatalf("expected pasted text 'Hello world.', got %q", paster.Text())
 	}
 }
 
@@ -254,8 +267,40 @@ func TestApp_IPCDictateCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dictate_stop failed: %v", err)
 	}
-	time.Sleep(100 * time.Millisecond)
-	if app.IsRecording() {
-		t.Fatal("expected stopped recording after dictate_stop")
+	deadline := time.Now().Add(5 * time.Second)
+	for app.IsRecording() {
+		if time.Now().After(deadline) {
+			t.Fatal("expected stopped recording after dictate_stop")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestApp_EarlyKeyUpBeforeCaptureReady(t *testing.T) {
+	app, simHotkey, paster, _, listener := setupTestApp(t, hotkey.ModePushToTalk)
+	defer listener.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := app.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer app.Stop()
+
+	// Emit key down and immediate key up before capture goroutine starts
+	simHotkey.Emit(hotkey.EventKeyDown)
+	simHotkey.Emit(hotkey.EventKeyUp)
+
+	// Bounded wait to ensure session completes without hanging indefinitely
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if paster.Text() == "Hello world." {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected pasted text 'Hello world.', got %q", paster.Text())
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
