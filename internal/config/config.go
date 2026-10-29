@@ -1,10 +1,17 @@
 package config
 
+import (
+	"os"
+	"path/filepath"
+)
+
 type Config struct {
 	Audio   AudioConfig
 	ASR     ASRConfig
 	Post    PostConfig
 	Privacy PrivacyConfig
+	Hotkey  HotkeyConfig
+	IPC     IPCConfig
 }
 
 type AudioConfig struct {
@@ -30,11 +37,30 @@ type PrivacyConfig struct {
 	Telemetry   bool
 }
 
+type HotkeyConfig struct {
+	Shortcut string
+	Mode     string
+}
+
+type IPCConfig struct {
+	SocketPath string
+}
+
+func DefaultSocketPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return filepath.Join(os.TempDir(), "cadenced.sock")
+	}
+	cadenceDir := filepath.Join(home, ".cache", "cadence")
+	_ = os.MkdirAll(cadenceDir, 0755)
+	return filepath.Join(cadenceDir, "cadenced.sock")
+}
+
 func Default() Config {
 	return Config{
 		Audio: AudioConfig{SampleRate: 16000, Channels: 1},
 		ASR: ASRConfig{
-			Engine: "mock", Model: "whisper",
+			Engine: "whisper", Model: "base.en",
 			Language: "auto", Streaming: false,
 		},
 		Post: PostConfig{
@@ -45,6 +71,13 @@ func Default() Config {
 		Privacy: PrivacyConfig{
 			NetworkMode: "local_only",
 			Telemetry:   false,
+		},
+		Hotkey: HotkeyConfig{
+			Shortcut: "Cmd+Shift+Space",
+			Mode:     "push_to_talk",
+		},
+		IPC: IPCConfig{
+			SocketPath: DefaultSocketPath(),
 		},
 	}
 }

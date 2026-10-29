@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -64,7 +65,7 @@ func (k *Kernel) Run(
 	}
 
 transcribe:
-	if err := k.capture.Stop(); err != nil {
+	if err := k.capture.Stop(); err != nil && !errors.Is(err, audio.ErrNotCapturing) {
 		session.SetState(Failed)
 		return fmt.Errorf("stop capture: %w", err)
 	}
