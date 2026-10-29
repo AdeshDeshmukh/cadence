@@ -60,8 +60,12 @@ func Open(path string) (*SQLite, error) {
 	}
 
 	dsn := path
-	if path != ":memory:" && !strings.Contains(path, "?") {
-		dsn = path + "?_pragma=busy_timeout(5000)"
+	if path != ":memory:" {
+		sep := "?"
+		if strings.Contains(path, "?") {
+			sep = "&"
+		}
+		dsn = fmt.Sprintf("%s%s_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL&_foreign_keys=ON&_txlock=immediate", path, sep)
 	}
 
 	db, err := sql.Open("sqlite", dsn)
@@ -71,20 +75,11 @@ func Open(path string) (*SQLite, error) {
 
 	db.SetMaxOpenConns(1)
 
-	if path != ":memory:" {
-		if _, err := db.Exec("PRAGMA journal_mode=WAL;"); err != nil {
+	if path == ":memory:" {
+		if _, err := db.Exec("PRAGMA foreign_keys=ON;"); err != nil {
 			_ = db.Close()
-			return nil, fmt.Errorf("enable wal mode: %w", err)
+			return nil, fmt.Errorf("enable foreign keys: %w", err)
 		}
-		if _, err := db.Exec("PRAGMA synchronous=NORMAL;"); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("set synchronous normal: %w", err)
-		}
-	}
-
-	if _, err := db.Exec("PRAGMA foreign_keys=ON;"); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("enable foreign keys: %w", err)
 	}
 
 	s := &SQLite{db: db}
@@ -96,6 +91,14 @@ func Open(path string) (*SQLite, error) {
 	return s, nil
 }
 
+func isBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "busy") || strings.Contains(msg, "locked")
+}
+
 func (s *SQLite) migrate() error {
 	const initMigrationsTable = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -104,39 +107,56 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 	applied_at TIMESTAMP NOT NULL
 );
 `
-	if _, err := s.db.Exec(initMigrationsTable); err != nil {
+	var lastErr error
+	const maxRetries = 50
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		err := s.tryMigrate(initMigrationsTable)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if isBusy(err) && attempt < maxRetries-1 {
+			time.Sleep(time.Duration(10+attempt*10) * time.Millisecond)
+			continue
+		}
 		return err
+	}
+	return lastErr
+}
+
+func (s *SQLite) tryMigrate(initMigrationsTable string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin migration transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(initMigrationsTable); err != nil {
+		return fmt.Errorf("init schema_migrations: %w", err)
 	}
 
 	for _, m := range migrations {
 		var count int
-		err := s.db.QueryRow("SELECT COUNT(1) FROM schema_migrations WHERE version = ?", m.version).Scan(&count)
+		err := tx.QueryRow("SELECT COUNT(1) FROM schema_migrations WHERE version = ?", m.version).Scan(&count)
 		if err != nil {
-			return err
+			return fmt.Errorf("check migration %d: %w", m.version, err)
 		}
 		if count > 0 {
 			continue
 		}
 
-		tx, err := s.db.Begin()
-		if err != nil {
-			return err
-		}
-
 		if _, err := tx.Exec(m.up); err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("migration %d (%s): %w", m.version, m.name, err)
 		}
 
 		if _, err := tx.Exec("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
 			m.version, m.name, time.Now().UTC()); err != nil {
-			_ = tx.Rollback()
-			return err
+			return fmt.Errorf("record migration %d: %w", m.version, err)
 		}
+	}
 
-		if err := tx.Commit(); err != nil {
-			return err
-		}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migrations: %w", err)
 	}
 
 	return nil

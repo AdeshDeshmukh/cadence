@@ -56,7 +56,7 @@ func DefaultDBPath() string {
 	if err != nil || home == "" {
 		return filepath.Join(os.TempDir(), "cadence.db")
 	}
-	cadenceDir := filepath.Join(home, ".cache", "cadence")
+	cadenceDir := filepath.Join(home, ".cadence")
 	_ = os.MkdirAll(cadenceDir, 0755)
 	return filepath.Join(cadenceDir, "cadence.db")
 }

@@ -187,6 +187,37 @@ func TestSQLite_ConcurrentAccess(t *testing.T) {
 	}
 }
 
+func TestSQLite_ConcurrentMigrations(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "concurrent_migrate.db")
+
+	var wg sync.WaitGroup
+	instances := 8
+	errs := make(chan error, instances)
+
+	for i := 0; i < instances; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s, err := Open(dbPath)
+			if err != nil {
+				errs <- err
+				return
+			}
+			_ = s.Close()
+		}()
+	}
+
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Open failed: %v", err)
+		}
+	}
+}
+
 func testStoreContracts(t *testing.T, s Store) {
 	t.Helper()
 
