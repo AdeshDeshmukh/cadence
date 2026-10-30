@@ -38,6 +38,12 @@ func TestValidateConfigErrors(t *testing.T) {
 		t.Fatal("expected error for empty storage db_path")
 	}
 
+	cfg = config.Default()
+	cfg.VAD.Engine = "invalid_vad"
+	if err := config.Validate(cfg); err == nil {
+		t.Fatal("expected error for invalid vad engine")
+	}
+
 	if path := config.DefaultDBPath(); path == "" {
 		t.Fatal("expected non-empty default storage db path")
 	}

@@ -21,6 +21,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/pipeline"
 	"github.com/AdeshDeshmukh/cadence/internal/postprocess"
 	"github.com/AdeshDeshmukh/cadence/internal/storage"
+	"github.com/AdeshDeshmukh/cadence/internal/vad"
 	"github.com/AdeshDeshmukh/cadence/internal/worker"
 	"github.com/AdeshDeshmukh/cadence/pkg/version"
 )
@@ -35,6 +36,7 @@ type App struct {
 	paster    paste.Paster
 	store     storage.Store
 	process   *postprocess.Pipeline
+	detector  vad.Detector
 	hotkey    hotkey.Listener
 
 	ipcServer    *ipc.Server
@@ -80,6 +82,11 @@ func WithStore(s storage.Store) Option {
 // WithPostprocess sets a custom text post-processing pipeline.
 func WithPostprocess(p *postprocess.Pipeline) Option {
 	return func(a *App) { a.process = p }
+}
+
+// WithDetector sets a custom voice activity detector.
+func WithDetector(d vad.Detector) Option {
+	return func(a *App) { a.detector = d }
 }
 
 // WithHotkeyListener sets a custom hotkey listener.
@@ -138,6 +145,25 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 			steps = append(steps, postprocess.NewPunctuation())
 		}
 		a.process = postprocess.New(steps...)
+	}
+
+	if a.detector == nil {
+		if cfg.VAD.Engine == "silero" && a.workerMgr != nil {
+			hangover := time.Duration(cfg.VAD.HangoverMs) * time.Millisecond
+			if hangover <= 0 {
+				hangover = 500 * time.Millisecond
+			}
+			thresh := cfg.VAD.Threshold
+			if thresh <= 0 {
+				thresh = 0.5
+			}
+			a.detector = vad.NewSileroDetector(a.workerMgr,
+				vad.WithSileroThreshold(thresh),
+				vad.WithSileroHangover(hangover),
+			)
+		} else {
+			a.detector = vad.NewAdaptive()
+		}
 	}
 
 	if a.paster == nil {
@@ -355,6 +381,11 @@ func (a *App) ActiveSession() *pipeline.Session {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.activeSess
+}
+
+// Detector returns the active voice activity detector.
+func (a *App) Detector() vad.Detector {
+	return a.detector
 }
 
 // Handle routes incoming IPC client commands.
