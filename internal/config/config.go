@@ -31,6 +31,7 @@ type PostConfig struct {
 	FillerRemoval bool
 	Punctuation   bool
 	Vocabulary    bool
+	ITN           bool
 }
 
 type PrivacyConfig struct {
@@ -82,6 +83,7 @@ func Default() Config {
 			FillerRemoval: true,
 			Punctuation:   true,
 			Vocabulary:    true,
+			ITN:           true,
 		},
 		Privacy: PrivacyConfig{
 			NetworkMode: "local_only",

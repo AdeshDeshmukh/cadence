@@ -124,11 +124,20 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 	}
 
 	if a.process == nil {
-		a.process = postprocess.New(
-			postprocess.NewFillerRemoval(),
-			postprocess.NewVocabulary(),
-			postprocess.NewPunctuation(),
-		)
+		var steps []postprocess.Step
+		if cfg.Post.FillerRemoval {
+			steps = append(steps, postprocess.NewFillerRemoval())
+		}
+		if cfg.Post.Vocabulary {
+			steps = append(steps, postprocess.NewVocabulary())
+		}
+		if cfg.Post.ITN {
+			steps = append(steps, postprocess.NewITN())
+		}
+		if cfg.Post.Punctuation {
+			steps = append(steps, postprocess.NewPunctuation())
+		}
+		a.process = postprocess.New(steps...)
 	}
 
 	if a.paster == nil {
