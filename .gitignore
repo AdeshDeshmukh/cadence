@@ -1,6 +1,7 @@
 # Root binaries
 /cadence
 /cadenced
+bin/
 *.exe
 *.dll
 *.dylib

@@ -3,18 +3,18 @@ package storage
 import "time"
 
 type Transcript struct {
-	ID          string
-	RawText     string
-	Text        string
-	Language    string
-	Mode        string
-	Application string
-	CreatedAt   time.Time
+	ID          string    `json:"id"`
+	RawText     string    `json:"raw_text"`
+	Text        string    `json:"text"`
+	Language    string    `json:"language"`
+	Mode        string    `json:"mode"`
+	Application string    `json:"application"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 type VocabularyEntry struct {
-	Spoken    string
-	Canonical string
+	Spoken    string `json:"spoken"`
+	Canonical string `json:"canonical"`
 }
 
 type Store interface {
