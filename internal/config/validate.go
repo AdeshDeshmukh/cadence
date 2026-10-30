@@ -21,6 +21,10 @@ func Validate(c Config) error {
 		return fmt.Errorf("storage.db_path must not be empty")
 	}
 
+	if c.VAD.Engine != "" && c.VAD.Engine != "silero" && c.VAD.Engine != "adaptive" && c.VAD.Engine != "energy" {
+		return fmt.Errorf("invalid vad.engine")
+	}
+
 	switch c.Privacy.NetworkMode {
 	case "local_only", "hybrid", "cloud":
 		return nil

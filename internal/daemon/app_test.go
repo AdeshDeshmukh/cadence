@@ -15,6 +15,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/paste"
 	"github.com/AdeshDeshmukh/cadence/internal/postprocess"
 	"github.com/AdeshDeshmukh/cadence/internal/storage"
+	"github.com/AdeshDeshmukh/cadence/internal/vad"
 )
 
 type recordingPaster struct {
@@ -372,5 +373,25 @@ func TestApp_PersistentSQLite(t *testing.T) {
 	}
 	if err := app.Stop(); err != nil {
 		t.Fatalf("Stop failed: %v", err)
+	}
+}
+
+func TestApp_VADDetector(t *testing.T) {
+	// 1. Adaptive detector default fallback
+	cfg := config.Default()
+	cfg.VAD.Engine = "adaptive"
+	app := NewApp(cfg)
+	if app.Detector() == nil {
+		t.Fatal("expected non-nil VAD detector")
+	}
+	if _, ok := app.Detector().(*vad.AdaptiveDetector); !ok {
+		t.Fatalf("expected *vad.AdaptiveDetector, got %T", app.Detector())
+	}
+
+	// 2. Custom detector option
+	custom := vad.NewSimple(0.02)
+	appCustom := NewApp(cfg, WithDetector(custom))
+	if appCustom.Detector() != custom {
+		t.Fatal("expected custom detector to be assigned")
 	}
 }

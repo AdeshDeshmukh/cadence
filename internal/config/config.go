@@ -8,6 +8,7 @@ import (
 type Config struct {
 	Audio   AudioConfig
 	ASR     ASRConfig
+	VAD     VADConfig
 	Post    PostConfig
 	Privacy PrivacyConfig
 	Hotkey  HotkeyConfig
@@ -25,6 +26,12 @@ type ASRConfig struct {
 	Model     string
 	Language  string
 	Streaming bool
+}
+
+type VADConfig struct {
+	Engine     string
+	Threshold  float64
+	HangoverMs int
 }
 
 type PostConfig struct {
@@ -78,6 +85,11 @@ func Default() Config {
 		ASR: ASRConfig{
 			Engine: "whisper", Model: "base.en",
 			Language: "auto", Streaming: false,
+		},
+		VAD: VADConfig{
+			Engine:     "silero",
+			Threshold:  0.5,
+			HangoverMs: 500,
 		},
 		Post: PostConfig{
 			FillerRemoval: true,
