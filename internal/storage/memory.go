@@ -63,6 +63,13 @@ func (m *Memory) Vocabulary() ([]VocabularyEntry, error) {
 	return out, nil
 }
 
+func (m *Memory) DeleteVocabulary(spoken string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.vocabulary, spoken)
+	return nil
+}
+
 func (m *Memory) SaveRecovery(r SessionRecovery) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

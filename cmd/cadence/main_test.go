@@ -69,6 +69,18 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 				UpdatedAt: time.Now().UTC(),
 			},
 		}, nil
+	case "vocab_list":
+		return []storage.VocabularyEntry{
+			{Spoken: "grpc", Canonical: "gRPC"},
+		}, nil
+	case "vocab_add":
+		return map[string]any{"ok": true}, nil
+	case "vocab_remove":
+		return map[string]any{"ok": true}, nil
+	case "vocab_import":
+		return map[string]any{"ok": true, "count": float64(2)}, nil
+	case "vocab_export":
+		return map[string]any{"ok": true, "content": "grpc = gRPC\n", "format": "txt"}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -268,5 +280,123 @@ func TestCLI_Recover_OfflineSQLiteFallback(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "power loss") {
 		t.Fatalf("expected error message in output, got: %s", out.String())
+	}
+}
+
+func TestCLI_Vocab(t *testing.T) {
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("cad_vocab_%d.sock", time.Now().UnixNano()))
+	cleanup := startMockDaemon(t, sockPath)
+	defer cleanup()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sockPath,
+	}
+	ctx := context.Background()
+	cfg := config.Default()
+	cfg.IPC.SocketPath = sockPath
+
+	var out bytes.Buffer
+
+	// 1. Vocab list
+	if err := cmdVocab(ctx, cfg, client, []string{"list"}, &out); err != nil {
+		t.Fatalf("cmdVocab list failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Custom Vocabulary") || !strings.Contains(out.String(), "grpc") {
+		t.Fatalf("unexpected vocab list output: %s", out.String())
+	}
+
+	// 2. Vocab add
+	out.Reset()
+	if err := cmdVocab(ctx, cfg, client, []string{"add", "k8s", "Kubernetes"}, &out); err != nil {
+		t.Fatalf("cmdVocab add failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Added vocabulary:") {
+		t.Fatalf("unexpected vocab add output: %s", out.String())
+	}
+
+	// 3. Vocab remove
+	out.Reset()
+	if err := cmdVocab(ctx, cfg, client, []string{"remove", "grpc"}, &out); err != nil {
+		t.Fatalf("cmdVocab remove failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Removed vocabulary:") {
+		t.Fatalf("unexpected vocab remove output: %s", out.String())
+	}
+
+	// 4. Vocab import
+	tmpFile := filepath.Join(t.TempDir(), "vocab.csv")
+	if err := os.WriteFile(tmpFile, []byte("spoken,canonical\na,b\nc,d\n"), 0644); err != nil {
+		t.Fatalf("write tmp vocab: %v", err)
+	}
+	out.Reset()
+	if err := cmdVocab(ctx, cfg, client, []string{"import", tmpFile}, &out); err != nil {
+		t.Fatalf("cmdVocab import failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Successfully imported 2 vocabulary entries") {
+		t.Fatalf("unexpected vocab import output: %s", out.String())
+	}
+
+	// 5. Vocab export
+	exportFile := filepath.Join(t.TempDir(), "export.txt")
+	out.Reset()
+	if err := cmdVocab(ctx, cfg, client, []string{"export", exportFile, "--format", "txt"}, &out); err != nil {
+		t.Fatalf("cmdVocab export failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Exported vocabulary to") {
+		t.Fatalf("unexpected vocab export output: %s", out.String())
+	}
+}
+
+func TestCLI_Vocab_OfflineFallback(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "fallback_vocab.db")
+
+	s, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := s.SetVocabulary(storage.VocabularyEntry{
+		Spoken:    "offline term",
+		Canonical: "Offline Canonical",
+	}); err != nil {
+		t.Fatalf("set vocab: %v", err)
+	}
+	_ = s.Close()
+
+	cfg := config.Default()
+	cfg.Storage.DBPath = dbPath
+	cfg.IPC.SocketPath = filepath.Join(dir, "nonexistent.sock")
+	client := ipc.Client{
+		Network: "unix",
+		Address: cfg.IPC.SocketPath,
+	}
+
+	var out bytes.Buffer
+	if err := cmdVocab(context.Background(), cfg, client, []string{"list"}, &out); err != nil {
+		t.Fatalf("cmdVocab list offline failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "offline term") || !strings.Contains(out.String(), "Offline Canonical") {
+		t.Fatalf("expected offline vocabulary in output, got: %s", out.String())
+	}
+
+	// Test offline add
+	out.Reset()
+	if err := cmdVocab(context.Background(), cfg, client, []string{"add", "new term", "New Canonical"}, &out); err != nil {
+		t.Fatalf("cmdVocab add offline failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Added vocabulary:") {
+		t.Fatalf("unexpected vocab add output: %s", out.String())
+	}
+
+	// Reopen database and verify both entries exist
+	s2, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen sqlite: %v", err)
+	}
+	defer s2.Close()
+	all, err := s2.Vocabulary()
+	if err != nil || len(all) != 2 {
+		t.Fatalf("expected 2 vocabulary entries in database, got: %+v, err: %v", all, err)
 	}
 }
