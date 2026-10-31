@@ -285,3 +285,105 @@ func testStoreContracts(t *testing.T, s Store) {
 		t.Errorf("expected alphabetical vocab order, got: %+v", vocab)
 	}
 }
+
+func TestSQLite_SessionRecovery(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer s.Close()
+
+	// Initial query should return nil
+	last, err := s.GetLastRecovery()
+	if err != nil {
+		t.Fatalf("GetLastRecovery failed: %v", err)
+	}
+	if last != nil {
+		t.Fatalf("expected nil recovery, got: %+v", last)
+	}
+
+	now := time.Now().UTC()
+
+	// Save uncommitted session with partial text
+	r1 := SessionRecovery{
+		ID:           "sess-rec-1",
+		State:        "cancelled",
+		PartialText:  "streaming partial text here",
+		RawText:      "streaming partial text here raw",
+		Text:         "Streaming partial text here.",
+		AudioSamples: 16000,
+		CreatedAt:    now.Add(-2 * time.Minute),
+		UpdatedAt:    now.Add(-2 * time.Minute),
+	}
+	if err := s.SaveRecovery(r1); err != nil {
+		t.Fatalf("SaveRecovery r1: %v", err)
+	}
+
+	// Save newer failed session
+	r2 := SessionRecovery{
+		ID:           "sess-rec-2",
+		State:        "failed",
+		PartialText:  "interrupted dictation",
+		RawText:      "",
+		Text:         "",
+		AudioSamples: 8000,
+		Error:        "asr worker timeout",
+		CreatedAt:    now.Add(-1 * time.Minute),
+		UpdatedAt:    now.Add(-1 * time.Minute),
+	}
+	if err := s.SaveRecovery(r2); err != nil {
+		t.Fatalf("SaveRecovery r2: %v", err)
+	}
+
+	// GetLastRecovery should return newest (r2)
+	last, err = s.GetLastRecovery()
+	if err != nil {
+		t.Fatalf("GetLastRecovery: %v", err)
+	}
+	if last == nil || last.ID != "sess-rec-2" {
+		t.Fatalf("expected r2 as last recovery, got: %+v", last)
+	}
+	if last.BestText() != "interrupted dictation" {
+		t.Errorf("expected BestText to be %q, got %q", "interrupted dictation", last.BestText())
+	}
+
+	// List recoveries
+	list, err := s.ListRecoveries(10)
+	if err != nil {
+		t.Fatalf("ListRecoveries: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("expected 2 recoveries, got %d", len(list))
+	}
+	if list[0].ID != "sess-rec-2" || list[1].ID != "sess-rec-1" {
+		t.Errorf("expected newest first order, got: %+v", list)
+	}
+
+	// Save completed session for r2 (should no longer appear in GetLastRecovery or ListRecoveries)
+	r2.State = "completed"
+	r2.UpdatedAt = now
+	if err := s.SaveRecovery(r2); err != nil {
+		t.Fatalf("SaveRecovery update r2: %v", err)
+	}
+
+	lastAfterComp, err := s.GetLastRecovery()
+	if err != nil {
+		t.Fatalf("GetLastRecovery after completed: %v", err)
+	}
+	if lastAfterComp == nil || lastAfterComp.ID != "sess-rec-1" {
+		t.Fatalf("expected r1 to be returned since r2 is completed, got: %+v", lastAfterComp)
+	}
+
+	// Delete recovery r1
+	if err := s.DeleteRecovery("sess-rec-1"); err != nil {
+		t.Fatalf("DeleteRecovery: %v", err)
+	}
+	lastAfterDel, err := s.GetLastRecovery()
+	if err != nil {
+		t.Fatalf("GetLastRecovery after delete: %v", err)
+	}
+	if lastAfterDel != nil {
+		t.Fatalf("expected nil after delete, got: %+v", lastAfterDel)
+	}
+}
+

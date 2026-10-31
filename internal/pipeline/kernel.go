@@ -41,10 +41,23 @@ func (k *Kernel) Run(
 	pc postprocess.Context,
 ) error {
 	session.SetState(Recording)
+	_ = k.store.SaveRecovery(storage.SessionRecovery{
+		ID:        session.ID,
+		State:     "uncommitted",
+		CreatedAt: session.StartedAt,
+		UpdatedAt: time.Now(),
+	})
 
 	chunksCh, err := k.capture.Start()
 	if err != nil {
 		session.SetState(Failed)
+		_ = k.store.SaveRecovery(storage.SessionRecovery{
+			ID:        session.ID,
+			State:     "failed",
+			Error:     err.Error(),
+			CreatedAt: session.StartedAt,
+			UpdatedAt: time.Now(),
+		})
 		return fmt.Errorf("capture: %w", err)
 	}
 
@@ -71,6 +84,30 @@ func (k *Kernel) Run(
 			streamWg.Wait()
 			_ = k.capture.Stop()
 			session.SetState(Cancelled)
+
+			totalSamples := 0
+			for _, chunk := range chunks {
+				totalSamples += len(chunk.Samples)
+			}
+			recText := session.GetPartial()
+			if recText == "" && len(chunks) > 0 {
+				quickCtx, quickCancel := context.WithTimeout(context.Background(), 2*time.Second)
+				if res, err := k.asr.Transcribe(quickCtx, chunks); err == nil && res.Text != "" {
+					recText = res.Text
+					session.RawText = res.Text
+				}
+				quickCancel()
+			}
+			_ = k.store.SaveRecovery(storage.SessionRecovery{
+				ID:           session.ID,
+				State:        "cancelled",
+				PartialText:  session.GetPartial(),
+				RawText:      session.RawText,
+				Text:         recText,
+				AudioSamples: totalSamples,
+				CreatedAt:    session.StartedAt,
+				UpdatedAt:    time.Now(),
+			})
 			return ctx.Err()
 
 		case chunk, ok := <-chunksCh:
@@ -90,8 +127,22 @@ func (k *Kernel) Run(
 	}
 
 transcribe:
+	totalSamples := 0
+	for _, chunk := range chunks {
+		totalSamples += len(chunk.Samples)
+	}
+
 	if err := k.capture.Stop(); err != nil && !errors.Is(err, audio.ErrNotCapturing) {
 		session.SetState(Failed)
+		_ = k.store.SaveRecovery(storage.SessionRecovery{
+			ID:           session.ID,
+			State:        "failed",
+			PartialText:  session.GetPartial(),
+			AudioSamples: totalSamples,
+			Error:        err.Error(),
+			CreatedAt:    session.StartedAt,
+			UpdatedAt:    time.Now(),
+		})
 		return fmt.Errorf("stop capture: %w", err)
 	}
 
@@ -100,6 +151,15 @@ transcribe:
 	result, err := k.asr.Transcribe(ctx, chunks)
 	if err != nil {
 		session.SetState(Failed)
+		_ = k.store.SaveRecovery(storage.SessionRecovery{
+			ID:           session.ID,
+			State:        "failed",
+			PartialText:  session.GetPartial(),
+			AudioSamples: totalSamples,
+			Error:        err.Error(),
+			CreatedAt:    session.StartedAt,
+			UpdatedAt:    time.Now(),
+		})
 		return fmt.Errorf("asr: %w", err)
 	}
 
@@ -116,6 +176,17 @@ transcribe:
 			Mode: pc.Mode, Application: pc.Application,
 			CreatedAt: time.Now(),
 		})
+		_ = k.store.SaveRecovery(storage.SessionRecovery{
+			ID:           session.ID,
+			State:        "failed",
+			PartialText:  session.GetPartial(),
+			RawText:      session.RawText,
+			Text:         session.FinalText,
+			AudioSamples: totalSamples,
+			Error:        fmt.Sprintf("paste: %v", err),
+			CreatedAt:    session.StartedAt,
+			UpdatedAt:    time.Now(),
+		})
 		session.SetState(Failed)
 		return fmt.Errorf("paste: %w", err)
 	}
@@ -129,6 +200,17 @@ transcribe:
 		session.SetState(Failed)
 		return fmt.Errorf("store: %w", err)
 	}
+
+	_ = k.store.SaveRecovery(storage.SessionRecovery{
+		ID:           session.ID,
+		State:        "completed",
+		PartialText:  session.GetPartial(),
+		RawText:      session.RawText,
+		Text:         session.FinalText,
+		AudioSamples: totalSamples,
+		CreatedAt:    session.StartedAt,
+		UpdatedAt:    time.Now(),
+	})
 
 	session.SetState(Complete)
 	return nil
