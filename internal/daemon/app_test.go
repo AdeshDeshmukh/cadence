@@ -460,3 +460,83 @@ func TestApp_IPCRecovery(t *testing.T) {
 		t.Fatalf("expected 1 recovery in list, got: %v", listRes)
 	}
 }
+
+func TestApp_IPCVocabularyManagement(t *testing.T) {
+	app, _, _, _, listener := setupTestApp(t, hotkey.ModePushToTalk)
+	defer listener.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := app.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer app.Stop()
+
+	client := ipc.Client{
+		Network: "tcp",
+		Address: listener.Addr().String(),
+	}
+
+	callCtx, callCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer callCancel()
+
+	// 1. Add vocabulary entry
+	_, err := client.Call(callCtx, "vocab_add", map[string]any{
+		"spoken":    "k eight s",
+		"canonical": "Kubernetes",
+	})
+	if err != nil {
+		t.Fatalf("vocab_add failed: %v", err)
+	}
+
+	// 2. List vocabulary
+	listRes, err := client.Call(callCtx, "vocab_list", nil)
+	if err != nil {
+		t.Fatalf("vocab_list failed: %v", err)
+	}
+	list, ok := listRes.([]any)
+	if !ok || len(list) != 1 {
+		t.Fatalf("expected 1 vocab entry, got: %v", listRes)
+	}
+
+	// 3. Export vocabulary as CSV
+	exportRes, err := client.Call(callCtx, "vocab_export", map[string]any{"format": "csv"})
+	if err != nil {
+		t.Fatalf("vocab_export failed: %v", err)
+	}
+	expMap, ok := exportRes.(map[string]any)
+	if !ok || expMap["content"] == "" {
+		t.Fatalf("expected non-empty export content, got: %v", exportRes)
+	}
+
+	// 4. Import additional entries from JSON
+	jsonContent := `[{"spoken": "docker compose", "canonical": "docker-compose"}]`
+	importRes, err := client.Call(callCtx, "vocab_import", map[string]any{
+		"content": jsonContent,
+		"format":  "json",
+	})
+	if err != nil {
+		t.Fatalf("vocab_import failed: %v", err)
+	}
+	impMap, ok := importRes.(map[string]any)
+	if !ok || impMap["count"] != float64(1) {
+		t.Fatalf("expected 1 imported entry, got: %v", importRes)
+	}
+
+	// 5. Remove original entry
+	_, err = client.Call(callCtx, "vocab_remove", map[string]any{"spoken": "k eight s"})
+	if err != nil {
+		t.Fatalf("vocab_remove failed: %v", err)
+	}
+
+	// 6. List should only contain docker compose now
+	listResAfter, err := client.Call(callCtx, "vocab_list", nil)
+	if err != nil {
+		t.Fatalf("vocab_list after remove failed: %v", err)
+	}
+	listAfter, ok := listResAfter.([]any)
+	if !ok || len(listAfter) != 1 {
+		t.Fatalf("expected 1 entry after removal, got: %v", listResAfter)
+	}
+}

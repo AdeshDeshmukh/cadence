@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -350,8 +352,18 @@ func (a *App) startDictation() {
 			}
 		}()
 
+		vocabMap := make(map[string]string)
+		if a.store != nil {
+			if entries, err := a.store.Vocabulary(); err == nil {
+				for _, e := range entries {
+					vocabMap[e.Spoken] = e.Canonical
+				}
+			}
+		}
+
 		pc := postprocess.Context{
-			Mode: "dictation",
+			Mode:       "dictation",
+			Vocabulary: vocabMap,
 		}
 		_ = a.kernel.Run(sessCtx, sess, pc)
 	}()
@@ -452,8 +464,66 @@ func (a *App) Handle(_ context.Context, req ipc.Request) (any, error) {
 			}
 		}
 		return a.store.ListRecoveries(limit)
-	case "vocabulary":
+	case "vocabulary", "vocab_list":
 		return a.store.Vocabulary()
+	case "vocab_add":
+		params, ok := req.Params.(map[string]any)
+		if !ok || params == nil {
+			return nil, errors.New("missing parameters for vocab_add")
+		}
+		spoken, _ := params["spoken"].(string)
+		canonical, _ := params["canonical"].(string)
+		if strings.TrimSpace(spoken) == "" || strings.TrimSpace(canonical) == "" {
+			return nil, errors.New("spoken and canonical terms must not be empty")
+		}
+		if err := a.store.SetVocabulary(storage.VocabularyEntry{
+			Spoken:    spoken,
+			Canonical: canonical,
+		}); err != nil {
+			return nil, fmt.Errorf("set vocabulary: %w", err)
+		}
+		return map[string]any{"ok": true, "spoken": spoken, "canonical": canonical}, nil
+
+	case "vocab_remove", "vocab_delete":
+		params, ok := req.Params.(map[string]any)
+		if !ok || params == nil {
+			return nil, errors.New("missing parameters for vocab_remove")
+		}
+		spoken, _ := params["spoken"].(string)
+		if strings.TrimSpace(spoken) == "" {
+			return nil, errors.New("spoken term must not be empty")
+		}
+		if err := a.store.DeleteVocabulary(spoken); err != nil {
+			return nil, fmt.Errorf("delete vocabulary: %w", err)
+		}
+		return map[string]any{"ok": true, "spoken": spoken}, nil
+
+	case "vocab_import":
+		params, ok := req.Params.(map[string]any)
+		if !ok || params == nil {
+			return nil, errors.New("missing parameters for vocab_import")
+		}
+		content, _ := params["content"].(string)
+		format, _ := params["format"].(string)
+		count, err := storage.ImportVocabulary(a.store, strings.NewReader(content), format)
+		if err != nil {
+			return nil, fmt.Errorf("import vocabulary: %w", err)
+		}
+		return map[string]any{"ok": true, "count": count}, nil
+
+	case "vocab_export":
+		format := "json"
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if f, ok := params["format"].(string); ok && f != "" {
+				format = f
+			}
+		}
+		var buf bytes.Buffer
+		if err := storage.ExportVocabulary(a.store, format, &buf); err != nil {
+			return nil, fmt.Errorf("export vocabulary: %w", err)
+		}
+		return map[string]any{"ok": true, "format": format, "content": buf.String()}, nil
+
 	default:
 		return nil, errors.New("unknown method: " + req.Method)
 	}

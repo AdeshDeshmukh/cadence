@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/AdeshDeshmukh/cadence/internal/config"
@@ -28,6 +30,7 @@ Commands:
   dictate [start|stop] Start or stop a live dictation session
   history [limit]    List recent saved dictation transcripts
   recover [flags]    Retrieve text from last cancelled or failed session
+  vocab <subcommand> Manage custom vocabulary (list, add, remove, import, export)
   config [show|path] Inspect configuration and system file paths
   doctor             Perform diagnostics on system, daemon, and storage
   version            Print the version of cadence
@@ -94,6 +97,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "recover":
 		if err := cmdRecover(ctx, cfg, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "vocab", "vocabulary":
+		if err := cmdVocab(ctx, cfg, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -399,6 +409,235 @@ func cmdRecoverLast(ctx context.Context, cfg config.Config, client ipc.Client, s
 		} else {
 			fmt.Fprintln(out, "  Action:   Copied to system clipboard")
 		}
+	}
+
+	return nil
+}
+
+func cmdVocab(ctx context.Context, cfg config.Config, client ipc.Client, args []string, out io.Writer) error {
+	action := "list"
+	var subArgs []string
+	if len(args) > 0 {
+		action = args[0]
+		subArgs = args[1:]
+	}
+
+	switch action {
+	case "list":
+		return cmdVocabList(ctx, cfg, client, out)
+	case "add":
+		return cmdVocabAdd(ctx, cfg, client, subArgs, out)
+	case "remove", "delete", "rm":
+		return cmdVocabRemove(ctx, cfg, client, subArgs, out)
+	case "import":
+		return cmdVocabImport(ctx, cfg, client, subArgs, out)
+	case "export":
+		return cmdVocabExport(ctx, cfg, client, subArgs, out)
+	default:
+		return fmt.Errorf("unknown vocab subcommand: %s (usage: cadence vocab [list|add|remove|import|export])", action)
+	}
+}
+
+func cmdVocabList(ctx context.Context, cfg config.Config, client ipc.Client, out io.Writer) error {
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	var entries []storage.VocabularyEntry
+	res, err := client.Call(callCtx, "vocab_list", nil)
+	if err == nil {
+		raw, err := json.Marshal(res)
+		if err == nil {
+			_ = json.Unmarshal(raw, &entries)
+		}
+	} else {
+		// Offline storage fallback
+		s, err := storage.Open(cfg.Storage.DBPath)
+		if err != nil {
+			return fmt.Errorf("failed to reach daemon (%v) and cannot open database: %w", err, err)
+		}
+		defer s.Close()
+		entries, _ = s.Vocabulary()
+	}
+
+	if len(entries) == 0 {
+		fmt.Fprintln(out, "No custom vocabulary entries found.")
+		return nil
+	}
+
+	fmt.Fprintf(out, "Custom Vocabulary (%d entries):\n", len(entries))
+	for i, e := range entries {
+		fmt.Fprintf(out, "%2d. %-20s -> %s\n", i+1, e.Spoken, e.Canonical)
+	}
+	return nil
+}
+
+func cmdVocabAdd(ctx context.Context, cfg config.Config, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) < 2 {
+		return errors.New("usage: cadence vocab add <spoken phrase> <canonical text>")
+	}
+	spoken := args[0]
+	canonical := args[1]
+
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	_, err := client.Call(callCtx, "vocab_add", map[string]any{
+		"spoken":    spoken,
+		"canonical": canonical,
+	})
+	if err != nil {
+		// Offline fallback
+		s, dbErr := storage.Open(cfg.Storage.DBPath)
+		if dbErr != nil {
+			return fmt.Errorf("failed to update vocabulary via daemon (%v) and database: %w", err, dbErr)
+		}
+		defer s.Close()
+		if err := s.SetVocabulary(storage.VocabularyEntry{
+			Spoken:    spoken,
+			Canonical: canonical,
+		}); err != nil {
+			return fmt.Errorf("set vocabulary: %w", err)
+		}
+	}
+
+	fmt.Fprintf(out, "Added vocabulary: %q -> %q\n", spoken, canonical)
+	return nil
+}
+
+func cmdVocabRemove(ctx context.Context, cfg config.Config, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) < 1 {
+		return errors.New("usage: cadence vocab remove <spoken phrase>")
+	}
+	spoken := args[0]
+
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	_, err := client.Call(callCtx, "vocab_remove", map[string]any{
+		"spoken": spoken,
+	})
+	if err != nil {
+		// Offline fallback
+		s, dbErr := storage.Open(cfg.Storage.DBPath)
+		if dbErr != nil {
+			return fmt.Errorf("failed to remove vocabulary via daemon (%v) and database: %w", err, dbErr)
+		}
+		defer s.Close()
+		if err := s.DeleteVocabulary(spoken); err != nil {
+			return fmt.Errorf("delete vocabulary: %w", err)
+		}
+	}
+
+	fmt.Fprintf(out, "Removed vocabulary: %q\n", spoken)
+	return nil
+}
+
+func cmdVocabImport(ctx context.Context, cfg config.Config, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) < 1 {
+		return errors.New("usage: cadence vocab import <file> [--format csv|json|txt]")
+	}
+	filePath := args[0]
+	format := "auto"
+	for i := 1; i < len(args); i++ {
+		if (args[i] == "--format" || args[i] == "-f") && i+1 < len(args) {
+			format = args[i+1]
+			i++
+		}
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("read file %q: %w", filePath, err)
+	}
+
+	if format == "auto" {
+		format = storage.DetectFormat(filePath, data)
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	count := 0
+	res, err := client.Call(callCtx, "vocab_import", map[string]any{
+		"content": string(data),
+		"format":  format,
+	})
+	if err == nil {
+		if m, ok := res.(map[string]any); ok {
+			if cnt, ok := m["count"].(float64); ok {
+				count = int(cnt)
+			}
+		}
+	} else {
+		// Offline fallback
+		s, dbErr := storage.Open(cfg.Storage.DBPath)
+		if dbErr != nil {
+			return fmt.Errorf("failed to import via daemon (%v) and database: %w", err, dbErr)
+		}
+		defer s.Close()
+		cnt, err := storage.ImportVocabulary(s, strings.NewReader(string(data)), format)
+		if err != nil {
+			return fmt.Errorf("import vocabulary: %w", err)
+		}
+		count = cnt
+	}
+
+	fmt.Fprintf(out, "Successfully imported %d vocabulary entries from %s (%s format).\n", count, filePath, format)
+	return nil
+}
+
+func cmdVocabExport(ctx context.Context, cfg config.Config, client ipc.Client, args []string, out io.Writer) error {
+	var targetFile string
+	format := "json"
+
+	for i := 0; i < len(args); i++ {
+		if (args[i] == "--format" || args[i] == "-f") && i+1 < len(args) {
+			format = args[i+1]
+			i++
+		} else if !strings.HasPrefix(args[i], "-") && targetFile == "" {
+			targetFile = args[i]
+		}
+	}
+
+	if targetFile != "" {
+		detected := storage.DetectFormat(targetFile, nil)
+		if detected != "" {
+			format = detected
+		}
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	var content string
+	res, err := client.Call(callCtx, "vocab_export", map[string]any{"format": format})
+	if err == nil {
+		if m, ok := res.(map[string]any); ok {
+			if cnt, ok := m["content"].(string); ok {
+				content = cnt
+			}
+		}
+	} else {
+		// Offline fallback
+		s, dbErr := storage.Open(cfg.Storage.DBPath)
+		if dbErr != nil {
+			return fmt.Errorf("failed to export via daemon (%v) and database: %w", err, dbErr)
+		}
+		defer s.Close()
+		var buf bytes.Buffer
+		if err := storage.ExportVocabulary(s, format, &buf); err != nil {
+			return fmt.Errorf("export vocabulary: %w", err)
+		}
+		content = buf.String()
+	}
+
+	if targetFile != "" {
+		if err := os.WriteFile(targetFile, []byte(content), 0644); err != nil {
+			return fmt.Errorf("write export file %q: %w", targetFile, err)
+		}
+		fmt.Fprintf(out, "Exported vocabulary to %s (%s format).\n", targetFile, format)
+	} else {
+		fmt.Fprint(out, content)
 	}
 
 	return nil

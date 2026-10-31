@@ -46,6 +46,7 @@ type Store interface {
 	ListTranscripts(int) ([]Transcript, error)
 	SetVocabulary(VocabularyEntry) error
 	Vocabulary() ([]VocabularyEntry, error)
+	DeleteVocabulary(string) error
 	SaveRecovery(SessionRecovery) error
 	GetLastRecovery() (*SessionRecovery, error)
 	ListRecoveries(int) ([]SessionRecovery, error)
