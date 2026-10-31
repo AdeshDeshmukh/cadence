@@ -398,3 +398,65 @@ func TestApp_VADDetector(t *testing.T) {
 		t.Fatal("expected custom detector to be assigned")
 	}
 }
+
+func TestApp_IPCRecovery(t *testing.T) {
+	app, _, paster, store, listener := setupTestApp(t, hotkey.ModePushToTalk)
+	defer listener.Close()
+
+	now := time.Now().UTC()
+	_ = store.SaveRecovery(storage.SessionRecovery{
+		ID:          "rec-ipc-1",
+		State:       "cancelled",
+		PartialText: "important draft to recover",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := app.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer app.Stop()
+
+	client := ipc.Client{
+		Network: "tcp",
+		Address: listener.Addr().String(),
+	}
+
+	callCtx, callCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer callCancel()
+
+	// 1. Recover without paste
+	res, err := client.Call(callCtx, "recover", nil)
+	if err != nil {
+		t.Fatalf("call recover failed: %v", err)
+	}
+	recMap, ok := res.(map[string]any)
+	if !ok || recMap == nil {
+		t.Fatalf("expected recovery object, got: %v", res)
+	}
+	if recMap["id"] != "rec-ipc-1" {
+		t.Errorf("expected ID rec-ipc-1, got %v", recMap["id"])
+	}
+
+	// 2. Recover with paste
+	_, err = client.Call(callCtx, "recover", map[string]any{"paste": true})
+	if err != nil {
+		t.Fatalf("call recover with paste failed: %v", err)
+	}
+	if paster.Text() != "important draft to recover" {
+		t.Errorf("expected paster to have %q, got %q", "important draft to recover", paster.Text())
+	}
+
+	// 3. Recoveries list
+	listRes, err := client.Call(callCtx, "recoveries", map[string]any{"limit": float64(5)})
+	if err != nil {
+		t.Fatalf("call recoveries failed: %v", err)
+	}
+	recs, ok := listRes.([]any)
+	if !ok || len(recs) != 1 {
+		t.Fatalf("expected 1 recovery in list, got: %v", listRes)
+	}
+}

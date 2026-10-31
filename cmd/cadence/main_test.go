@@ -49,6 +49,26 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 				CreatedAt:   time.Now().UTC(),
 			},
 		}, nil
+	case "recover":
+		return storage.SessionRecovery{
+			ID:          "rec-mock-1",
+			State:       "cancelled",
+			PartialText: "mock recovered text",
+			RawText:     "mock recovered text raw",
+			Text:        "Mock recovered text.",
+			CreatedAt:   time.Now().UTC(),
+			UpdatedAt:   time.Now().UTC(),
+		}, nil
+	case "recoveries":
+		return []storage.SessionRecovery{
+			{
+				ID:        "rec-mock-1",
+				State:     "cancelled",
+				Text:      "Mock recovered text.",
+				CreatedAt: time.Now().UTC(),
+				UpdatedAt: time.Now().UTC(),
+			},
+		}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -189,5 +209,64 @@ func TestCLI_CommandsWithMockDaemon(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "running and healthy") {
 		t.Fatalf("expected doctor to find healthy daemon, got: %s", out.String())
+	}
+
+	// 5. Recover (last)
+	out.Reset()
+	if err := cmdRecover(ctx, cfg, client, []string{}, &out); err != nil {
+		t.Fatalf("cmdRecover failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Recovered Session:") || !strings.Contains(out.String(), "Mock recovered text.") {
+		t.Fatalf("unexpected recover output: %s", out.String())
+	}
+
+	// 6. Recover list
+	out.Reset()
+	if err := cmdRecover(ctx, cfg, client, []string{"--list"}, &out); err != nil {
+		t.Fatalf("cmdRecover --list failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Recent Recoverable Sessions") || !strings.Contains(out.String(), "rec-mock-1") {
+		t.Fatalf("unexpected recover list output: %s", out.String())
+	}
+}
+
+func TestCLI_Recover_OfflineSQLiteFallback(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "fallback.db")
+
+	s, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	now := time.Now().UTC()
+	if err := s.SaveRecovery(storage.SessionRecovery{
+		ID:          "rec-offline-1",
+		State:       "failed",
+		PartialText: "offline recovery draft",
+		Error:       "power loss",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("save recovery: %v", err)
+	}
+	_ = s.Close()
+
+	cfg := config.Default()
+	cfg.Storage.DBPath = dbPath
+	cfg.IPC.SocketPath = filepath.Join(dir, "nonexistent.sock")
+	client := ipc.Client{
+		Network: "unix",
+		Address: cfg.IPC.SocketPath,
+	}
+
+	var out bytes.Buffer
+	if err := cmdRecover(context.Background(), cfg, client, []string{}, &out); err != nil {
+		t.Fatalf("cmdRecover with offline fallback failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "rec-offline-1") || !strings.Contains(out.String(), "offline recovery draft") {
+		t.Fatalf("expected offline recovery text in output, got: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "power loss") {
+		t.Fatalf("expected error message in output, got: %s", out.String())
 	}
 }

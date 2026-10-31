@@ -427,6 +427,31 @@ func (a *App) Handle(_ context.Context, req ipc.Request) (any, error) {
 			}
 		}
 		return a.store.ListTranscripts(limit)
+	case "recover":
+		rec, err := a.store.GetLastRecovery()
+		if err != nil {
+			return nil, fmt.Errorf("get last recovery: %w", err)
+		}
+		if rec == nil {
+			return nil, nil
+		}
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if shouldPaste, _ := params["paste"].(bool); shouldPaste {
+				best := rec.BestText()
+				if best != "" && a.paster != nil {
+					_, _ = a.paster.Paste(best)
+				}
+			}
+		}
+		return rec, nil
+	case "recoveries":
+		limit := 20
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if limVal, ok := params["limit"].(float64); ok && limVal > 0 {
+				limit = int(limVal)
+			}
+		}
+		return a.store.ListRecoveries(limit)
 	case "vocabulary":
 		return a.store.Vocabulary()
 	default:

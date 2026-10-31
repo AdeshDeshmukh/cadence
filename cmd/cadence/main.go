@@ -12,6 +12,7 @@ import (
 
 	"github.com/AdeshDeshmukh/cadence/internal/config"
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
+	"github.com/AdeshDeshmukh/cadence/internal/paste"
 	"github.com/AdeshDeshmukh/cadence/internal/storage"
 	"github.com/AdeshDeshmukh/cadence/pkg/version"
 )
@@ -26,6 +27,7 @@ Commands:
   status             Show daemon runtime status and active recording state
   dictate [start|stop] Start or stop a live dictation session
   history [limit]    List recent saved dictation transcripts
+  recover [flags]    Retrieve text from last cancelled or failed session
   config [show|path] Inspect configuration and system file paths
   doctor             Perform diagnostics on system, daemon, and storage
   version            Print the version of cadence
@@ -33,6 +35,11 @@ Commands:
 Flags:
   -h, --help         Show this help message
   -v, --version      Show cadence version
+
+Recover Flags:
+  -p, --paste        Paste recovered text into the active application
+  -c, --copy         Copy recovered text to system clipboard
+  -l, --list [n]     List recent recoverable sessions (default 10)
 `)
 }
 
@@ -80,6 +87,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "history":
 		if err := cmdHistory(ctx, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "recover":
+		if err := cmdRecover(ctx, cfg, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -240,6 +254,151 @@ func cmdDoctor(ctx context.Context, cfg config.Config, client ipc.Client, out io
 		fmt.Fprintln(out, "  • Daemon status:  running and healthy")
 	} else {
 		fmt.Fprintf(out, "  • Daemon status:  responded with %v\n", res)
+	}
+
+	return nil
+}
+
+func cmdRecover(ctx context.Context, cfg config.Config, client ipc.Client, args []string, out io.Writer) error {
+	var shouldPaste bool
+	var shouldCopy bool
+	var shouldList bool
+	limit := 10
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch arg {
+		case "-p", "--paste":
+			shouldPaste = true
+		case "-c", "--copy":
+			shouldCopy = true
+		case "-l", "--list":
+			shouldList = true
+			if i+1 < len(args) {
+				if val, err := strconv.Atoi(args[i+1]); err == nil && val > 0 {
+					limit = val
+					i++
+				}
+			}
+		default:
+			if val, err := strconv.Atoi(arg); err == nil && val > 0 {
+				limit = val
+			}
+		}
+	}
+
+	if shouldList {
+		return cmdRecoverList(ctx, cfg, client, limit, out)
+	}
+
+	return cmdRecoverLast(ctx, cfg, client, shouldPaste, shouldCopy, out)
+}
+
+func cmdRecoverList(ctx context.Context, cfg config.Config, client ipc.Client, limit int, out io.Writer) error {
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	var recs []storage.SessionRecovery
+
+	res, err := client.Call(callCtx, "recoveries", map[string]any{"limit": float64(limit)})
+	if err == nil {
+		raw, err := json.Marshal(res)
+		if err == nil {
+			_ = json.Unmarshal(raw, &recs)
+		}
+	} else {
+		// Fallback to SQLite direct read if daemon is offline
+		s, err := storage.Open(cfg.Storage.DBPath)
+		if err != nil {
+			return fmt.Errorf("failed to reach daemon (%v) and failed to open database: %w", err, err)
+		}
+		defer s.Close()
+		recs, _ = s.ListRecoveries(limit)
+	}
+
+	if len(recs) == 0 {
+		fmt.Fprintln(out, "No recoverable sessions found.")
+		return nil
+	}
+
+	fmt.Fprintf(out, "Recent Recoverable Sessions (%d):\n", len(recs))
+	for i, r := range recs {
+		timeStr := r.UpdatedAt.Local().Format("2006-01-02 15:04:05")
+		text := r.BestText()
+		if len(text) > 60 {
+			text = text[:57] + "..."
+		}
+		errStr := ""
+		if r.Error != "" {
+			errStr = fmt.Sprintf(" (err: %s)", r.Error)
+		}
+		fmt.Fprintf(out, "%2d. [%s] (%s) %s: %q%s\n", i+1, timeStr, r.State, r.ID, text, errStr)
+	}
+	return nil
+}
+
+func cmdRecoverLast(ctx context.Context, cfg config.Config, client ipc.Client, shouldPaste, shouldCopy bool, out io.Writer) error {
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	var rec *storage.SessionRecovery
+
+	res, err := client.Call(callCtx, "recover", map[string]any{"paste": shouldPaste})
+	if err == nil && res != nil {
+		raw, err := json.Marshal(res)
+		if err == nil {
+			var r storage.SessionRecovery
+			if err := json.Unmarshal(raw, &r); err == nil && r.ID != "" {
+				rec = &r
+			}
+		}
+	}
+
+	if rec == nil {
+		// Fallback to SQLite direct read if daemon is offline or returned nil
+		s, err := storage.Open(cfg.Storage.DBPath)
+		if err == nil {
+			defer s.Close()
+			rec, _ = s.GetLastRecovery()
+		}
+	}
+
+	if rec == nil || rec.BestText() == "" {
+		fmt.Fprintln(out, "No recoverable sessions found.")
+		return nil
+	}
+
+	bestText := rec.BestText()
+	elapsed := time.Since(rec.UpdatedAt).Round(time.Second)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	timeStr := rec.UpdatedAt.Local().Format("2006-01-02 15:04:05")
+
+	fmt.Fprintln(out, "Recovered Session:")
+	fmt.Fprintf(out, "  ID:       %s\n", rec.ID)
+	fmt.Fprintf(out, "  State:    %s\n", rec.State)
+	fmt.Fprintf(out, "  Time:     %s (%s ago)\n", timeStr, elapsed)
+	if rec.Error != "" {
+		fmt.Fprintf(out, "  Error:    %s\n", rec.Error)
+	}
+	fmt.Fprintf(out, "  Text:     %s\n", bestText)
+
+	if shouldPaste {
+		paster := paste.NewDefaultCascade()
+		if _, err := paster.Paste(bestText); err != nil {
+			fmt.Fprintf(out, "  Action:   Paste failed (%v)\n", err)
+		} else {
+			fmt.Fprintln(out, "  Action:   Pasted to active application")
+		}
+	}
+
+	if shouldCopy {
+		if err := paste.SetSystemClipboard(bestText); err != nil {
+			fmt.Fprintf(out, "  Action:   Copy failed (%v)\n", err)
+		} else {
+			fmt.Fprintln(out, "  Action:   Copied to system clipboard")
+		}
 	}
 
 	return nil

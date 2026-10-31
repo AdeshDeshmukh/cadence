@@ -42,6 +42,25 @@ CREATE TABLE IF NOT EXISTS vocabulary (
 );
 `,
 	},
+	{
+		version: 2,
+		name:    "create_session_recoveries",
+		up: `
+CREATE TABLE IF NOT EXISTS session_recoveries (
+	id TEXT PRIMARY KEY,
+	state TEXT NOT NULL,
+	partial_text TEXT NOT NULL DEFAULT '',
+	raw_text TEXT NOT NULL DEFAULT '',
+	text TEXT NOT NULL DEFAULT '',
+	audio_samples INTEGER NOT NULL DEFAULT 0,
+	error TEXT NOT NULL DEFAULT '',
+	created_at TIMESTAMP NOT NULL,
+	updated_at TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_recoveries_updated_at ON session_recoveries (updated_at DESC);
+`,
+	},
 }
 
 // SQLite implements persistent Store backed by an SQLite database.
@@ -322,6 +341,128 @@ ORDER BY spoken ASC;
 	}
 
 	return out, rows.Err()
+}
+
+// SaveRecovery inserts or updates a session recovery record.
+func (s *SQLite) SaveRecovery(r SessionRecovery) error {
+	if r.ID == "" {
+		return errors.New("recovery id cannot be empty")
+	}
+	if r.CreatedAt.IsZero() {
+		r.CreatedAt = time.Now().UTC()
+	}
+	if r.UpdatedAt.IsZero() {
+		r.UpdatedAt = time.Now().UTC()
+	}
+
+	const query = `
+INSERT INTO session_recoveries (id, state, partial_text, raw_text, text, audio_samples, error, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+	state = excluded.state,
+	partial_text = excluded.partial_text,
+	raw_text = excluded.raw_text,
+	text = excluded.text,
+	audio_samples = excluded.audio_samples,
+	error = excluded.error,
+	updated_at = excluded.updated_at;
+`
+	_, err := s.db.Exec(
+		query,
+		r.ID,
+		r.State,
+		r.PartialText,
+		r.RawText,
+		r.Text,
+		r.AudioSamples,
+		r.Error,
+		r.CreatedAt.UTC(),
+		r.UpdatedAt.UTC(),
+	)
+	return err
+}
+
+// GetLastRecovery retrieves the most recent recoverable session (cancelled or failed) with text.
+func (s *SQLite) GetLastRecovery() (*SessionRecovery, error) {
+	const query = `
+SELECT id, state, partial_text, raw_text, text, audio_samples, error, created_at, updated_at
+FROM session_recoveries
+WHERE state != 'completed' AND (text != '' OR raw_text != '' OR partial_text != '' OR error != '')
+ORDER BY updated_at DESC
+LIMIT 1;
+`
+	var r SessionRecovery
+	err := s.db.QueryRow(query).Scan(
+		&r.ID,
+		&r.State,
+		&r.PartialText,
+		&r.RawText,
+		&r.Text,
+		&r.AudioSamples,
+		&r.Error,
+		&r.CreatedAt,
+		&r.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// ListRecoveries returns recent recoverable sessions ordered newest first.
+func (s *SQLite) ListRecoveries(limit int) ([]SessionRecovery, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+
+	const query = `
+SELECT id, state, partial_text, raw_text, text, audio_samples, error, created_at, updated_at
+FROM session_recoveries
+WHERE state != 'completed' AND (text != '' OR raw_text != '' OR partial_text != '' OR error != '')
+ORDER BY updated_at DESC
+LIMIT ?;
+`
+	rows, err := s.db.Query(query, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []SessionRecovery
+	for rows.Next() {
+		var r SessionRecovery
+		if err := rows.Scan(
+			&r.ID,
+			&r.State,
+			&r.PartialText,
+			&r.RawText,
+			&r.Text,
+			&r.AudioSamples,
+			&r.Error,
+			&r.CreatedAt,
+			&r.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+
+	return out, rows.Err()
+}
+
+// DeleteRecovery deletes a recovery entry by ID.
+func (s *SQLite) DeleteRecovery(id string) error {
+	_, err := s.db.Exec("DELETE FROM session_recoveries WHERE id = ?", id)
+	return err
+}
+
+// ClearRecoveries purges all recovery records from the store.
+func (s *SQLite) ClearRecoveries() error {
+	_, err := s.db.Exec("DELETE FROM session_recoveries")
+	return err
 }
 
 // Close releases the underlying SQLite database handle.

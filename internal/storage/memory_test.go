@@ -73,3 +73,65 @@ func TestMemoryStore_Vocabulary(t *testing.T) {
 		t.Fatalf("unexpected vocabulary: %+v", vocab)
 	}
 }
+
+func TestMemoryStore_SessionRecovery(t *testing.T) {
+	mem := storage.NewMemory()
+
+	last, err := mem.GetLastRecovery()
+	if err != nil {
+		t.Fatalf("GetLastRecovery failed: %v", err)
+	}
+	if last != nil {
+		t.Fatalf("expected nil recovery initially, got: %+v", last)
+	}
+
+	now := time.Now()
+	r1 := storage.SessionRecovery{
+		ID:          "rec-1",
+		State:       "cancelled",
+		PartialText: "hello world",
+		CreatedAt:   now.Add(-2 * time.Minute),
+		UpdatedAt:   now.Add(-2 * time.Minute),
+	}
+	r2 := storage.SessionRecovery{
+		ID:        "rec-2",
+		State:     "failed",
+		Text:      "Final failed text",
+		CreatedAt: now.Add(-1 * time.Minute),
+		UpdatedAt: now.Add(-1 * time.Minute),
+	}
+
+	if err := mem.SaveRecovery(r1); err != nil {
+		t.Fatalf("save r1: %v", err)
+	}
+	if err := mem.SaveRecovery(r2); err != nil {
+		t.Fatalf("save r2: %v", err)
+	}
+
+	last, err = mem.GetLastRecovery()
+	if err != nil || last == nil || last.ID != "rec-2" {
+		t.Fatalf("expected r2 as last recovery, got: %+v, err: %v", last, err)
+	}
+
+	list, err := mem.ListRecoveries(5)
+	if err != nil || len(list) != 2 {
+		t.Fatalf("expected 2 recoveries, got: %+v, err: %v", list, err)
+	}
+
+	if err := mem.DeleteRecovery("rec-2"); err != nil {
+		t.Fatalf("delete r2: %v", err)
+	}
+
+	last, err = mem.GetLastRecovery()
+	if err != nil || last == nil || last.ID != "rec-1" {
+		t.Fatalf("expected r1 after deleting r2, got: %+v, err: %v", last, err)
+	}
+
+	if err := mem.ClearRecoveries(); err != nil {
+		t.Fatalf("clear recoveries: %v", err)
+	}
+	last, err = mem.GetLastRecovery()
+	if err != nil || last != nil {
+		t.Fatalf("expected nil after clear, got: %+v", last)
+	}
+}

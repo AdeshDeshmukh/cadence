@@ -26,3 +26,13 @@ func (f *FallbackMemoryTier) Paste(text string) error {
 func NewDefaultCascade() *Cascade {
 	return NewCascade(NewFallbackMemoryTier())
 }
+
+// GetSystemClipboard returns empty string on non-Darwin platforms.
+func GetSystemClipboard() (string, error) {
+	return "", nil
+}
+
+// SetSystemClipboard is a no-op on non-Darwin platforms.
+func SetSystemClipboard(text string) error {
+	return nil
+}
