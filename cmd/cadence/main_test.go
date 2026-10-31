@@ -62,11 +62,11 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 	case "recoveries":
 		return []storage.SessionRecovery{
 			{
-				ID:          "rec-mock-1",
-				State:       "cancelled",
-				Text:        "Mock recovered text.",
-				CreatedAt:   time.Now().UTC(),
-				UpdatedAt:   time.Now().UTC(),
+				ID:        "rec-mock-1",
+				State:     "cancelled",
+				Text:      "Mock recovered text.",
+				CreatedAt: time.Now().UTC(),
+				UpdatedAt: time.Now().UTC(),
 			},
 		}, nil
 	default:
@@ -270,4 +270,3 @@ func TestCLI_Recover_OfflineSQLiteFallback(t *testing.T) {
 		t.Fatalf("expected error message in output, got: %s", out.String())
 	}
 }
-

@@ -386,4 +386,3 @@ func TestSQLite_SessionRecovery(t *testing.T) {
 		t.Fatalf("expected nil after delete, got: %+v", lastAfterDel)
 	}
 }
-

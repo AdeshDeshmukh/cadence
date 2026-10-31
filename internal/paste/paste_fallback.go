@@ -36,4 +36,3 @@ func GetSystemClipboard() (string, error) {
 func SetSystemClipboard(text string) error {
 	return nil
 }
-

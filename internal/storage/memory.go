@@ -135,4 +135,3 @@ func (m *Memory) ClearRecoveries() error {
 	m.recoveries = make(map[string]SessionRecovery)
 	return nil
 }
-

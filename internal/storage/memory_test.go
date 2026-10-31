@@ -135,4 +135,3 @@ func TestMemoryStore_SessionRecovery(t *testing.T) {
 		t.Fatalf("expected nil after clear, got: %+v", last)
 	}
 }
-

@@ -460,4 +460,3 @@ func TestApp_IPCRecovery(t *testing.T) {
 		t.Fatalf("expected 1 recovery in list, got: %v", listRes)
 	}
 }
-
