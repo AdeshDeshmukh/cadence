@@ -15,6 +15,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/config"
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
 	"github.com/AdeshDeshmukh/cadence/internal/paste"
+	"github.com/AdeshDeshmukh/cadence/internal/postprocess"
 	"github.com/AdeshDeshmukh/cadence/internal/storage"
 	"github.com/AdeshDeshmukh/cadence/pkg/version"
 )
@@ -31,6 +32,7 @@ Commands:
   history [limit]    List recent saved dictation transcripts
   recover [flags]    Retrieve text from last cancelled or failed session
   vocab <subcommand> Manage custom vocabulary (list, add, remove, import, export)
+  snippet <subcommand> Manage voice templates with dynamic vars (list, add, remove, test)
   config [show|path] Inspect configuration and system file paths
   doctor             Perform diagnostics on system, daemon, and storage
   version            Print the version of cadence
@@ -104,6 +106,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "vocab", "vocabulary":
 		if err := cmdVocab(ctx, cfg, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "snippet", "snippets", "snip":
+		if err := cmdSnippet(ctx, cfg, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -640,5 +649,189 @@ func cmdVocabExport(ctx context.Context, cfg config.Config, client ipc.Client, a
 		fmt.Fprint(out, content)
 	}
 
+	return nil
+}
+
+func cmdSnippet(ctx context.Context, cfg config.Config, client ipc.Client, args []string, out io.Writer) error {
+	action := "list"
+	var subArgs []string
+	if len(args) > 0 {
+		action = args[0]
+		subArgs = args[1:]
+	}
+
+	switch action {
+	case "list":
+		return cmdSnippetList(ctx, cfg, client, out)
+	case "add", "set":
+		return cmdSnippetAdd(ctx, cfg, client, subArgs, out)
+	case "remove", "delete", "rm":
+		return cmdSnippetRemove(ctx, cfg, client, subArgs, out)
+	case "test", "expand":
+		return cmdSnippetTest(ctx, cfg, client, subArgs, out)
+	default:
+		return fmt.Errorf("unknown snippet subcommand: %s (usage: cadence snippet [list|add|remove|test])", action)
+	}
+}
+
+func cmdSnippetList(ctx context.Context, cfg config.Config, client ipc.Client, out io.Writer) error {
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	var snippets []storage.Snippet
+	res, err := client.Call(callCtx, "snippet_list", nil)
+	if err == nil {
+		raw, err := json.Marshal(res)
+		if err == nil {
+			_ = json.Unmarshal(raw, &snippets)
+		}
+	} else {
+		// Offline storage fallback
+		s, err := storage.Open(cfg.Storage.DBPath)
+		if err != nil {
+			return fmt.Errorf("failed to reach daemon (%v) and cannot open database: %w", err, err)
+		}
+		defer s.Close()
+		snippets, _ = s.ListSnippets()
+	}
+
+	if len(snippets) == 0 {
+		fmt.Fprintln(out, "No custom snippets found.")
+		return nil
+	}
+
+	fmt.Fprintf(out, "Custom Snippets (%d):\n", len(snippets))
+	for i, snip := range snippets {
+		descStr := ""
+		if snip.Description != "" {
+			descStr = fmt.Sprintf(" (%s)", snip.Description)
+		}
+		tmplPreview := snip.Template
+		if len(tmplPreview) > 50 {
+			tmplPreview = tmplPreview[:47] + "..."
+		}
+		tmplPreview = strings.ReplaceAll(tmplPreview, "\n", "\\n")
+		fmt.Fprintf(out, "%2d. %-20s -> %q%s\n", i+1, snip.Trigger, tmplPreview, descStr)
+	}
+	return nil
+}
+
+func cmdSnippetAdd(ctx context.Context, cfg config.Config, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) < 2 {
+		return errors.New("usage: cadence snippet add <trigger> <template> [description]")
+	}
+	trigger := args[0]
+	template := args[1]
+	desc := ""
+	if len(args) > 2 {
+		desc = strings.Join(args[2:], " ")
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	_, err := client.Call(callCtx, "snippet_set", map[string]any{
+		"trigger":     trigger,
+		"template":    template,
+		"description": desc,
+	})
+	if err != nil {
+		// Offline fallback
+		s, dbErr := storage.Open(cfg.Storage.DBPath)
+		if dbErr != nil {
+			return fmt.Errorf("failed to set snippet via daemon (%v) and database: %w", err, dbErr)
+		}
+		defer s.Close()
+		if err := s.SetSnippet(storage.Snippet{
+			Trigger:     trigger,
+			Template:    template,
+			Description: desc,
+		}); err != nil {
+			return fmt.Errorf("set snippet: %w", err)
+		}
+	}
+
+	fmt.Fprintf(out, "Saved snippet: %q\n", trigger)
+	return nil
+}
+
+func cmdSnippetRemove(ctx context.Context, cfg config.Config, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) < 1 {
+		return errors.New("usage: cadence snippet remove <trigger>")
+	}
+	trigger := args[0]
+
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	_, err := client.Call(callCtx, "snippet_delete", map[string]any{
+		"trigger": trigger,
+	})
+	if err != nil {
+		// Offline fallback
+		s, dbErr := storage.Open(cfg.Storage.DBPath)
+		if dbErr != nil {
+			return fmt.Errorf("failed to delete snippet via daemon (%v) and database: %w", err, dbErr)
+		}
+		defer s.Close()
+		if err := s.DeleteSnippet(trigger); err != nil {
+			return fmt.Errorf("delete snippet: %w", err)
+		}
+	}
+
+	fmt.Fprintf(out, "Removed snippet: %q\n", trigger)
+	return nil
+}
+
+func cmdSnippetTest(ctx context.Context, cfg config.Config, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) < 1 {
+		return errors.New("usage: cadence snippet test <trigger>")
+	}
+	trigger := args[0]
+
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	var template string
+	var expanded string
+
+	res, err := client.Call(callCtx, "snippet_expand", map[string]any{
+		"trigger": trigger,
+	})
+	if err == nil {
+		if m, ok := res.(map[string]any); ok {
+			template, _ = m["template"].(string)
+			expanded, _ = m["expanded"].(string)
+		}
+	} else {
+		// Offline fallback
+		s, dbErr := storage.Open(cfg.Storage.DBPath)
+		if dbErr != nil {
+			return fmt.Errorf("failed to test snippet via daemon (%v) and database: %w", err, dbErr)
+		}
+		defer s.Close()
+		snip, err := s.GetSnippet(trigger)
+		if err != nil {
+			return err
+		}
+		if snip == nil {
+			return fmt.Errorf("snippet %q not found", trigger)
+		}
+		template = snip.Template
+		clip, _ := paste.GetSystemClipboard()
+		expanded = postprocess.ExpandVariables(template, clip, time.Now())
+	}
+
+	if template == "" {
+		return fmt.Errorf("snippet %q not found", trigger)
+	}
+
+	fmt.Fprintf(out, "Snippet Preview:\n")
+	fmt.Fprintf(out, "  Trigger:   %s\n", trigger)
+	fmt.Fprintf(out, "  Template:  %s\n", template)
+	fmt.Fprintln(out, "  Expanded:")
+	fmt.Fprintln(out, "----------------------------------------")
+	fmt.Fprintln(out, expanded)
+	fmt.Fprintln(out, "----------------------------------------")
 	return nil
 }

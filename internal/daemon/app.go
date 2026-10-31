@@ -146,6 +146,9 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 		if cfg.Post.Punctuation {
 			steps = append(steps, postprocess.NewPunctuation())
 		}
+		if cfg.Post.Snippets {
+			steps = append(steps, postprocess.NewSnippets())
+		}
 		a.process = postprocess.New(steps...)
 	}
 
@@ -353,10 +356,16 @@ func (a *App) startDictation() {
 		}()
 
 		vocabMap := make(map[string]string)
+		snippetMap := make(map[string]string)
 		if a.store != nil {
 			if entries, err := a.store.Vocabulary(); err == nil {
 				for _, e := range entries {
 					vocabMap[e.Spoken] = e.Canonical
+				}
+			}
+			if snips, err := a.store.ListSnippets(); err == nil {
+				for _, s := range snips {
+					snippetMap[s.Trigger] = s.Template
 				}
 			}
 		}
@@ -364,6 +373,7 @@ func (a *App) startDictation() {
 		pc := postprocess.Context{
 			Mode:       "dictation",
 			Vocabulary: vocabMap,
+			Snippets:   snippetMap,
 		}
 		_ = a.kernel.Run(sessCtx, sess, pc)
 	}()
@@ -523,6 +533,71 @@ func (a *App) Handle(_ context.Context, req ipc.Request) (any, error) {
 			return nil, fmt.Errorf("export vocabulary: %w", err)
 		}
 		return map[string]any{"ok": true, "format": format, "content": buf.String()}, nil
+
+	case "snippet_list":
+		return a.store.ListSnippets()
+
+	case "snippet_set":
+		params, ok := req.Params.(map[string]any)
+		if !ok || params == nil {
+			return nil, errors.New("missing parameters for snippet_set")
+		}
+		trigger, _ := params["trigger"].(string)
+		template, _ := params["template"].(string)
+		desc, _ := params["description"].(string)
+		if strings.TrimSpace(trigger) == "" || strings.TrimSpace(template) == "" {
+			return nil, errors.New("trigger and template cannot be empty")
+		}
+		snip := storage.Snippet{
+			Trigger:     trigger,
+			Template:    template,
+			Description: desc,
+		}
+		if err := a.store.SetSnippet(snip); err != nil {
+			return nil, fmt.Errorf("set snippet: %w", err)
+		}
+		return map[string]any{"ok": true, "trigger": trigger}, nil
+
+	case "snippet_get":
+		params, ok := req.Params.(map[string]any)
+		if !ok || params == nil {
+			return nil, errors.New("missing parameters for snippet_get")
+		}
+		trigger, _ := params["trigger"].(string)
+		return a.store.GetSnippet(trigger)
+
+	case "snippet_delete":
+		params, ok := req.Params.(map[string]any)
+		if !ok || params == nil {
+			return nil, errors.New("missing parameters for snippet_delete")
+		}
+		trigger, _ := params["trigger"].(string)
+		if err := a.store.DeleteSnippet(trigger); err != nil {
+			return nil, fmt.Errorf("delete snippet: %w", err)
+		}
+		return map[string]any{"ok": true, "trigger": trigger}, nil
+
+	case "snippet_expand":
+		params, ok := req.Params.(map[string]any)
+		if !ok || params == nil {
+			return nil, errors.New("missing parameters for snippet_expand")
+		}
+		template, _ := params["template"].(string)
+		if template == "" {
+			trigger, _ := params["trigger"].(string)
+			if trigger != "" {
+				s, err := a.store.GetSnippet(trigger)
+				if err != nil {
+					return nil, err
+				}
+				if s != nil {
+					template = s.Template
+				}
+			}
+		}
+		clip, _ := paste.GetSystemClipboard()
+		expanded := postprocess.ExpandVariables(template, clip, time.Now())
+		return map[string]any{"ok": true, "template": template, "expanded": expanded}, nil
 
 	default:
 		return nil, errors.New("unknown method: " + req.Method)

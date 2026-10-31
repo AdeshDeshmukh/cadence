@@ -81,6 +81,24 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 		return map[string]any{"ok": true, "count": float64(2)}, nil
 	case "vocab_export":
 		return map[string]any{"ok": true, "content": "grpc = gRPC\n", "format": "txt"}, nil
+	case "snippet_list":
+		return []storage.Snippet{
+			{
+				Trigger:     "signoff",
+				Template:    "Best regards,\nAlice",
+				Description: "Email signoff",
+			},
+		}, nil
+	case "snippet_set":
+		return map[string]any{"ok": true}, nil
+	case "snippet_delete":
+		return map[string]any{"ok": true}, nil
+	case "snippet_expand":
+		return map[string]any{
+			"ok":       true,
+			"template": "Best regards,\nAlice",
+			"expanded": "Best regards,\nAlice",
+		}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -398,5 +416,99 @@ func TestCLI_Vocab_OfflineFallback(t *testing.T) {
 	all, err := s2.Vocabulary()
 	if err != nil || len(all) != 2 {
 		t.Fatalf("expected 2 vocabulary entries in database, got: %+v, err: %v", all, err)
+	}
+}
+
+func TestCLI_Snippet(t *testing.T) {
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("cad_snip_%d.sock", time.Now().UnixNano()))
+	cleanup := startMockDaemon(t, sockPath)
+	defer cleanup()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sockPath,
+	}
+	ctx := context.Background()
+	cfg := config.Default()
+	cfg.IPC.SocketPath = sockPath
+
+	var out bytes.Buffer
+
+	// 1. Snippet list
+	if err := cmdSnippet(ctx, cfg, client, []string{"list"}, &out); err != nil {
+		t.Fatalf("cmdSnippet list failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Custom Snippets") || !strings.Contains(out.String(), "signoff") {
+		t.Fatalf("unexpected snippet list output: %s", out.String())
+	}
+
+	// 2. Snippet add
+	out.Reset()
+	if err := cmdSnippet(ctx, cfg, client, []string{"add", "standup", "Standup {date}"}, &out); err != nil {
+		t.Fatalf("cmdSnippet add failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Saved snippet:") {
+		t.Fatalf("unexpected snippet add output: %s", out.String())
+	}
+
+	// 3. Snippet test
+	out.Reset()
+	if err := cmdSnippet(ctx, cfg, client, []string{"test", "signoff"}, &out); err != nil {
+		t.Fatalf("cmdSnippet test failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Snippet Preview:") || !strings.Contains(out.String(), "Expanded:") {
+		t.Fatalf("unexpected snippet test output: %s", out.String())
+	}
+
+	// 4. Snippet remove
+	out.Reset()
+	if err := cmdSnippet(ctx, cfg, client, []string{"remove", "signoff"}, &out); err != nil {
+		t.Fatalf("cmdSnippet remove failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Removed snippet:") {
+		t.Fatalf("unexpected snippet remove output: %s", out.String())
+	}
+}
+
+func TestCLI_Snippet_OfflineFallback(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "fallback_snip.db")
+
+	s, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := s.SetSnippet(storage.Snippet{
+		Trigger:     "offline snip",
+		Template:    "Offline template {date}",
+		Description: "Offline desc",
+	}); err != nil {
+		t.Fatalf("set snippet: %v", err)
+	}
+	_ = s.Close()
+
+	cfg := config.Default()
+	cfg.Storage.DBPath = dbPath
+	cfg.IPC.SocketPath = filepath.Join(dir, "nonexistent.sock")
+	client := ipc.Client{
+		Network: "unix",
+		Address: cfg.IPC.SocketPath,
+	}
+
+	var out bytes.Buffer
+	if err := cmdSnippet(context.Background(), cfg, client, []string{"list"}, &out); err != nil {
+		t.Fatalf("cmdSnippet list offline failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "offline snip") {
+		t.Fatalf("expected offline snippet in list, got: %s", out.String())
+	}
+
+	// Test offline test
+	out.Reset()
+	if err := cmdSnippet(context.Background(), cfg, client, []string{"test", "offline snip"}, &out); err != nil {
+		t.Fatalf("cmdSnippet test offline failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Offline template") {
+		t.Fatalf("expected expanded offline snippet in preview, got: %s", out.String())
 	}
 }

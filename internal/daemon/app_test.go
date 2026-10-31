@@ -540,3 +540,86 @@ func TestApp_IPCVocabularyManagement(t *testing.T) {
 		t.Fatalf("expected 1 entry after removal, got: %v", listResAfter)
 	}
 }
+
+func TestApp_IPCSnippets(t *testing.T) {
+	app, _, _, _, listener := setupTestApp(t, hotkey.ModePushToTalk)
+	defer listener.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := app.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer app.Stop()
+
+	client := ipc.Client{
+		Network: "tcp",
+		Address: listener.Addr().String(),
+	}
+
+	callCtx, callCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer callCancel()
+
+	// 1. Add snippet
+	_, err := client.Call(callCtx, "snippet_set", map[string]any{
+		"trigger":     "meeting notes",
+		"template":    "# Notes {date}\n- Action: {clipboard}",
+		"description": "Meeting template",
+	})
+	if err != nil {
+		t.Fatalf("snippet_set failed: %v", err)
+	}
+
+	// 2. Get snippet
+	gotRes, err := client.Call(callCtx, "snippet_get", map[string]any{
+		"trigger": "meeting notes",
+	})
+	if err != nil {
+		t.Fatalf("snippet_get failed: %v", err)
+	}
+	gotMap, ok := gotRes.(map[string]any)
+	if !ok || gotMap["trigger"] != "meeting notes" {
+		t.Fatalf("expected snippet object, got: %v", gotRes)
+	}
+
+	// 3. List snippets
+	listRes, err := client.Call(callCtx, "snippet_list", nil)
+	if err != nil {
+		t.Fatalf("snippet_list failed: %v", err)
+	}
+	list, ok := listRes.([]any)
+	if !ok || len(list) != 1 {
+		t.Fatalf("expected 1 snippet in list, got: %v", listRes)
+	}
+
+	// 4. Expand snippet
+	expandRes, err := client.Call(callCtx, "snippet_expand", map[string]any{
+		"trigger": "meeting notes",
+	})
+	if err != nil {
+		t.Fatalf("snippet_expand failed: %v", err)
+	}
+	expMap, ok := expandRes.(map[string]any)
+	if !ok || expMap["expanded"] == "" {
+		t.Fatalf("expected expanded snippet, got: %v", expandRes)
+	}
+
+	// 5. Delete snippet
+	_, err = client.Call(callCtx, "snippet_delete", map[string]any{
+		"trigger": "meeting notes",
+	})
+	if err != nil {
+		t.Fatalf("snippet_delete failed: %v", err)
+	}
+
+	// 6. List should be empty
+	listResAfter, err := client.Call(callCtx, "snippet_list", nil)
+	if err != nil {
+		t.Fatalf("snippet_list after delete failed: %v", err)
+	}
+	listAfter, ok := listResAfter.([]any)
+	if !ok || len(listAfter) != 0 {
+		t.Fatalf("expected 0 snippets after delete, got: %v", listResAfter)
+	}
+}
