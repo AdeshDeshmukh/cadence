@@ -172,7 +172,12 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 	}
 
 	if a.paster == nil {
-		a.paster = paste.NewDefaultCascade()
+		basePaster := paste.NewDefaultCascade()
+		delay := time.Duration(cfg.Paste.RestoreDelayMs) * time.Millisecond
+		if delay <= 0 {
+			delay = 80 * time.Millisecond
+		}
+		a.paster = paste.NewPreservingPaster(basePaster, cfg.Paste.PreserveClipboard, delay)
 	}
 
 	if a.capture == nil {

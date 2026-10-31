@@ -21,6 +21,10 @@ func Validate(c Config) error {
 		return fmt.Errorf("storage.db_path must not be empty")
 	}
 
+	if c.Paste.RestoreDelayMs < 0 {
+		return fmt.Errorf("paste.restore_delay_ms must not be negative")
+	}
+
 	if c.VAD.Engine != "" && c.VAD.Engine != "silero" && c.VAD.Engine != "adaptive" && c.VAD.Engine != "energy" {
 		return fmt.Errorf("invalid vad.engine")
 	}
