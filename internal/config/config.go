@@ -10,6 +10,7 @@ type Config struct {
 	ASR     ASRConfig
 	VAD     VADConfig
 	Post    PostConfig
+	Paste   PasteConfig
 	Privacy PrivacyConfig
 	Hotkey  HotkeyConfig
 	IPC     IPCConfig
@@ -40,6 +41,11 @@ type PostConfig struct {
 	Vocabulary    bool
 	ITN           bool
 	Snippets      bool
+}
+
+type PasteConfig struct {
+	PreserveClipboard bool
+	RestoreDelayMs    int
 }
 
 type PrivacyConfig struct {
@@ -98,6 +104,10 @@ func Default() Config {
 			Vocabulary:    true,
 			ITN:           true,
 			Snippets:      true,
+		},
+		Paste: PasteConfig{
+			PreserveClipboard: true,
+			RestoreDelayMs:    80,
 		},
 		Privacy: PrivacyConfig{
 			NetworkMode: "local_only",

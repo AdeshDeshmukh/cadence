@@ -11,6 +11,12 @@ func TestDefaultConfig(t *testing.T) {
 	if err := config.Validate(cfg); err != nil {
 		t.Fatalf("default config failed validation: %v", err)
 	}
+	if !cfg.Paste.PreserveClipboard {
+		t.Fatal("expected default Paste.PreserveClipboard to be true")
+	}
+	if cfg.Paste.RestoreDelayMs != 80 {
+		t.Fatalf("expected default Paste.RestoreDelayMs to be 80, got %d", cfg.Paste.RestoreDelayMs)
+	}
 }
 
 func TestValidateConfigErrors(t *testing.T) {
@@ -36,6 +42,12 @@ func TestValidateConfigErrors(t *testing.T) {
 	cfg.Storage.DBPath = ""
 	if err := config.Validate(cfg); err == nil {
 		t.Fatal("expected error for empty storage db_path")
+	}
+
+	cfg = config.Default()
+	cfg.Paste.RestoreDelayMs = -1
+	if err := config.Validate(cfg); err == nil {
+		t.Fatal("expected error for negative paste restore delay")
 	}
 
 	cfg = config.Default()
