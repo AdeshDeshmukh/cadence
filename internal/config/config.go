@@ -39,6 +39,7 @@ type PostConfig struct {
 	Punctuation   bool
 	Vocabulary    bool
 	ITN           bool
+	Snippets      bool
 }
 
 type PrivacyConfig struct {
@@ -96,6 +97,7 @@ func Default() Config {
 			Punctuation:   true,
 			Vocabulary:    true,
 			ITN:           true,
+			Snippets:      true,
 		},
 		Privacy: PrivacyConfig{
 			NetworkMode: "local_only",

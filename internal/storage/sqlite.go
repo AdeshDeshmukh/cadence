@@ -61,6 +61,20 @@ CREATE TABLE IF NOT EXISTS session_recoveries (
 CREATE INDEX IF NOT EXISTS idx_session_recoveries_updated_at ON session_recoveries (updated_at DESC);
 `,
 	},
+	{
+		version: 3,
+		name:    "create_snippets",
+		up: `
+CREATE TABLE IF NOT EXISTS snippets (
+	trigger TEXT PRIMARY KEY,
+	template TEXT NOT NULL,
+	description TEXT NOT NULL DEFAULT '',
+	created_at TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_snippets_trigger ON snippets (trigger);
+`,
+	},
 }
 
 // SQLite implements persistent Store backed by an SQLite database.
@@ -462,6 +476,76 @@ func (s *SQLite) DeleteRecovery(id string) error {
 // ClearRecoveries purges all recovery records from the store.
 func (s *SQLite) ClearRecoveries() error {
 	_, err := s.db.Exec("DELETE FROM session_recoveries")
+	return err
+}
+
+// SetSnippet inserts or updates a voice snippet template.
+func (s *SQLite) SetSnippet(snip Snippet) error {
+	if strings.TrimSpace(snip.Trigger) == "" {
+		return errors.New("snippet trigger cannot be empty")
+	}
+	if snip.CreatedAt.IsZero() {
+		snip.CreatedAt = time.Now().UTC()
+	}
+
+	const query = `
+INSERT INTO snippets (trigger, template, description, created_at)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(trigger) DO UPDATE SET
+	template = excluded.template,
+	description = excluded.description,
+	created_at = excluded.created_at;
+`
+	_, err := s.db.Exec(query, snip.Trigger, snip.Template, snip.Description, snip.CreatedAt.UTC())
+	return err
+}
+
+// GetSnippet retrieves a snippet by its voice trigger.
+func (s *SQLite) GetSnippet(trigger string) (*Snippet, error) {
+	const query = `
+SELECT trigger, template, description, created_at
+FROM snippets
+WHERE trigger = ?;
+`
+	var snip Snippet
+	err := s.db.QueryRow(query, trigger).Scan(&snip.Trigger, &snip.Template, &snip.Description, &snip.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &snip, nil
+}
+
+// ListSnippets returns all snippets ordered alphabetically by trigger.
+func (s *SQLite) ListSnippets() ([]Snippet, error) {
+	const query = `
+SELECT trigger, template, description, created_at
+FROM snippets
+ORDER BY trigger ASC;
+`
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Snippet
+	for rows.Next() {
+		var snip Snippet
+		if err := rows.Scan(&snip.Trigger, &snip.Template, &snip.Description, &snip.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, snip)
+	}
+
+	return out, rows.Err()
+}
+
+// DeleteSnippet removes a snippet by its trigger.
+func (s *SQLite) DeleteSnippet(trigger string) error {
+	_, err := s.db.Exec("DELETE FROM snippets WHERE trigger = ?", trigger)
 	return err
 }
 

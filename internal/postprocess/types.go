@@ -5,6 +5,7 @@ type Context struct {
 	Application string
 	Mode        string
 	Vocabulary  map[string]string
+	Snippets    map[string]string
 }
 
 type Step interface {

@@ -17,6 +17,14 @@ type VocabularyEntry struct {
 	Canonical string `json:"canonical"`
 }
 
+// Snippet defines a voice-triggered template with dynamic variables.
+type Snippet struct {
+	Trigger     string    `json:"trigger"`
+	Template    string    `json:"template"`
+	Description string    `json:"description,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
 // SessionRecovery holds state and interim text from cancelled or failed dictation sessions.
 type SessionRecovery struct {
 	ID           string    `json:"id"`
@@ -47,6 +55,10 @@ type Store interface {
 	SetVocabulary(VocabularyEntry) error
 	Vocabulary() ([]VocabularyEntry, error)
 	DeleteVocabulary(string) error
+	SetSnippet(Snippet) error
+	GetSnippet(string) (*Snippet, error)
+	ListSnippets() ([]Snippet, error)
+	DeleteSnippet(string) error
 	SaveRecovery(SessionRecovery) error
 	GetLastRecovery() (*SessionRecovery, error)
 	ListRecoveries(int) ([]SessionRecovery, error)

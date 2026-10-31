@@ -386,3 +386,69 @@ func TestSQLite_SessionRecovery(t *testing.T) {
 		t.Fatalf("expected nil after delete, got: %+v", lastAfterDel)
 	}
 }
+
+func TestSQLite_Snippets(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer s.Close()
+
+	// Initial list should be empty
+	list, err := s.ListSnippets()
+	if err != nil {
+		t.Fatalf("ListSnippets failed: %v", err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("expected 0 snippets, got %d", len(list))
+	}
+
+	// Add snippets
+	s1 := Snippet{
+		Trigger:     "my email",
+		Template:    "contact@example.com",
+		Description: "Primary email address",
+	}
+	s2 := Snippet{
+		Trigger:     "standup report",
+		Template:    "Standup {date}:\n- Done: {clipboard}\n- Next: ...",
+		Description: "Daily standup template",
+	}
+
+	if err := s.SetSnippet(s1); err != nil {
+		t.Fatalf("SetSnippet s1: %v", err)
+	}
+	if err := s.SetSnippet(s2); err != nil {
+		t.Fatalf("SetSnippet s2: %v", err)
+	}
+
+	// Get single snippet
+	got, err := s.GetSnippet("my email")
+	if err != nil || got == nil {
+		t.Fatalf("GetSnippet(my email): %v, got: %+v", err, got)
+	}
+	if got.Template != s1.Template {
+		t.Errorf("expected template %q, got %q", s1.Template, got.Template)
+	}
+
+	// List snippets (should be alphabetical)
+	list, err = s.ListSnippets()
+	if err != nil {
+		t.Fatalf("ListSnippets: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("expected 2 snippets, got %d", len(list))
+	}
+	if list[0].Trigger != "my email" || list[1].Trigger != "standup report" {
+		t.Errorf("unexpected list ordering: %+v", list)
+	}
+
+	// Delete snippet
+	if err := s.DeleteSnippet("my email"); err != nil {
+		t.Fatalf("DeleteSnippet: %v", err)
+	}
+	delCheck, err := s.GetSnippet("my email")
+	if err != nil || delCheck != nil {
+		t.Fatalf("expected nil after delete, got %+v, err: %v", delCheck, err)
+	}
+}

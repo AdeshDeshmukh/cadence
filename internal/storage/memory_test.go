@@ -135,3 +135,39 @@ func TestMemoryStore_SessionRecovery(t *testing.T) {
 		t.Fatalf("expected nil after clear, got: %+v", last)
 	}
 }
+
+func TestMemoryStore_Snippets(t *testing.T) {
+	mem := storage.NewMemory()
+
+	snip := storage.Snippet{
+		Trigger:     "signoff",
+		Template:    "Best regards,\nAlice",
+		Description: "Email sign-off",
+	}
+
+	if err := mem.SetSnippet(snip); err != nil {
+		t.Fatalf("SetSnippet: %v", err)
+	}
+
+	got, err := mem.GetSnippet("signoff")
+	if err != nil || got == nil {
+		t.Fatalf("GetSnippet: %v", err)
+	}
+	if got.Template != snip.Template {
+		t.Errorf("expected %q, got %q", snip.Template, got.Template)
+	}
+
+	list, err := mem.ListSnippets()
+	if err != nil || len(list) != 1 {
+		t.Fatalf("expected 1 snippet, got %v", list)
+	}
+
+	if err := mem.DeleteSnippet("signoff"); err != nil {
+		t.Fatalf("DeleteSnippet: %v", err)
+	}
+
+	gotAfter, err := mem.GetSnippet("signoff")
+	if err != nil || gotAfter != nil {
+		t.Fatalf("expected nil after delete, got %v", gotAfter)
+	}
+}
