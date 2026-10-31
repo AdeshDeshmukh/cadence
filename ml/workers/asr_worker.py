@@ -84,9 +84,41 @@ def transcribe(request: dict[str, Any]) -> dict[str, Any]:
         "words": words,
     }
 
+def transcribe_partial(request: dict[str, Any]) -> dict[str, Any]:
+    audio = request.get("audio")
+    if not isinstance(audio, list):
+        raise ValueError("audio must be a PCM float list")
+
+    if not audio:
+        return {"text": "", "final": False}
+
+    sample_rate = int(request.get("sample_rate", 16000))
+    import numpy as np
+    audio_data = np.array(audio, dtype=np.float32)
+
+    if sample_rate != 16000 and len(audio_data) > 0:
+        target_len = int(len(audio_data) * 16000 / sample_rate)
+        if target_len > 0:
+            indices = np.linspace(0, len(audio_data) - 1, target_len)
+            audio_data = np.interp(indices, np.arange(len(audio_data)), audio_data).astype(np.float32)
+
+    # Fast greedy search (beam_size=1) without timestamps for low-latency partials
+    segments, _ = model().transcribe(
+        audio_data,
+        beam_size=1,
+        word_timestamps=False,
+    )
+
+    texts = [segment.text for segment in segments]
+    return {
+        "text": "".join(texts).strip(),
+        "final": False,
+    }
+
 def main() -> None:
     worker = Worker()
     worker.register("transcribe", transcribe)
+    worker.register("transcribe_partial", transcribe_partial)
     worker.run()
 
 if __name__ == "__main__":

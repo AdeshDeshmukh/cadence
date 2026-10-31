@@ -184,6 +184,42 @@ func TestWhisperEngine_Stream(t *testing.T) {
 	}
 }
 
+func TestWhisperEngine_StreamPartial(t *testing.T) {
+	mockResp := worker.NewResponse("req-partial", true, map[string]any{
+		"text":  "hello world",
+		"final": false,
+	})
+
+	caller := &mockWorkerCaller{resp: mockResp}
+	engine := NewWhisperEngine(caller)
+
+	in := make(chan audio.Chunk, 1)
+	// 9600 samples = 600ms at 16kHz
+	in <- audio.Chunk{Samples: make([]float32, 9600), SampleRate: 16000}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	out, err := engine.Stream(ctx, in)
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+
+	select {
+	case res := <-out:
+		if res.Text != "hello world" {
+			t.Fatalf("expected 'hello world', got %q", res.Text)
+		}
+		if res.Final {
+			t.Fatal("expected partial result to not be final")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for partial result")
+	}
+
+	close(in)
+}
+
 func TestWhisperEngine_StreamCancel(t *testing.T) {
 	caller := &mockWorkerCaller{}
 	engine := NewWhisperEngine(caller)

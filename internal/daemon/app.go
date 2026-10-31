@@ -397,8 +397,10 @@ func (a *App) Handle(_ context.Context, req ipc.Request) (any, error) {
 		a.mu.Lock()
 		rec := a.isRecording
 		var sessID string
+		var partial string
 		if a.activeSess != nil {
 			sessID = a.activeSess.ID
+			partial = a.activeSess.GetPartial()
 		}
 		a.mu.Unlock()
 
@@ -407,6 +409,7 @@ func (a *App) Handle(_ context.Context, req ipc.Request) (any, error) {
 			"version":   version.Version,
 			"recording": rec,
 			"session":   sessID,
+			"partial":   partial,
 			"shortcut":  a.cfg.Hotkey.Shortcut,
 			"mode":      a.cfg.Hotkey.Mode,
 		}, nil

@@ -53,3 +53,43 @@ func TestPipeline(t *testing.T) {
 		t.Fatalf("state=%s", session.GetState())
 	}
 }
+
+func TestPipeline_StreamingPartials(t *testing.T) {
+	capture := audio.NewMockCapture([]audio.Chunk{{
+		Samples:    make([]float32, 320),
+		SampleRate: 16000,
+	}})
+
+	clipboard := paste.NewClipboard()
+	processor := postprocess.New()
+	store := storage.NewMemory()
+
+	kernel := pipeline.NewKernel(
+		capture,
+		asr.MockEngine{Text: "partial speech"},
+		clipboard,
+		processor,
+		store,
+	)
+
+	session := pipeline.NewSession("streaming-test")
+	var capturedPartial string
+	session.SetOnPartial(func(text string) {
+		capturedPartial = text
+	})
+
+	if err := kernel.Run(
+		context.Background(),
+		session,
+		postprocess.Context{Language: "en", Mode: "dictation"},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if capturedPartial != "partial speech" {
+		t.Fatalf("expected partial callback to capture 'partial speech', got %q", capturedPartial)
+	}
+	if session.GetPartial() != "partial speech" {
+		t.Fatalf("expected session partial 'partial speech', got %q", session.GetPartial())
+	}
+}

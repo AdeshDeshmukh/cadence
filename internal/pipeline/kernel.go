@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/AdeshDeshmukh/cadence/internal/asr"
@@ -47,20 +48,44 @@ func (k *Kernel) Run(
 		return fmt.Errorf("capture: %w", err)
 	}
 
+	streamIn := make(chan audio.Chunk, 16)
+	var streamWg sync.WaitGroup
+
+	partialsCh, streamErr := k.asr.Stream(ctx, streamIn)
+	if streamErr == nil && partialsCh != nil {
+		streamWg.Add(1)
+		go func() {
+			defer streamWg.Done()
+			for partial := range partialsCh {
+				session.UpdatePartial(partial.Text)
+			}
+		}()
+	}
+
 	var chunks []audio.Chunk
 
 	for {
 		select {
 		case <-ctx.Done():
+			close(streamIn)
+			streamWg.Wait()
 			_ = k.capture.Stop()
 			session.SetState(Cancelled)
 			return ctx.Err()
 
 		case chunk, ok := <-chunksCh:
 			if !ok {
+				close(streamIn)
+				streamWg.Wait()
 				goto transcribe
 			}
 			chunks = append(chunks, chunk)
+			if partialsCh != nil {
+				select {
+				case streamIn <- chunk:
+				default:
+				}
+			}
 		}
 	}
 

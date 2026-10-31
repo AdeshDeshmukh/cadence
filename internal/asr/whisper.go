@@ -116,14 +116,14 @@ func (w *WhisperEngine) Stream(
 	ctx context.Context,
 	in <-chan audio.Chunk,
 ) (<-chan PartialResult, error) {
-	out := make(chan PartialResult, 2)
+	out := make(chan PartialResult, 4)
 
 	go func() {
 		defer close(out)
 
 		var chunks []audio.Chunk
 		bufferedSamples := 0
-		const maxBufferedSamples = 16000 * 5
+		const partialBufferThreshold = 16000 * 600 / 1000 // 600ms
 
 		for {
 			select {
@@ -148,15 +148,15 @@ func (w *WhisperEngine) Stream(
 					}
 					return
 				}
+
 				chunks = append(chunks, chunk)
 				bufferedSamples += len(chunk.Samples)
-				if bufferedSamples >= maxBufferedSamples {
-					if res, err := w.Transcribe(ctx, chunks); err == nil && res.Text != "" {
+				if bufferedSamples >= partialBufferThreshold {
+					if partialText, err := w.transcribePartial(ctx, chunks); err == nil && partialText != "" {
 						select {
 						case out <- PartialResult{
-							Text:     res.Text,
-							Language: res.Language,
-							Final:    false,
+							Text:  partialText,
+							Final: false,
 						}:
 						case <-ctx.Done():
 							return
@@ -169,6 +169,47 @@ func (w *WhisperEngine) Stream(
 	}()
 
 	return out, nil
+}
+
+func (w *WhisperEngine) transcribePartial(ctx context.Context, chunks []audio.Chunk) (string, error) {
+	if len(chunks) == 0 {
+		return "", nil
+	}
+	totalSamples := 0
+	for _, chunk := range chunks {
+		totalSamples += len(chunk.Samples)
+	}
+	samples := make([]float32, 0, totalSamples)
+	sampleRate := 16000
+	for _, chunk := range chunks {
+		if chunk.SampleRate > 0 {
+			sampleRate = chunk.SampleRate
+		}
+		samples = append(samples, chunk.Samples...)
+	}
+	if len(samples) == 0 {
+		return "", nil
+	}
+	if sampleRate != 16000 {
+		samples = resampleLinear(samples, sampleRate, 16000)
+		sampleRate = 16000
+	}
+
+	params := map[string]any{
+		"audio":       samples,
+		"sample_rate": sampleRate,
+	}
+
+	resp, err := w.caller.Call(ctx, "transcribe_partial", params)
+	if err == nil && resp != nil && resp.OK {
+		return resp.GetString("text"), nil
+	}
+
+	res, err := w.Transcribe(ctx, chunks)
+	if err != nil {
+		return "", err
+	}
+	return res.Text, nil
 }
 
 func resampleLinear(samples []float32, inRate, outRate int) []float32 {
