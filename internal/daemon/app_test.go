@@ -148,6 +148,9 @@ func TestApp_LifecycleAndIPC(t *testing.T) {
 	if !ok || statusMap["status"] != "running" {
 		t.Fatalf("unexpected status response: %v", statusResp)
 	}
+	if _, hasPartial := statusMap["partial"]; !hasPartial {
+		t.Fatal("expected status response to contain 'partial' field")
+	}
 }
 
 func TestApp_PushToTalkSession(t *testing.T) {

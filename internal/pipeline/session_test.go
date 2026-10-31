@@ -57,3 +57,28 @@ func TestContextCancellation(t *testing.T) {
 		t.Fatal("invalid start time")
 	}
 }
+
+func TestSession_StreamingPartials(t *testing.T) {
+	s := pipeline.NewSession("stream-sess")
+
+	var callbackText string
+	s.SetOnPartial(func(text string) {
+		callbackText = text
+	})
+
+	s.UpdatePartial("hello")
+	if s.GetPartial() != "hello" {
+		t.Fatalf("expected 'hello', got %q", s.GetPartial())
+	}
+	if callbackText != "hello" {
+		t.Fatalf("expected callback 'hello', got %q", callbackText)
+	}
+
+	s.UpdatePartial("hello world")
+	if s.GetPartial() != "hello world" {
+		t.Fatalf("expected 'hello world', got %q", s.GetPartial())
+	}
+	if callbackText != "hello world" {
+		t.Fatalf("expected callback 'hello world', got %q", callbackText)
+	}
+}
