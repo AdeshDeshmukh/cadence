@@ -99,6 +99,16 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 			"template": "Best regards,\nAlice",
 			"expanded": "Best regards,\nAlice",
 		}, nil
+	case "polish":
+		params, _ := req.Params.(map[string]any)
+		text, _ := params["text"].(string)
+		return map[string]any{
+			"text":       "Polished: " + text,
+			"model":      "llama3.2",
+			"tokens_in":  10,
+			"tokens_out": 12,
+			"latency_ms": 42,
+		}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -510,5 +520,33 @@ func TestCLI_Snippet_OfflineFallback(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Offline template") {
 		t.Fatalf("expected expanded offline snippet in preview, got: %s", out.String())
+	}
+}
+
+func TestCLI_Polish(t *testing.T) {
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("cad_polish_%d.sock", time.Now().UnixNano()))
+	cleanup := startMockDaemon(t, sockPath)
+	defer cleanup()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sockPath,
+	}
+
+	var out bytes.Buffer
+	if err := cmdPolish(context.Background(), client, []string{"hello", "world", "--profile", "general"}, &out); err != nil {
+		t.Fatalf("cmdPolish failed: %v", err)
+	}
+
+	if !strings.Contains(out.String(), "Polished: hello world") {
+		t.Fatalf("expected polished output, got: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "model: llama3.2") {
+		t.Fatalf("expected model info, got: %s", out.String())
+	}
+
+	// Test empty text
+	if err := cmdPolish(context.Background(), client, []string{}, &out); err == nil {
+		t.Fatalf("expected error for empty args")
 	}
 }
