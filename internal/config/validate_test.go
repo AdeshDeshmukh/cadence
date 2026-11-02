@@ -51,6 +51,18 @@ func TestValidateConfigErrors(t *testing.T) {
 	}
 
 	cfg = config.Default()
+	cfg.Polish.TimeoutMs = -1
+	if err := config.Validate(cfg); err == nil {
+		t.Fatal("expected error for negative polish timeout")
+	}
+
+	cfg = config.Default()
+	cfg.Polish.Backend = "invalid_llm"
+	if err := config.Validate(cfg); err == nil {
+		t.Fatal("expected error for invalid polish backend")
+	}
+
+	cfg = config.Default()
 	cfg.VAD.Engine = "invalid_vad"
 	if err := config.Validate(cfg); err == nil {
 		t.Fatal("expected error for invalid vad engine")

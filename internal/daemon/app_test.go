@@ -13,6 +13,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/hotkey"
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
 	"github.com/AdeshDeshmukh/cadence/internal/paste"
+	"github.com/AdeshDeshmukh/cadence/internal/polish"
 	"github.com/AdeshDeshmukh/cadence/internal/postprocess"
 	"github.com/AdeshDeshmukh/cadence/internal/storage"
 	"github.com/AdeshDeshmukh/cadence/internal/vad"
@@ -621,5 +622,77 @@ func TestApp_IPCSnippets(t *testing.T) {
 	listAfter, ok := listResAfter.([]any)
 	if !ok || len(listAfter) != 0 {
 		t.Fatalf("expected 0 snippets after delete, got: %v", listResAfter)
+	}
+}
+
+func TestApp_PolisherIntegration(t *testing.T) {
+	cfg := config.Default()
+	cfg.Polish.Enabled = true
+	cfg.Polish.TimeoutMs = 1000
+
+	mock := polish.NewMockPolisher(func(req polish.Request) (polish.Response, error) {
+		return polish.Response{
+			Text:  "mocked polished text",
+			Model: "mock",
+		}, nil
+	})
+	paster := &recordingPaster{}
+	store := storage.NewMemory()
+
+	chunk := audio.Chunk{
+		Samples:    []float32{0.1, 0.2, -0.1},
+		SampleRate: 16000,
+		Timestamp:  time.Now(),
+	}
+	capture := &testLiveCapture{chunk: chunk}
+	engine := asr.MockEngine{Text: "raw unpolished text"}
+	simHotkey := hotkey.NewSimulatedListener("Cmd+Shift+Space", hotkey.ModePushToTalk)
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to bind test listener: %v", err)
+	}
+
+	app := NewApp(
+		cfg,
+		WithCapture(capture),
+		WithASR(engine),
+		WithPaster(paster),
+		WithStore(store),
+		WithHotkeyListener(simHotkey),
+		WithIPCListener(l),
+		WithPolisher(mock),
+	)
+
+	if app.Polisher() != mock {
+		t.Fatalf("expected app.Polisher() to match configured mock polisher")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := app.Start(ctx); err != nil {
+		t.Fatalf("failed to start app: %v", err)
+	}
+	defer app.Stop()
+
+	// Press hotkey to start dictation
+	simHotkey.Emit(hotkey.EventKeyDown)
+	time.Sleep(50 * time.Millisecond)
+
+	// Release hotkey to stop dictation and process
+	simHotkey.Emit(hotkey.EventKeyUp)
+
+	// Wait for pipeline processing to finish and paste
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if paster.Text() == "mocked polished text" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if got := paster.Text(); got != "mocked polished text" {
+		t.Fatalf("expected pasted text 'mocked polished text', got %q", got)
 	}
 }
