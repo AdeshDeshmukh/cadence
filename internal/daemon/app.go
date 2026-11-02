@@ -140,7 +140,23 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 	}
 
 	if a.polisher == nil && cfg.Polish.Enabled {
-		a.polisher = polish.NewNoopPolisher()
+		switch cfg.Polish.Backend {
+		case "ollama":
+			endpoint := cfg.Polish.Endpoint
+			if endpoint == "" {
+				endpoint = "http://127.0.0.1:11434"
+			}
+			model := cfg.Polish.Model
+			if model == "" {
+				model = "llama3.2"
+			}
+			a.polisher = polish.NewOllamaPolisher(
+				polish.WithOllamaEndpoint(endpoint),
+				polish.WithOllamaModel(model),
+			)
+		default:
+			a.polisher = polish.NewNoopPolisher()
+		}
 	}
 
 	if a.process == nil {
@@ -439,7 +455,7 @@ func (a *App) Polisher() polish.Polisher {
 }
 
 // Handle routes incoming IPC client commands.
-func (a *App) Handle(_ context.Context, req ipc.Request) (any, error) {
+func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 	switch req.Method {
 	case "ping":
 		return "pong", nil
@@ -455,13 +471,16 @@ func (a *App) Handle(_ context.Context, req ipc.Request) (any, error) {
 		a.mu.Unlock()
 
 		return map[string]any{
-			"status":    "running",
-			"version":   version.Version,
-			"recording": rec,
-			"session":   sessID,
-			"partial":   partial,
-			"shortcut":  a.cfg.Hotkey.Shortcut,
-			"mode":      a.cfg.Hotkey.Mode,
+			"status":         "running",
+			"version":        version.Version,
+			"recording":      rec,
+			"session":        sessID,
+			"partial":        partial,
+			"shortcut":       a.cfg.Hotkey.Shortcut,
+			"mode":           a.cfg.Hotkey.Mode,
+			"polish_enabled": a.cfg.Polish.Enabled,
+			"polish_backend": a.cfg.Polish.Backend,
+			"polish_model":   a.cfg.Polish.Model,
 		}, nil
 	case "dictate_start":
 		a.startDictation()
@@ -626,6 +645,49 @@ func (a *App) Handle(_ context.Context, req ipc.Request) (any, error) {
 		clip, _ := paste.GetSystemClipboard()
 		expanded := postprocess.ExpandVariables(template, clip, time.Now())
 		return map[string]any{"ok": true, "template": template, "expanded": expanded}, nil
+
+	case "polish":
+		params, _ := req.Params.(map[string]any)
+		text, _ := params["text"].(string)
+		if strings.TrimSpace(text) == "" {
+			return nil, errors.New("missing or empty text parameter for polish")
+		}
+		profile, _ := params["profile"].(string)
+		if profile == "" {
+			profile = a.cfg.Polish.DefaultProfile
+		}
+		appContext, _ := params["application"].(string)
+
+		if a.polisher == nil {
+			return map[string]any{
+				"text":       text,
+				"model":      "none",
+				"latency_ms": 0,
+			}, nil
+		}
+
+		timeout := time.Duration(a.cfg.Polish.TimeoutMs) * time.Millisecond
+		if timeout <= 0 {
+			timeout = 2 * time.Second
+		}
+		callCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+
+		resp, err := a.polisher.Polish(callCtx, polish.Request{
+			Text:        text,
+			Profile:     profile,
+			Application: appContext,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("polish: %w", err)
+		}
+		return map[string]any{
+			"text":       resp.Text,
+			"model":      resp.Model,
+			"tokens_in":  resp.TokensIn,
+			"tokens_out": resp.TokensOut,
+			"latency_ms": resp.Latency.Milliseconds(),
+		}, nil
 
 	default:
 		return nil, errors.New("unknown method: " + req.Method)

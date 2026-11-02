@@ -696,3 +696,67 @@ func TestApp_PolisherIntegration(t *testing.T) {
 		t.Fatalf("expected pasted text 'mocked polished text', got %q", got)
 	}
 }
+
+func TestApp_OllamaPolisherInitAndIPC(t *testing.T) {
+	cfg := config.Default()
+	cfg.Polish.Enabled = true
+	cfg.Polish.Backend = "ollama"
+	cfg.Polish.Model = "mistral"
+	cfg.Polish.Endpoint = "http://127.0.0.1:11434"
+
+	app := NewApp(cfg)
+	polisher := app.Polisher()
+	if polisher == nil {
+		t.Fatalf("expected non-nil polisher")
+	}
+	ollama, ok := polisher.(*polish.OllamaPolisher)
+	if !ok {
+		t.Fatalf("expected *polish.OllamaPolisher, got %T", polisher)
+	}
+	if ollama.Model() != "mistral" {
+		t.Fatalf("expected model mistral, got %s", ollama.Model())
+	}
+	if ollama.Endpoint() != "http://127.0.0.1:11434" {
+		t.Fatalf("expected endpoint http://127.0.0.1:11434, got %s", ollama.Endpoint())
+	}
+
+	// Test IPC status includes polish details
+	ctx := context.Background()
+	res, err := app.Handle(ctx, ipc.Request{Method: "status"})
+	if err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	m, ok := res.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map response, got %T", res)
+	}
+	if m["polish_enabled"] != true || m["polish_backend"] != "ollama" || m["polish_model"] != "mistral" {
+		t.Fatalf("unexpected polish status: %v", m)
+	}
+
+	// Test IPC polish call with mock polisher
+	mock := polish.NewMockPolisher(func(req polish.Request) (polish.Response, error) {
+		return polish.Response{
+			Text:      "Polished: " + req.Text,
+			Model:     "mock-llm",
+			TokensIn:  5,
+			TokensOut: 7,
+			Latency:   10 * time.Millisecond,
+		}, nil
+	})
+	appWithMock := NewApp(cfg, WithPolisher(mock))
+	polishRes, err := appWithMock.Handle(ctx, ipc.Request{
+		Method: "polish",
+		Params: map[string]any{
+			"text":    "raw text",
+			"profile": "code",
+		},
+	})
+	if err != nil {
+		t.Fatalf("polish IPC failed: %v", err)
+	}
+	pMap, ok := polishRes.(map[string]any)
+	if !ok || pMap["text"] != "Polished: raw text" || pMap["model"] != "mock-llm" {
+		t.Fatalf("unexpected polish result: %v", polishRes)
+	}
+}

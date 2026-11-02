@@ -33,6 +33,7 @@ Commands:
   recover [flags]    Retrieve text from last cancelled or failed session
   vocab <subcommand> Manage custom vocabulary (list, add, remove, import, export)
   snippet <subcommand> Manage voice templates with dynamic vars (list, add, remove, test)
+  polish <text>      Format and polish text using configured LLM (Ollama)
   config [show|path] Inspect configuration and system file paths
   doctor             Perform diagnostics on system, daemon, and storage
   version            Print the version of cadence
@@ -118,6 +119,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 
+	case "polish":
+		if err := cmdPolish(ctx, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
 	case "config":
 		if err := cmdConfig(cfg, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
@@ -162,6 +170,11 @@ func cmdStatus(ctx context.Context, client ipc.Client, out io.Writer) error {
 	}
 	fmt.Fprintf(out, "  Shortcut:  %v\n", data["shortcut"])
 	fmt.Fprintf(out, "  Mode:      %v\n", data["mode"])
+	if enabled, ok := data["polish_enabled"].(bool); ok && enabled {
+		backend := data["polish_backend"]
+		model := data["polish_model"]
+		fmt.Fprintf(out, "  Polish:    enabled (%v / %v)\n", backend, model)
+	}
 	return nil
 }
 
@@ -833,5 +846,66 @@ func cmdSnippetTest(ctx context.Context, cfg config.Config, client ipc.Client, a
 	fmt.Fprintln(out, "----------------------------------------")
 	fmt.Fprintln(out, expanded)
 	fmt.Fprintln(out, "----------------------------------------")
+	return nil
+}
+
+func cmdPolish(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: cadence polish <text> [--profile <name>] [--app <name>]")
+	}
+
+	var textParts []string
+	profile := ""
+	application := ""
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--profile", "-p":
+			if i+1 < len(args) {
+				profile = args[i+1]
+				i++
+			}
+		case "--app", "-a":
+			if i+1 < len(args) {
+				application = args[i+1]
+				i++
+			}
+		default:
+			textParts = append(textParts, args[i])
+		}
+	}
+
+	text := strings.Join(textParts, " ")
+	if strings.TrimSpace(text) == "" {
+		return errors.New("empty text to polish")
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	params := map[string]any{
+		"text":        text,
+		"profile":     profile,
+		"application": application,
+	}
+
+	res, err := client.Call(ctx, "polish", params)
+	if err != nil {
+		return fmt.Errorf("polish failed: %w", err)
+	}
+
+	m, ok := res.(map[string]any)
+	if !ok {
+		return errors.New("unexpected response from cadenced")
+	}
+
+	polished, _ := m["text"].(string)
+	model, _ := m["model"].(string)
+	latency, _ := m["latency_ms"].(float64)
+
+	fmt.Fprintf(out, "%s\n", polished)
+	if model != "" && model != "none" {
+		fmt.Fprintf(out, "(model: %s, latency: %dms)\n", model, int64(latency))
+	}
 	return nil
 }
