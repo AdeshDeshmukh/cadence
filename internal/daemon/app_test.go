@@ -760,3 +760,39 @@ func TestApp_OllamaPolisherInitAndIPC(t *testing.T) {
 		t.Fatalf("unexpected polish result: %v", polishRes)
 	}
 }
+
+func TestApp_OpenAIPolisherInit(t *testing.T) {
+	cfg := config.Default()
+	cfg.Polish.Enabled = true
+	cfg.Polish.Backend = "openai"
+	cfg.Polish.Model = "gpt-4o"
+	cfg.Polish.Endpoint = "https://api.openai.com/v1"
+	cfg.Polish.APIKey = "sk-daemon-test-key"
+	cfg.Privacy.NetworkMode = "cloud"
+
+	app := NewApp(cfg)
+	polisher := app.Polisher()
+	if polisher == nil {
+		t.Fatalf("expected non-nil polisher")
+	}
+	oa, ok := polisher.(*polish.OpenAIPolisher)
+	if !ok {
+		t.Fatalf("expected *polish.OpenAIPolisher, got %T", polisher)
+	}
+	if oa.Model() != "gpt-4o" {
+		t.Fatalf("expected model gpt-4o, got %s", oa.Model())
+	}
+	if oa.Endpoint() != "https://api.openai.com/v1" {
+		t.Fatalf("expected endpoint https://api.openai.com/v1, got %s", oa.Endpoint())
+	}
+
+	// Verify status IPC reports openai backend
+	res, err := app.Handle(context.Background(), ipc.Request{Method: "status"})
+	if err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	m, ok := res.(map[string]any)
+	if !ok || m["polish_backend"] != "openai" || m["polish_model"] != "gpt-4o" {
+		t.Fatalf("unexpected status result: %v", m)
+	}
+}
