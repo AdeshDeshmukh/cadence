@@ -154,6 +154,21 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 				polish.WithOllamaEndpoint(endpoint),
 				polish.WithOllamaModel(model),
 			)
+		case "openai":
+			endpoint := cfg.Polish.Endpoint
+			if endpoint == "" {
+				endpoint = "https://api.openai.com/v1"
+			}
+			model := cfg.Polish.Model
+			if model == "" {
+				model = "gpt-4o-mini"
+			}
+			a.polisher = polish.NewOpenAIPolisher(
+				polish.WithOpenAIEndpoint(endpoint),
+				polish.WithOpenAIModel(model),
+				polish.WithOpenAIAPIKey(cfg.Polish.APIKey),
+				polish.WithOpenAINetworkMode(cfg.Privacy.NetworkMode),
+			)
 		default:
 			a.polisher = polish.NewNoopPolisher()
 		}
