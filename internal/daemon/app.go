@@ -21,6 +21,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
 	"github.com/AdeshDeshmukh/cadence/internal/paste"
 	"github.com/AdeshDeshmukh/cadence/internal/pipeline"
+	"github.com/AdeshDeshmukh/cadence/internal/polish"
 	"github.com/AdeshDeshmukh/cadence/internal/postprocess"
 	"github.com/AdeshDeshmukh/cadence/internal/storage"
 	"github.com/AdeshDeshmukh/cadence/internal/vad"
@@ -38,6 +39,7 @@ type App struct {
 	paster    paste.Paster
 	store     storage.Store
 	process   *postprocess.Pipeline
+	polisher  polish.Polisher
 	detector  vad.Detector
 	hotkey    hotkey.Listener
 
@@ -109,6 +111,11 @@ func WithWorkerManager(m *worker.Manager) Option {
 	return func(a *App) { a.workerMgr = m }
 }
 
+// WithPolisher sets a custom LLM text polisher.
+func WithPolisher(p polish.Polisher) Option {
+	return func(a *App) { a.polisher = p }
+}
+
 // NewApp instantiates a fully configured Cadence daemon application.
 func NewApp(cfg config.Config, opts ...Option) *App {
 	a := &App{
@@ -132,6 +139,10 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 		}
 	}
 
+	if a.polisher == nil && cfg.Polish.Enabled {
+		a.polisher = polish.NewNoopPolisher()
+	}
+
 	if a.process == nil {
 		var steps []postprocess.Step
 		if cfg.Post.FillerRemoval {
@@ -148,6 +159,13 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 		}
 		if cfg.Post.Snippets {
 			steps = append(steps, postprocess.NewSnippets())
+		}
+		if cfg.Polish.Enabled && a.polisher != nil {
+			timeout := time.Duration(cfg.Polish.TimeoutMs) * time.Millisecond
+			if timeout <= 0 {
+				timeout = 2 * time.Second
+			}
+			steps = append(steps, polish.NewStep(a.polisher, cfg.Polish.DefaultProfile, timeout))
 		}
 		a.process = postprocess.New(steps...)
 	}
@@ -413,6 +431,11 @@ func (a *App) ActiveSession() *pipeline.Session {
 // Detector returns the active voice activity detector.
 func (a *App) Detector() vad.Detector {
 	return a.detector
+}
+
+// Polisher returns the active LLM text polisher.
+func (a *App) Polisher() polish.Polisher {
+	return a.polisher
 }
 
 // Handle routes incoming IPC client commands.

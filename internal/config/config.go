@@ -11,6 +11,7 @@ type Config struct {
 	VAD     VADConfig
 	Post    PostConfig
 	Paste   PasteConfig
+	Polish  PolishConfig
 	Privacy PrivacyConfig
 	Hotkey  HotkeyConfig
 	IPC     IPCConfig
@@ -46,6 +47,16 @@ type PostConfig struct {
 type PasteConfig struct {
 	PreserveClipboard bool
 	RestoreDelayMs    int
+}
+
+type PolishConfig struct {
+	Enabled        bool
+	Backend        string
+	Model          string
+	DefaultProfile string
+	TimeoutMs      int
+	Endpoint       string
+	APIKey         string
 }
 
 type PrivacyConfig struct {
@@ -108,6 +119,13 @@ func Default() Config {
 		Paste: PasteConfig{
 			PreserveClipboard: true,
 			RestoreDelayMs:    80,
+		},
+		Polish: PolishConfig{
+			Enabled:        false,
+			Backend:        "noop",
+			Model:          "llama3.2",
+			DefaultProfile: "general",
+			TimeoutMs:      2000,
 		},
 		Privacy: PrivacyConfig{
 			NetworkMode: "local_only",

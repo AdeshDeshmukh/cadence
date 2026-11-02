@@ -25,6 +25,13 @@ func Validate(c Config) error {
 		return fmt.Errorf("paste.restore_delay_ms must not be negative")
 	}
 
+	if c.Polish.TimeoutMs < 0 {
+		return fmt.Errorf("polish.timeout_ms must not be negative")
+	}
+	if c.Polish.Backend != "" && c.Polish.Backend != "noop" && c.Polish.Backend != "ollama" && c.Polish.Backend != "openai" {
+		return fmt.Errorf("invalid polish.backend")
+	}
+
 	if c.VAD.Engine != "" && c.VAD.Engine != "silero" && c.VAD.Engine != "adaptive" && c.VAD.Engine != "energy" {
 		return fmt.Errorf("invalid vad.engine")
 	}
