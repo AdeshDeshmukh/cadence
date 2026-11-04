@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/AdeshDeshmukh/cadence/internal/config"
+	appcontext "github.com/AdeshDeshmukh/cadence/internal/context"
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
 	"github.com/AdeshDeshmukh/cadence/internal/paste"
 	"github.com/AdeshDeshmukh/cadence/internal/polish"
@@ -36,6 +37,7 @@ Commands:
   snippet <subcommand> Manage voice templates with dynamic vars (list, add, remove, test)
   profile <subcommand> Manage prompt profiles (list, show, set, delete)
   polish <text>      Format and polish text using configured LLM (Ollama/OpenAI)
+  app                Show detected active foreground application and category
   config [show|path] Inspect configuration and system file paths
   doctor             Perform diagnostics on system, daemon, and storage
   version            Print the version of cadence
@@ -135,6 +137,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 
+	case "app", "active-app":
+		if err := cmdApp(ctx, client, stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
 	case "config":
 		if err := cmdConfig(cfg, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
@@ -183,6 +192,9 @@ func cmdStatus(ctx context.Context, client ipc.Client, out io.Writer) error {
 		backend := data["polish_backend"]
 		model := data["polish_model"]
 		fmt.Fprintf(out, "  Polish:    enabled (%v / %v)\n", backend, model)
+	}
+	if appName, ok := data["active_app"].(string); ok && appName != "" {
+		fmt.Fprintf(out, "  Active App: %s\n", appName)
 	}
 	return nil
 }
@@ -1154,5 +1166,47 @@ func cmdProfileDelete(ctx context.Context, cfg config.Config, client ipc.Client,
 	}
 
 	fmt.Fprintf(out, "Profile %q removed successfully.\n", name)
+	return nil
+}
+
+func cmdApp(ctx context.Context, client ipc.Client, out io.Writer) error {
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	var info appcontext.AppInfo
+	res, err := client.Call(callCtx, "active_app", nil)
+	if err == nil {
+		if m, ok := res.(map[string]any); ok {
+			info.Name, _ = m["name"].(string)
+			info.BundleID, _ = m["bundle_id"].(string)
+			info.WindowTitle, _ = m["window_title"].(string)
+			if pid, ok := m["pid"].(float64); ok {
+				info.ProcessID = int(pid)
+			}
+			if cat, ok := m["category"].(string); ok {
+				info.Category = appcontext.Category(cat)
+			}
+		}
+	} else {
+		// Offline fallback detector
+		d := appcontext.NewDefaultDetector()
+		info, err = d.Detect(ctx)
+		if err != nil {
+			return fmt.Errorf("detect active application: %w", err)
+		}
+	}
+
+	fmt.Fprintf(out, "Active Application:\n")
+	fmt.Fprintf(out, "  Name:         %s\n", info.Name)
+	if info.BundleID != "" {
+		fmt.Fprintf(out, "  Bundle ID:    %s\n", info.BundleID)
+	}
+	if info.WindowTitle != "" {
+		fmt.Fprintf(out, "  Window Title: %s\n", info.WindowTitle)
+	}
+	if info.ProcessID > 0 {
+		fmt.Fprintf(out, "  PID:          %d\n", info.ProcessID)
+	}
+	fmt.Fprintf(out, "  Category:     %s\n", info.Category)
 	return nil
 }

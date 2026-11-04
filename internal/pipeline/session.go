@@ -8,6 +8,7 @@ import (
 type Session struct {
 	ID          string
 	State       State
+	Application string
 	RawText     string
 	FinalText   string
 	PartialText string
@@ -59,4 +60,16 @@ func (s *Session) GetPartial() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.PartialText
+}
+
+func (s *Session) SetApplication(app string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Application = app
+}
+
+func (s *Session) GetApplication() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.Application
 }
