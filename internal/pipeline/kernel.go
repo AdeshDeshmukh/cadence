@@ -166,6 +166,10 @@ transcribe:
 	session.RawText = result.Text
 	session.SetState(Processing)
 
+	if app := session.GetApplication(); app != "" && pc.Application == "" {
+		pc.Application = app
+	}
+
 	session.FinalText = k.process.Apply(result.Text, pc)
 	session.SetState(Pasting)
 

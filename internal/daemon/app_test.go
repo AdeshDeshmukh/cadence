@@ -10,6 +10,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/asr"
 	"github.com/AdeshDeshmukh/cadence/internal/audio"
 	"github.com/AdeshDeshmukh/cadence/internal/config"
+	appcontext "github.com/AdeshDeshmukh/cadence/internal/context"
 	"github.com/AdeshDeshmukh/cadence/internal/hotkey"
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
 	"github.com/AdeshDeshmukh/cadence/internal/paste"
@@ -866,5 +867,44 @@ func TestApp_ProfilesIPC(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("expected error getting deleted profile, got nil")
+	}
+}
+
+func TestApp_ActiveAppContextAndIPC(t *testing.T) {
+	cfg := config.Default()
+	mockApp := appcontext.AppInfo{
+		Name:        "Visual Studio Code",
+		BundleID:    "com.microsoft.VSCode",
+		WindowTitle: "daemon/app.go - cadence",
+		ProcessID:   9988,
+		Category:    appcontext.CategoryCode,
+	}
+	detector := appcontext.NewMockDetector(mockApp)
+
+	app := NewApp(cfg, WithAppDetector(detector))
+	if app.AppDetector() != detector {
+		t.Fatalf("expected configured detector to match")
+	}
+
+	ctx := context.Background()
+
+	// 1. Test IPC active_app
+	res, err := app.Handle(ctx, ipc.Request{Method: "active_app"})
+	if err != nil {
+		t.Fatalf("active_app failed: %v", err)
+	}
+	info, ok := res.(appcontext.AppInfo)
+	if !ok || info.Name != "Visual Studio Code" || info.Category != appcontext.CategoryCode {
+		t.Fatalf("unexpected app info: %+v", res)
+	}
+
+	// 2. Test IPC status includes active_app
+	statusRes, err := app.Handle(ctx, ipc.Request{Method: "status"})
+	if err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	sMap, ok := statusRes.(map[string]any)
+	if !ok || sMap["active_app"] != "Visual Studio Code" {
+		t.Fatalf("unexpected status active_app: %v", statusRes)
 	}
 }

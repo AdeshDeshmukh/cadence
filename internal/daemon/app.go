@@ -17,6 +17,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/asr"
 	"github.com/AdeshDeshmukh/cadence/internal/audio"
 	"github.com/AdeshDeshmukh/cadence/internal/config"
+	appcontext "github.com/AdeshDeshmukh/cadence/internal/context"
 	"github.com/AdeshDeshmukh/cadence/internal/hotkey"
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
 	"github.com/AdeshDeshmukh/cadence/internal/paste"
@@ -31,18 +32,19 @@ import (
 
 // App manages the lifecycle, hardware bindings, and IPC for the Cadence daemon.
 type App struct {
-	cfg       config.Config
-	kernel    *pipeline.Kernel
-	capture   audio.Capture
-	asr       asr.Engine
-	workerMgr *worker.Manager
-	paster    paste.Paster
-	store     storage.Store
-	process   *postprocess.Pipeline
-	polisher  polish.Polisher
-	profiles  *polish.ProfileRegistry
-	detector  vad.Detector
-	hotkey    hotkey.Listener
+	cfg         config.Config
+	kernel      *pipeline.Kernel
+	capture     audio.Capture
+	asr         asr.Engine
+	workerMgr   *worker.Manager
+	paster      paste.Paster
+	store       storage.Store
+	process     *postprocess.Pipeline
+	polisher    polish.Polisher
+	profiles    *polish.ProfileRegistry
+	appDetector appcontext.Detector
+	detector    vad.Detector
+	hotkey      hotkey.Listener
 
 	ipcServer    *ipc.Server
 	ipcListener  net.Listener
@@ -117,6 +119,11 @@ func WithPolisher(p polish.Polisher) Option {
 	return func(a *App) { a.polisher = p }
 }
 
+// WithAppDetector sets a custom active application context detector.
+func WithAppDetector(d appcontext.Detector) Option {
+	return func(a *App) { a.appDetector = d }
+}
+
 // NewApp instantiates a fully configured Cadence daemon application.
 func NewApp(cfg config.Config, opts ...Option) *App {
 	a := &App{
@@ -142,6 +149,10 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 
 	if a.profiles == nil {
 		a.profiles = polish.NewProfileRegistry(a.store)
+	}
+
+	if a.appDetector == nil {
+		a.appDetector = appcontext.NewDefaultDetector()
 	}
 
 	if a.polisher == nil && cfg.Polish.Enabled {
@@ -431,6 +442,16 @@ func (a *App) startDictation() {
 			}
 		}
 
+		if a.appDetector != nil {
+			go func() {
+				detectCtx, cancel := context.WithTimeout(sessCtx, 250*time.Millisecond)
+				defer cancel()
+				if appInfo, err := a.appDetector.Detect(detectCtx); err == nil && appInfo.Name != "" {
+					sess.SetApplication(appInfo.Name)
+				}
+			}()
+		}
+
 		pc := postprocess.Context{
 			Mode:       "dictation",
 			Vocabulary: vocabMap,
@@ -481,6 +502,11 @@ func (a *App) Profiles() *polish.ProfileRegistry {
 	return a.profiles
 }
 
+// AppDetector returns the active application context detector.
+func (a *App) AppDetector() appcontext.Detector {
+	return a.appDetector
+}
+
 // Handle routes incoming IPC client commands.
 func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 	switch req.Method {
@@ -497,6 +523,13 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 		}
 		a.mu.Unlock()
 
+		var appName string
+		if a.appDetector != nil {
+			if info, err := a.appDetector.Detect(ctx); err == nil && info.Name != "" {
+				appName = info.Name
+			}
+		}
+
 		return map[string]any{
 			"status":         "running",
 			"version":        version.Version,
@@ -508,7 +541,18 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			"polish_enabled": a.cfg.Polish.Enabled,
 			"polish_backend": a.cfg.Polish.Backend,
 			"polish_model":   a.cfg.Polish.Model,
+			"active_app":     appName,
 		}, nil
+
+	case "active_app":
+		if a.appDetector == nil {
+			return appcontext.AppInfo{Name: "Unknown", Category: appcontext.CategoryGeneral}, nil
+		}
+		info, err := a.appDetector.Detect(ctx)
+		if err != nil {
+			return appcontext.AppInfo{Name: "Unknown", Category: appcontext.CategoryGeneral}, nil
+		}
+		return info, nil
 	case "dictate_start":
 		a.startDictation()
 		return map[string]any{"ok": true, "action": "started"}, nil

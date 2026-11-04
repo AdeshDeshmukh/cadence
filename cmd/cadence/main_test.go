@@ -127,6 +127,14 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 		return map[string]any{"ok": true}, nil
 	case "polish_profile_delete":
 		return map[string]any{"ok": true}, nil
+	case "active_app":
+		return map[string]any{
+			"name":         "Visual Studio Code",
+			"bundle_id":    "com.microsoft.VSCode",
+			"window_title": "cadence - main.go",
+			"pid":          float64(4567),
+			"category":     "code",
+		}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -614,5 +622,28 @@ func TestCLI_Profile(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "removed successfully") {
 		t.Fatalf("unexpected delete output: %s", out.String())
+	}
+}
+
+func TestCLI_App(t *testing.T) {
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("cad_app_%d.sock", time.Now().UnixNano()))
+	cleanup := startMockDaemon(t, sockPath)
+	defer cleanup()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sockPath,
+	}
+
+	var out bytes.Buffer
+	if err := cmdApp(context.Background(), client, &out); err != nil {
+		t.Fatalf("cmdApp failed: %v", err)
+	}
+
+	if !strings.Contains(out.String(), "Visual Studio Code") {
+		t.Fatalf("expected Visual Studio Code, got: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "Category:     code") {
+		t.Fatalf("expected Category: code, got: %s", out.String())
 	}
 }
