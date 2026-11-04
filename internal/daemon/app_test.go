@@ -796,3 +796,75 @@ func TestApp_OpenAIPolisherInit(t *testing.T) {
 		t.Fatalf("unexpected status result: %v", m)
 	}
 }
+
+func TestApp_ProfilesIPC(t *testing.T) {
+	cfg := config.Default()
+	store := storage.NewMemory()
+	app := NewApp(cfg, WithStore(store))
+
+	if app.Profiles() == nil {
+		t.Fatalf("expected non-nil profile registry")
+	}
+
+	ctx := context.Background()
+
+	// 1. List built-ins
+	listRes, err := app.Handle(ctx, ipc.Request{Method: "polish_profile_list"})
+	if err != nil {
+		t.Fatalf("polish_profile_list failed: %v", err)
+	}
+	pList, ok := listRes.([]polish.Profile)
+	if !ok || len(pList) < 5 {
+		t.Fatalf("expected at least 5 builtins, got: %v", listRes)
+	}
+
+	// 2. Set custom profile
+	setRes, err := app.Handle(ctx, ipc.Request{
+		Method: "polish_profile_set",
+		Params: map[string]any{
+			"name":          "journalist",
+			"description":   "AP news style prose",
+			"system_prompt": "Format as AP style journalist report.",
+			"temperature":   0.25,
+			"custom_rules":  []any{"Inverted pyramid structure"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("polish_profile_set failed: %v", err)
+	}
+	setMap, ok := setRes.(map[string]any)
+	if !ok || setMap["name"] != "journalist" {
+		t.Fatalf("unexpected set result: %v", setRes)
+	}
+
+	// 3. Get custom profile
+	getRes, err := app.Handle(ctx, ipc.Request{
+		Method: "polish_profile_get",
+		Params: map[string]any{"name": "journalist"},
+	})
+	if err != nil {
+		t.Fatalf("polish_profile_get failed: %v", err)
+	}
+	prof, ok := getRes.(polish.Profile)
+	if !ok || prof.Name != "journalist" || prof.Description != "AP news style prose" {
+		t.Fatalf("unexpected profile get: %+v", getRes)
+	}
+
+	// 4. Delete custom profile
+	_, err = app.Handle(ctx, ipc.Request{
+		Method: "polish_profile_delete",
+		Params: map[string]any{"name": "journalist"},
+	})
+	if err != nil {
+		t.Fatalf("polish_profile_delete failed: %v", err)
+	}
+
+	// 5. Get after delete should fail
+	_, err = app.Handle(ctx, ipc.Request{
+		Method: "polish_profile_get",
+		Params: map[string]any{"name": "journalist"},
+	})
+	if err == nil {
+		t.Fatalf("expected error getting deleted profile, got nil")
+	}
+}

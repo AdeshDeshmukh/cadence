@@ -109,6 +109,24 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 			"tokens_out": 12,
 			"latency_ms": 42,
 		}, nil
+	case "polish_profile_list":
+		return []map[string]any{
+			{"name": "general", "is_builtin": true, "description": "General prose"},
+			{"name": "code", "is_builtin": true, "description": "Code formatting"},
+		}, nil
+	case "polish_profile_get":
+		return map[string]any{
+			"name":          "code",
+			"description":   "Code formatting",
+			"system_prompt": "Format code.",
+			"temperature":   0.1,
+			"is_builtin":    true,
+			"custom_rules":  []any{"rule 1"},
+		}, nil
+	case "polish_profile_set":
+		return map[string]any{"ok": true}, nil
+	case "polish_profile_delete":
+		return map[string]any{"ok": true}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -548,5 +566,53 @@ func TestCLI_Polish(t *testing.T) {
 	// Test empty text
 	if err := cmdPolish(context.Background(), client, []string{}, &out); err == nil {
 		t.Fatalf("expected error for empty args")
+	}
+}
+
+func TestCLI_Profile(t *testing.T) {
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("cad_profile_%d.sock", time.Now().UnixNano()))
+	cleanup := startMockDaemon(t, sockPath)
+	defer cleanup()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sockPath,
+	}
+	cfg := config.Default()
+
+	// 1. List
+	var out bytes.Buffer
+	if err := cmdProfile(context.Background(), cfg, client, []string{"list"}, &out); err != nil {
+		t.Fatalf("cmdProfile list failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "general") || !strings.Contains(out.String(), "code") {
+		t.Fatalf("expected general and code in list, got: %s", out.String())
+	}
+
+	// 2. Show
+	out.Reset()
+	if err := cmdProfile(context.Background(), cfg, client, []string{"show", "code"}, &out); err != nil {
+		t.Fatalf("cmdProfile show failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Profile: code") || !strings.Contains(out.String(), "Format code.") {
+		t.Fatalf("unexpected profile show output: %s", out.String())
+	}
+
+	// 3. Set
+	out.Reset()
+	if err := cmdProfile(context.Background(), cfg, client, []string{"set", "custom", "--desc", "Custom desc", "--prompt", "Custom prompt"}, &out); err != nil {
+		t.Fatalf("cmdProfile set failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "configured successfully") {
+		t.Fatalf("unexpected set output: %s", out.String())
+	}
+
+	// 4. Delete
+	out.Reset()
+	if err := cmdProfile(context.Background(), cfg, client, []string{"delete", "custom"}, &out); err != nil {
+		t.Fatalf("cmdProfile delete failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "removed successfully") {
+		t.Fatalf("unexpected delete output: %s", out.String())
 	}
 }

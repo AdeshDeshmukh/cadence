@@ -2,6 +2,7 @@ package storage
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -73,6 +74,23 @@ CREATE TABLE IF NOT EXISTS snippets (
 );
 
 CREATE INDEX IF NOT EXISTS idx_snippets_trigger ON snippets (trigger);
+`,
+	},
+	{
+		version: 4,
+		name:    "create_polish_profiles",
+		up: `
+CREATE TABLE IF NOT EXISTS polish_profiles (
+	name TEXT PRIMARY KEY,
+	description TEXT NOT NULL DEFAULT '',
+	system_prompt TEXT NOT NULL,
+	temperature REAL NOT NULL DEFAULT 0.2,
+	custom_rules TEXT NOT NULL DEFAULT '[]',
+	created_at TIMESTAMP NOT NULL,
+	updated_at TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_polish_profiles_name ON polish_profiles (name);
 `,
 	},
 }
@@ -546,6 +564,94 @@ ORDER BY trigger ASC;
 // DeleteSnippet removes a snippet by its trigger.
 func (s *SQLite) DeleteSnippet(trigger string) error {
 	_, err := s.db.Exec("DELETE FROM snippets WHERE trigger = ?", trigger)
+	return err
+}
+
+// SetPolishProfile creates or updates a custom polish profile.
+func (s *SQLite) SetPolishProfile(p PolishProfile) error {
+	name := strings.TrimSpace(p.Name)
+	if name == "" {
+		return errors.New("profile name cannot be empty")
+	}
+	now := time.Now().UTC()
+	if p.CreatedAt.IsZero() {
+		p.CreatedAt = now
+	}
+	p.UpdatedAt = now
+	p.Name = name
+
+	rulesJSON, err := json.Marshal(p.CustomRules)
+	if err != nil {
+		rulesJSON = []byte("[]")
+	}
+
+	const query = `
+INSERT INTO polish_profiles (name, description, system_prompt, temperature, custom_rules, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(name) DO UPDATE SET
+	description = excluded.description,
+	system_prompt = excluded.system_prompt,
+	temperature = excluded.temperature,
+	custom_rules = excluded.custom_rules,
+	updated_at = excluded.updated_at;
+`
+	_, err = s.db.Exec(query, p.Name, p.Description, p.SystemPrompt, p.Temperature, string(rulesJSON), p.CreatedAt, p.UpdatedAt)
+	return err
+}
+
+// GetPolishProfile retrieves a single polish profile by name.
+func (s *SQLite) GetPolishProfile(name string) (*PolishProfile, error) {
+	const query = `
+SELECT name, description, system_prompt, temperature, custom_rules, created_at, updated_at
+FROM polish_profiles
+WHERE name = ?;
+`
+	var p PolishProfile
+	var rulesRaw string
+	err := s.db.QueryRow(query, name).Scan(
+		&p.Name, &p.Description, &p.SystemPrompt, &p.Temperature, &rulesRaw, &p.CreatedAt, &p.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	_ = json.Unmarshal([]byte(rulesRaw), &p.CustomRules)
+	return &p, nil
+}
+
+// ListPolishProfiles returns all stored custom polish profiles ordered alphabetically.
+func (s *SQLite) ListPolishProfiles() ([]PolishProfile, error) {
+	const query = `
+SELECT name, description, system_prompt, temperature, custom_rules, created_at, updated_at
+FROM polish_profiles
+ORDER BY name ASC;
+`
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []PolishProfile
+	for rows.Next() {
+		var p PolishProfile
+		var rulesRaw string
+		if err := rows.Scan(
+			&p.Name, &p.Description, &p.SystemPrompt, &p.Temperature, &rulesRaw, &p.CreatedAt, &p.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal([]byte(rulesRaw), &p.CustomRules)
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// DeletePolishProfile deletes a polish profile by name.
+func (s *SQLite) DeletePolishProfile(name string) error {
+	_, err := s.db.Exec("DELETE FROM polish_profiles WHERE name = ?", name)
 	return err
 }
 

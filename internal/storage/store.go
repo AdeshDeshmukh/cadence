@@ -49,6 +49,17 @@ func (r SessionRecovery) BestText() string {
 	return r.PartialText
 }
 
+// PolishProfile defines a saved prompt profile for LLM text polishing.
+type PolishProfile struct {
+	Name         string    `json:"name"`
+	Description  string    `json:"description,omitempty"`
+	SystemPrompt string    `json:"system_prompt"`
+	Temperature  float64   `json:"temperature"`
+	CustomRules  []string  `json:"custom_rules,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
 type Store interface {
 	SaveTranscript(Transcript) error
 	ListTranscripts(int) ([]Transcript, error)
@@ -64,4 +75,8 @@ type Store interface {
 	ListRecoveries(int) ([]SessionRecovery, error)
 	DeleteRecovery(string) error
 	ClearRecoveries() error
+	SetPolishProfile(PolishProfile) error
+	GetPolishProfile(string) (*PolishProfile, error)
+	ListPolishProfiles() ([]PolishProfile, error)
+	DeletePolishProfile(string) error
 }
