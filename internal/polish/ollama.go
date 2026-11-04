@@ -28,11 +28,19 @@ type OllamaPolisher struct {
 	model        string
 	systemPrompt string
 	temperature  float64
+	profiles     *ProfileRegistry
 	client       *http.Client
 }
 
 // OllamaOption allows customizing the OllamaPolisher.
 type OllamaOption func(*OllamaPolisher)
+
+// WithOllamaProfiles attaches a ProfileRegistry for resolving prompt profiles.
+func WithOllamaProfiles(r *ProfileRegistry) OllamaOption {
+	return func(o *OllamaPolisher) {
+		o.profiles = r
+	}
+}
 
 // WithOllamaEndpoint sets the Ollama server URL (e.g. "http://127.0.0.1:11434").
 func WithOllamaEndpoint(endpoint string) OllamaOption {
@@ -268,7 +276,19 @@ func (o *OllamaPolisher) ListModels(ctx context.Context) ([]string, error) {
 
 func (o *OllamaPolisher) buildSystemPrompt(req Request) string {
 	var sb strings.Builder
-	sb.WriteString(o.systemPrompt)
+
+	basePrompt := o.systemPrompt
+	var profileRules []string
+
+	if o.profiles != nil {
+		prof := o.profiles.Resolve(req.Profile)
+		if prof.SystemPrompt != "" {
+			basePrompt = prof.SystemPrompt
+		}
+		profileRules = prof.CustomRules
+	}
+
+	sb.WriteString(basePrompt)
 
 	if req.Profile != "" && req.Profile != "general" {
 		sb.WriteString(fmt.Sprintf("\nTarget Profile/Tone: %s", req.Profile))
@@ -278,9 +298,12 @@ func (o *OllamaPolisher) buildSystemPrompt(req Request) string {
 		sb.WriteString(fmt.Sprintf("\nTarget Application: %s", req.Application))
 	}
 
-	if len(req.CustomRules) > 0 {
+	allRules := append([]string(nil), profileRules...)
+	allRules = append(allRules, req.CustomRules...)
+
+	if len(allRules) > 0 {
 		sb.WriteString("\nCustom Rules:\n")
-		for _, r := range req.CustomRules {
+		for _, r := range allRules {
 			sb.WriteString(fmt.Sprintf("- %s\n", r))
 		}
 	}

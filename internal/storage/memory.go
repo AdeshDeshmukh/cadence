@@ -14,6 +14,7 @@ type Memory struct {
 	vocabulary  map[string]string
 	recoveries  map[string]SessionRecovery
 	snippets    map[string]Snippet
+	profiles    map[string]PolishProfile
 }
 
 func NewMemory() *Memory {
@@ -21,6 +22,7 @@ func NewMemory() *Memory {
 		vocabulary: map[string]string{},
 		recoveries: map[string]SessionRecovery{},
 		snippets:   map[string]Snippet{},
+		profiles:   map[string]PolishProfile{},
 	}
 }
 
@@ -188,5 +190,54 @@ func (m *Memory) DeleteSnippet(trigger string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.snippets, trigger)
+	return nil
+}
+
+func (m *Memory) SetPolishProfile(p PolishProfile) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	name := strings.TrimSpace(p.Name)
+	if name == "" {
+		return errors.New("profile name cannot be empty")
+	}
+	now := time.Now()
+	if p.CreatedAt.IsZero() {
+		p.CreatedAt = now
+	}
+	p.UpdatedAt = now
+	p.Name = name
+	m.profiles[name] = p
+	return nil
+}
+
+func (m *Memory) GetPolishProfile(name string) (*PolishProfile, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	p, ok := m.profiles[name]
+	if !ok {
+		return nil, nil
+	}
+	res := p
+	return &res, nil
+}
+
+func (m *Memory) ListPolishProfiles() ([]PolishProfile, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	out := make([]PolishProfile, 0, len(m.profiles))
+	for _, p := range m.profiles {
+		out = append(out, p)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
+}
+
+func (m *Memory) DeletePolishProfile(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.profiles, name)
 	return nil
 }

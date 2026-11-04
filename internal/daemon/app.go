@@ -40,6 +40,7 @@ type App struct {
 	store     storage.Store
 	process   *postprocess.Pipeline
 	polisher  polish.Polisher
+	profiles  *polish.ProfileRegistry
 	detector  vad.Detector
 	hotkey    hotkey.Listener
 
@@ -139,6 +140,10 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 		}
 	}
 
+	if a.profiles == nil {
+		a.profiles = polish.NewProfileRegistry(a.store)
+	}
+
 	if a.polisher == nil && cfg.Polish.Enabled {
 		switch cfg.Polish.Backend {
 		case "ollama":
@@ -153,6 +158,7 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 			a.polisher = polish.NewOllamaPolisher(
 				polish.WithOllamaEndpoint(endpoint),
 				polish.WithOllamaModel(model),
+				polish.WithOllamaProfiles(a.profiles),
 			)
 		case "openai":
 			endpoint := cfg.Polish.Endpoint
@@ -168,6 +174,7 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 				polish.WithOpenAIModel(model),
 				polish.WithOpenAIAPIKey(cfg.Polish.APIKey),
 				polish.WithOpenAINetworkMode(cfg.Privacy.NetworkMode),
+				polish.WithOpenAIProfiles(a.profiles),
 			)
 		default:
 			a.polisher = polish.NewNoopPolisher()
@@ -469,6 +476,11 @@ func (a *App) Polisher() polish.Polisher {
 	return a.polisher
 }
 
+// Profiles returns the active prompt profile registry.
+func (a *App) Profiles() *polish.ProfileRegistry {
+	return a.profiles
+}
+
 // Handle routes incoming IPC client commands.
 func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 	switch req.Method {
@@ -703,6 +715,73 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			"tokens_out": resp.TokensOut,
 			"latency_ms": resp.Latency.Milliseconds(),
 		}, nil
+
+	case "polish_profile_list":
+		if a.profiles == nil {
+			return polish.Builtins(), nil
+		}
+		return a.profiles.List(), nil
+
+	case "polish_profile_get":
+		params, _ := req.Params.(map[string]any)
+		name, _ := params["name"].(string)
+		if name == "" {
+			return nil, errors.New("missing name parameter")
+		}
+		if a.profiles == nil {
+			return nil, fmt.Errorf("profile %q not found", name)
+		}
+		p, ok := a.profiles.Get(name)
+		if !ok {
+			return nil, fmt.Errorf("profile %q not found", name)
+		}
+		return p, nil
+
+	case "polish_profile_set":
+		params, _ := req.Params.(map[string]any)
+		name, _ := params["name"].(string)
+		if strings.TrimSpace(name) == "" {
+			return nil, errors.New("missing name parameter")
+		}
+		desc, _ := params["description"].(string)
+		prompt, _ := params["system_prompt"].(string)
+		temp, _ := params["temperature"].(float64)
+		var rules []string
+		if rawRules, ok := params["custom_rules"].([]any); ok {
+			for _, r := range rawRules {
+				if s, ok := r.(string); ok && strings.TrimSpace(s) != "" {
+					rules = append(rules, s)
+				}
+			}
+		}
+		if a.profiles == nil {
+			return nil, errors.New("no profile registry configured")
+		}
+		p := polish.Profile{
+			Name:         name,
+			Description:  desc,
+			SystemPrompt: prompt,
+			Temperature:  temp,
+			CustomRules:  rules,
+		}
+		if err := a.profiles.Set(p); err != nil {
+			return nil, err
+		}
+		return map[string]any{"ok": true, "name": name}, nil
+
+	case "polish_profile_delete":
+		params, _ := req.Params.(map[string]any)
+		name, _ := params["name"].(string)
+		if strings.TrimSpace(name) == "" {
+			return nil, errors.New("missing name parameter")
+		}
+		if a.profiles == nil {
+			return nil, errors.New("no profile registry configured")
+		}
+		if err := a.profiles.Delete(name); err != nil {
+			return nil, err
+		}
+		return map[string]any{"ok": true, "name": name}, nil
 
 	default:
 		return nil, errors.New("unknown method: " + req.Method)

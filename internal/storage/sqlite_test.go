@@ -452,3 +452,79 @@ func TestSQLite_Snippets(t *testing.T) {
 		t.Fatalf("expected nil after delete, got %+v, err: %v", delCheck, err)
 	}
 }
+
+func TestSQLite_PolishProfiles(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer s.Close()
+
+	// Initial list empty
+	list, err := s.ListPolishProfiles()
+	if err != nil {
+		t.Fatalf("ListPolishProfiles failed: %v", err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("expected 0 profiles, got %d", len(list))
+	}
+
+	p1 := PolishProfile{
+		Name:         "custom_code",
+		Description:  "Special coding profile",
+		SystemPrompt: "Write idiomatic Go code.",
+		Temperature:  0.1,
+		CustomRules:  []string{"No semicolons", "Use camelCase"},
+	}
+	p2 := PolishProfile{
+		Name:         "academic_review",
+		Description:  "Peer review format",
+		SystemPrompt: "Use formal academic tone.",
+		Temperature:  0.3,
+		CustomRules:  []string{"Include APA citation style"},
+	}
+
+	if err := s.SetPolishProfile(p1); err != nil {
+		t.Fatalf("SetPolishProfile p1: %v", err)
+	}
+	if err := s.SetPolishProfile(p2); err != nil {
+		t.Fatalf("SetPolishProfile p2: %v", err)
+	}
+
+	// Get single profile
+	got, err := s.GetPolishProfile("custom_code")
+	if err != nil || got == nil {
+		t.Fatalf("GetPolishProfile failed: %v, got: %+v", err, got)
+	}
+	if got.SystemPrompt != p1.SystemPrompt || len(got.CustomRules) != 2 || got.CustomRules[0] != "No semicolons" {
+		t.Fatalf("unexpected profile data: %+v", got)
+	}
+
+	// List ordered by name
+	list, err = s.ListPolishProfiles()
+	if err != nil {
+		t.Fatalf("ListPolishProfiles failed: %v", err)
+	}
+	if len(list) != 2 || list[0].Name != "academic_review" || list[1].Name != "custom_code" {
+		t.Fatalf("unexpected list: %+v", list)
+	}
+
+	// Update existing profile
+	p1.Description = "Updated description"
+	if err := s.SetPolishProfile(p1); err != nil {
+		t.Fatalf("SetPolishProfile update: %v", err)
+	}
+	gotUpdated, err := s.GetPolishProfile("custom_code")
+	if err != nil || gotUpdated == nil || gotUpdated.Description != "Updated description" {
+		t.Fatalf("expected updated description, got: %+v", gotUpdated)
+	}
+
+	// Delete profile
+	if err := s.DeletePolishProfile("academic_review"); err != nil {
+		t.Fatalf("DeletePolishProfile: %v", err)
+	}
+	delCheck, err := s.GetPolishProfile("academic_review")
+	if err != nil || delCheck != nil {
+		t.Fatalf("expected nil after delete, got: %+v", delCheck)
+	}
+}

@@ -15,6 +15,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/config"
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
 	"github.com/AdeshDeshmukh/cadence/internal/paste"
+	"github.com/AdeshDeshmukh/cadence/internal/polish"
 	"github.com/AdeshDeshmukh/cadence/internal/postprocess"
 	"github.com/AdeshDeshmukh/cadence/internal/storage"
 	"github.com/AdeshDeshmukh/cadence/pkg/version"
@@ -33,7 +34,8 @@ Commands:
   recover [flags]    Retrieve text from last cancelled or failed session
   vocab <subcommand> Manage custom vocabulary (list, add, remove, import, export)
   snippet <subcommand> Manage voice templates with dynamic vars (list, add, remove, test)
-  polish <text>      Format and polish text using configured LLM (Ollama)
+  profile <subcommand> Manage prompt profiles (list, show, set, delete)
+  polish <text>      Format and polish text using configured LLM (Ollama/OpenAI)
   config [show|path] Inspect configuration and system file paths
   doctor             Perform diagnostics on system, daemon, and storage
   version            Print the version of cadence
@@ -114,6 +116,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "snippet", "snippets", "snip":
 		if err := cmdSnippet(ctx, cfg, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "profile", "profiles":
+		if err := cmdProfile(ctx, cfg, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -907,5 +916,243 @@ func cmdPolish(ctx context.Context, client ipc.Client, args []string, out io.Wri
 	if model != "" && model != "none" {
 		fmt.Fprintf(out, "(model: %s, latency: %dms)\n", model, int64(latency))
 	}
+	return nil
+}
+
+func cmdProfile(ctx context.Context, cfg config.Config, client ipc.Client, args []string, out io.Writer) error {
+	action := "list"
+	if len(args) > 0 {
+		action = args[0]
+	}
+
+	switch action {
+	case "list":
+		return cmdProfileList(ctx, cfg, client, out)
+	case "show", "get":
+		if len(args) < 2 {
+			return errors.New("usage: cadence profile show <name>")
+		}
+		return cmdProfileShow(ctx, cfg, client, args[1], out)
+	case "set", "add":
+		if len(args) < 2 {
+			return errors.New("usage: cadence profile set <name> [--desc <description>] [--prompt <prompt>] [--temp <float>] [--rule <rule>]")
+		}
+		return cmdProfileSet(ctx, cfg, client, args[1], args[2:], out)
+	case "delete", "remove", "rm":
+		if len(args) < 2 {
+			return errors.New("usage: cadence profile delete <name>")
+		}
+		return cmdProfileDelete(ctx, cfg, client, args[1], out)
+	default:
+		return fmt.Errorf("unknown profile action: %s (supported: list, show, set, delete)", action)
+	}
+}
+
+func cmdProfileList(ctx context.Context, cfg config.Config, client ipc.Client, out io.Writer) error {
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	var profiles []polish.Profile
+
+	res, err := client.Call(callCtx, "polish_profile_list", nil)
+	if err == nil {
+		if rawList, ok := res.([]any); ok {
+			for _, item := range rawList {
+				if m, ok := item.(map[string]any); ok {
+					var p polish.Profile
+					p.Name, _ = m["name"].(string)
+					p.Description, _ = m["description"].(string)
+					p.SystemPrompt, _ = m["system_prompt"].(string)
+					p.Temperature, _ = m["temperature"].(float64)
+					p.IsBuiltin, _ = m["is_builtin"].(bool)
+					if rules, ok := m["custom_rules"].([]any); ok {
+						for _, r := range rules {
+							if s, ok := r.(string); ok {
+								p.CustomRules = append(p.CustomRules, s)
+							}
+						}
+					}
+					profiles = append(profiles, p)
+				}
+			}
+		}
+	} else {
+		// Offline fallback via storage and builtins
+		reg := polish.NewProfileRegistry(nil)
+		if s, dbErr := storage.Open(cfg.Storage.DBPath); dbErr == nil {
+			defer s.Close()
+			reg = polish.NewProfileRegistry(s)
+		}
+		profiles = reg.List()
+	}
+
+	if len(profiles) == 0 {
+		fmt.Fprintln(out, "No prompt profiles available.")
+		return nil
+	}
+
+	fmt.Fprintf(out, "%-14s  %-8s  %-50s\n", "NAME", "TYPE", "DESCRIPTION")
+	fmt.Fprintf(out, "%-14s  %-8s  %-50s\n", "----", "----", "-----------")
+	for _, p := range profiles {
+		pType := "custom"
+		if p.IsBuiltin {
+			pType = "builtin"
+		}
+		desc := p.Description
+		if len(desc) > 50 {
+			desc = desc[:47] + "..."
+		}
+		fmt.Fprintf(out, "%-14s  %-8s  %-50s\n", p.Name, pType, desc)
+	}
+	return nil
+}
+
+func cmdProfileShow(ctx context.Context, cfg config.Config, client ipc.Client, name string, out io.Writer) error {
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	var p polish.Profile
+	found := false
+
+	res, err := client.Call(callCtx, "polish_profile_get", map[string]any{"name": name})
+	if err == nil {
+		if m, ok := res.(map[string]any); ok {
+			p.Name, _ = m["name"].(string)
+			p.Description, _ = m["description"].(string)
+			p.SystemPrompt, _ = m["system_prompt"].(string)
+			p.Temperature, _ = m["temperature"].(float64)
+			p.IsBuiltin, _ = m["is_builtin"].(bool)
+			if rules, ok := m["custom_rules"].([]any); ok {
+				for _, r := range rules {
+					if s, ok := r.(string); ok {
+						p.CustomRules = append(p.CustomRules, s)
+					}
+				}
+			}
+			found = true
+		}
+	} else {
+		// Offline fallback
+		var store storage.Store
+		if s, dbErr := storage.Open(cfg.Storage.DBPath); dbErr == nil {
+			defer s.Close()
+			store = s
+		}
+		reg := polish.NewProfileRegistry(store)
+		p, found = reg.Get(name)
+	}
+
+	if !found {
+		return fmt.Errorf("profile %q not found", name)
+	}
+
+	pType := "custom"
+	if p.IsBuiltin {
+		pType = "builtin"
+	}
+
+	fmt.Fprintf(out, "Profile: %s (%s)\n", p.Name, pType)
+	fmt.Fprintf(out, "  Description:  %s\n", p.Description)
+	fmt.Fprintf(out, "  Temperature:  %.2f\n", p.Temperature)
+	if len(p.CustomRules) > 0 {
+		fmt.Fprintln(out, "  Rules:")
+		for _, r := range p.CustomRules {
+			fmt.Fprintf(out, "    - %s\n", r)
+		}
+	}
+	fmt.Fprintln(out, "  System Prompt:")
+	fmt.Fprintln(out, "----------------------------------------")
+	fmt.Fprintln(out, p.SystemPrompt)
+	fmt.Fprintln(out, "----------------------------------------")
+	return nil
+}
+
+func cmdProfileSet(ctx context.Context, cfg config.Config, client ipc.Client, name string, flags []string, out io.Writer) error {
+	desc := ""
+	prompt := ""
+	temp := 0.2
+	var rules []string
+
+	for i := 0; i < len(flags); i++ {
+		switch flags[i] {
+		case "--desc", "-d":
+			if i+1 < len(flags) {
+				desc = flags[i+1]
+				i++
+			}
+		case "--prompt", "-p":
+			if i+1 < len(flags) {
+				prompt = flags[i+1]
+				i++
+			}
+		case "--temp", "-t":
+			if i+1 < len(flags) {
+				if f, err := strconv.ParseFloat(flags[i+1], 64); err == nil {
+					temp = f
+				}
+				i++
+			}
+		case "--rule", "-r":
+			if i+1 < len(flags) {
+				rules = append(rules, flags[i+1])
+				i++
+			}
+		}
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	params := map[string]any{
+		"name":          name,
+		"description":   desc,
+		"system_prompt": prompt,
+		"temperature":   temp,
+		"custom_rules":  rules,
+	}
+
+	_, err := client.Call(callCtx, "polish_profile_set", params)
+	if err != nil {
+		// Offline fallback
+		s, dbErr := storage.Open(cfg.Storage.DBPath)
+		if dbErr != nil {
+			return fmt.Errorf("failed to save profile via daemon (%v) and database: %w", err, dbErr)
+		}
+		defer s.Close()
+		reg := polish.NewProfileRegistry(s)
+		if err := reg.Set(polish.Profile{
+			Name:         name,
+			Description:  desc,
+			SystemPrompt: prompt,
+			Temperature:  temp,
+			CustomRules:  rules,
+		}); err != nil {
+			return err
+		}
+	}
+
+	fmt.Fprintf(out, "Profile %q configured successfully.\n", name)
+	return nil
+}
+
+func cmdProfileDelete(ctx context.Context, cfg config.Config, client ipc.Client, name string, out io.Writer) error {
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	_, err := client.Call(callCtx, "polish_profile_delete", map[string]any{"name": name})
+	if err != nil {
+		// Offline fallback
+		s, dbErr := storage.Open(cfg.Storage.DBPath)
+		if dbErr != nil {
+			return fmt.Errorf("failed to delete profile via daemon (%v) and database: %w", err, dbErr)
+		}
+		defer s.Close()
+		reg := polish.NewProfileRegistry(s)
+		if err := reg.Delete(name); err != nil {
+			return err
+		}
+	}
+
+	fmt.Fprintf(out, "Profile %q removed successfully.\n", name)
 	return nil
 }

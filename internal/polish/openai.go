@@ -33,11 +33,19 @@ type OpenAIPolisher struct {
 	systemPrompt string
 	temperature  float64
 	networkMode  string
+	profiles     *ProfileRegistry
 	client       *http.Client
 }
 
 // OpenAIOption customizes OpenAIPolisher configuration.
 type OpenAIOption func(*OpenAIPolisher)
+
+// WithOpenAIProfiles attaches a ProfileRegistry for resolving prompt profiles.
+func WithOpenAIProfiles(r *ProfileRegistry) OpenAIOption {
+	return func(o *OpenAIPolisher) {
+		o.profiles = r
+	}
+}
 
 // WithOpenAIEndpoint sets the API base URL (e.g. "https://api.openai.com/v1" or "https://api.groq.com/openai/v1").
 func WithOpenAIEndpoint(endpoint string) OpenAIOption {
@@ -289,7 +297,19 @@ func (o *OpenAIPolisher) Polish(ctx context.Context, req Request) (Response, err
 
 func (o *OpenAIPolisher) buildSystemPrompt(req Request) string {
 	var sb strings.Builder
-	sb.WriteString(o.systemPrompt)
+
+	basePrompt := o.systemPrompt
+	var profileRules []string
+
+	if o.profiles != nil {
+		prof := o.profiles.Resolve(req.Profile)
+		if prof.SystemPrompt != "" {
+			basePrompt = prof.SystemPrompt
+		}
+		profileRules = prof.CustomRules
+	}
+
+	sb.WriteString(basePrompt)
 
 	if req.Profile != "" && req.Profile != "general" {
 		sb.WriteString(fmt.Sprintf("\nTarget Profile/Tone: %s", req.Profile))
@@ -299,9 +319,12 @@ func (o *OpenAIPolisher) buildSystemPrompt(req Request) string {
 		sb.WriteString(fmt.Sprintf("\nTarget Application: %s", req.Application))
 	}
 
-	if len(req.CustomRules) > 0 {
+	allRules := append([]string(nil), profileRules...)
+	allRules = append(allRules, req.CustomRules...)
+
+	if len(allRules) > 0 {
 		sb.WriteString("\nCustom Rules:\n")
-		for _, r := range req.CustomRules {
+		for _, r := range allRules {
 			sb.WriteString(fmt.Sprintf("- %s\n", r))
 		}
 	}
