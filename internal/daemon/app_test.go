@@ -1027,10 +1027,10 @@ func TestApp_UndoTransformationAndIPC(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	simHotkey.Emit(hotkey.EventKeyUp)
 
-	// Wait for paste
-	deadline := time.Now().Add(2 * time.Second)
+	// Wait for paste and undo cache
+	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if paster.Text() == "AI: My original thoughts." {
+		if app.CanUndo() && paster.Text() == "AI: My original thoughts." {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -1093,9 +1093,9 @@ func TestApp_UndoTransformationAndIPC(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	simHotkey.Emit(hotkey.EventKeyUp)
 
-	deadline = time.Now().Add(2 * time.Second)
+	deadline = time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if paster.Text() == "AI: My original thoughts." {
+		if app.CanUndo() && paster.Text() == "AI: My original thoughts." {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -1155,9 +1155,9 @@ func TestApp_UndoNotPolished(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	simHotkey.Emit(hotkey.EventKeyUp)
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if paster.Text() != "" {
+		if app.LastUndo() != nil && paster.Text() != "" {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
