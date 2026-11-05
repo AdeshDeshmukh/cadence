@@ -6,6 +6,7 @@ type Context struct {
 	Mode        string
 	Vocabulary  map[string]string
 	Snippets    map[string]string
+	OnPolish    func(original, polished string)
 }
 
 type Step interface {

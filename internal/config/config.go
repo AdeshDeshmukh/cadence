@@ -67,8 +67,9 @@ type PrivacyConfig struct {
 }
 
 type HotkeyConfig struct {
-	Shortcut string
-	Mode     string
+	Shortcut     string
+	Mode         string
+	UndoShortcut string
 }
 
 type IPCConfig struct {
@@ -136,8 +137,9 @@ func Default() Config {
 			Telemetry:   false,
 		},
 		Hotkey: HotkeyConfig{
-			Shortcut: "Cmd+Shift+Space",
-			Mode:     "push_to_talk",
+			Shortcut:     "Cmd+Shift+Space",
+			Mode:         "push_to_talk",
+			UndoShortcut: "Cmd+Shift+U",
 		},
 		IPC: IPCConfig{
 			SocketPath: DefaultSocketPath(),

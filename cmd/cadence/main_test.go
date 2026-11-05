@@ -149,6 +149,23 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 			"category": "code",
 			"profile":  "code",
 		}, nil
+	case "undo":
+		params, _ := req.Params.(map[string]any)
+		target, _ := params["target"].(string)
+		if target == "raw" {
+			return map[string]any{
+				"session_id":    "sess-99",
+				"reverted_from": "AI Polished Text",
+				"reverted_to":   "raw asr text",
+				"target":        "raw",
+			}, nil
+		}
+		return map[string]any{
+			"session_id":    "sess-99",
+			"reverted_from": "AI Polished Text",
+			"reverted_to":   "unpolished post-processed text",
+			"target":        "unpolished",
+		}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -707,5 +724,43 @@ func TestCLI_Route(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Route for \"slack\" removed.") {
 		t.Fatalf("unexpected route delete: %s", out.String())
+	}
+}
+
+func TestCLI_Undo(t *testing.T) {
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("cad_undo_%d.sock", time.Now().UnixNano()))
+	cleanup := startMockDaemon(t, sockPath)
+	defer cleanup()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sockPath,
+	}
+
+	// 1. cadence undo (defaults to unpolished)
+	var out bytes.Buffer
+	if err := cmdUndo(context.Background(), client, []string{}, &out); err != nil {
+		t.Fatalf("cmdUndo failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Reverted AI polish transformation") || !strings.Contains(out.String(), "unpolished post-processed text") {
+		t.Fatalf("unexpected undo output: %s", out.String())
+	}
+
+	// 2. cadence undo --raw
+	out.Reset()
+	if err := cmdUndo(context.Background(), client, []string{"--raw"}, &out); err != nil {
+		t.Fatalf("cmdUndo --raw failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Reverted to raw ASR transcript") || !strings.Contains(out.String(), "raw asr text") {
+		t.Fatalf("unexpected undo --raw output: %s", out.String())
+	}
+
+	// 3. cadence undo --help
+	out.Reset()
+	if err := cmdUndo(context.Background(), client, []string{"--help"}, &out); err != nil {
+		t.Fatalf("cmdUndo --help failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Usage: cadence undo") {
+		t.Fatalf("unexpected undo help output: %s", out.String())
 	}
 }

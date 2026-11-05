@@ -102,3 +102,40 @@ func TestStep_Apply_Empty(t *testing.T) {
 		t.Fatalf("expected empty string, got %q", got)
 	}
 }
+
+func TestStep_Apply_OnPolishCallback(t *testing.T) {
+	mock := polish.NewMockPolisher(func(req polish.Request) (polish.Response, error) {
+		return polish.Response{
+			Text:  "Polished: " + req.Text,
+			Model: "mock-llm",
+		}, nil
+	})
+
+	step := polish.NewStep(mock, "general", 500*time.Millisecond)
+
+	var callbackOriginal, callbackPolished string
+	called := false
+
+	ctx := postprocess.Context{
+		Mode: "general",
+		OnPolish: func(orig, pol string) {
+			called = true
+			callbackOriginal = orig
+			callbackPolished = pol
+		},
+	}
+
+	res := step.Apply("unpolished raw sentence", ctx)
+	if res != "Polished: unpolished raw sentence" {
+		t.Fatalf("unexpected result: %q", res)
+	}
+	if !called {
+		t.Fatal("expected OnPolish callback to be called")
+	}
+	if callbackOriginal != "unpolished raw sentence" {
+		t.Errorf("expected orig 'unpolished raw sentence', got %q", callbackOriginal)
+	}
+	if callbackPolished != "Polished: unpolished raw sentence" {
+		t.Errorf("expected pol 'Polished: unpolished raw sentence', got %q", callbackPolished)
+	}
+}

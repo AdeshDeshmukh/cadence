@@ -38,6 +38,7 @@ Commands:
   profile <subcommand> Manage prompt profiles (list, show, set, delete)
   route <subcommand>   Manage active app-to-profile routing rules (list, set, delete, test)
   polish <text>      Format and polish text using configured LLM (Ollama/OpenAI)
+  undo [--raw]       Revert last AI polish transformation to raw post-processed text
   app                Show detected active foreground application and category
   config [show|path] Inspect configuration and system file paths
   doctor             Perform diagnostics on system, daemon, and storage
@@ -147,6 +148,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "app", "active-app":
 		if err := cmdApp(ctx, client, stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "undo":
+		if err := cmdUndo(ctx, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -1334,5 +1342,58 @@ func cmdRouteTest(ctx context.Context, cfg config.Config, client ipc.Client, app
 	fmt.Fprintf(out, "Routing Resolution for %q:\n", app)
 	fmt.Fprintf(out, "  Category: %s\n", cat)
 	fmt.Fprintf(out, "  Profile:  %s\n", prof)
+	return nil
+}
+
+func cmdUndo(ctx context.Context, client ipc.Client, args []string, stdout io.Writer) error {
+	target := "unpolished"
+	for _, arg := range args {
+		if arg == "--raw" || arg == "-r" {
+			target = "raw"
+		} else if arg == "-h" || arg == "--help" {
+			fmt.Fprintf(stdout, `Usage: cadence undo [--raw]
+
+Reverts the last AI-polished dictation text in the active application back to the raw unpolished text.
+
+Flags:
+  -r, --raw    Revert all the way back to the raw ASR transcript instead of post-processed text
+  -h, --help   Show this help message
+`)
+			return nil
+		}
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	resp, err := client.Call(callCtx, "undo", map[string]any{
+		"target": target,
+	})
+	if err != nil {
+		return err
+	}
+
+	data, err := json.Marshal(resp)
+	if err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+
+	var res struct {
+		SessionID    string `json:"session_id"`
+		RevertedFrom string `json:"reverted_from"`
+		RevertedTo   string `json:"reverted_to"`
+		Target       string `json:"target"`
+	}
+	if err := json.Unmarshal(data, &res); err != nil {
+		return fmt.Errorf("parse response: %w", err)
+	}
+
+	if res.Target == "raw" {
+		fmt.Fprintf(stdout, "Reverted to raw ASR transcript [%s]:\n  From: %q\n  To:   %q\n",
+			res.SessionID, res.RevertedFrom, res.RevertedTo)
+	} else {
+		fmt.Fprintf(stdout, "Reverted AI polish transformation [%s]:\n  From: %q\n  To:   %q\n",
+			res.SessionID, res.RevertedFrom, res.RevertedTo)
+	}
 	return nil
 }

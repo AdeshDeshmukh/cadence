@@ -170,7 +170,18 @@ transcribe:
 		pc.Application = app
 	}
 
-	session.FinalText = k.process.Apply(result.Text, pc)
+	pc.OnPolish = func(orig, pol string) {
+		session.SetUnpolishedText(orig)
+	}
+
+	if k.process != nil {
+		session.FinalText = k.process.Apply(result.Text, pc)
+	} else {
+		session.FinalText = result.Text
+	}
+	if session.GetUnpolishedText() == "" {
+		session.SetUnpolishedText(session.FinalText)
+	}
 	session.SetState(Pasting)
 
 	if _, err := k.paste.Paste(session.FinalText); err != nil {

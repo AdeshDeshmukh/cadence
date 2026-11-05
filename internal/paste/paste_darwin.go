@@ -154,3 +154,21 @@ func NewDefaultCascade() *Cascade {
 		NewKeystrokeTypeTier(),
 	)
 }
+
+// NativeReverter sends an Undo keystroke (Cmd+Z) on macOS.
+type NativeReverter struct{}
+
+func NewNativeReverter() *NativeReverter {
+	return &NativeReverter{}
+}
+
+func (n *NativeReverter) Revert() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "osascript", "-e", `tell application "System Events" to keystroke "z" using command down`)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("native undo keystroke failed: %w", err)
+	}
+	return nil
+}
