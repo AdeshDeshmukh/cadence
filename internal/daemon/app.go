@@ -30,6 +30,25 @@ import (
 	"github.com/AdeshDeshmukh/cadence/pkg/version"
 )
 
+// UndoRecord captures the transformation details of a completed dictation session.
+type UndoRecord struct {
+	SessionID      string    `json:"session_id"`
+	RawText        string    `json:"raw_text"`
+	UnpolishedText string    `json:"unpolished_text"`
+	PolishedText   string    `json:"polished_text"`
+	IsPolished     bool      `json:"is_polished"`
+	PastedAt       time.Time `json:"pasted_at"`
+	Undone         bool      `json:"undone"`
+}
+
+// UndoResult describes the outcome of an undo operation.
+type UndoResult struct {
+	SessionID    string `json:"session_id"`
+	RevertedFrom string `json:"reverted_from"`
+	RevertedTo   string `json:"reverted_to"`
+	Target       string `json:"target"`
+}
+
 // App manages the lifecycle, hardware bindings, and IPC for the Cadence daemon.
 type App struct {
 	cfg         config.Config
@@ -38,6 +57,7 @@ type App struct {
 	asr         asr.Engine
 	workerMgr   *worker.Manager
 	paster      paste.Paster
+	reverter    paste.Reverter
 	store       storage.Store
 	process     *postprocess.Pipeline
 	polisher    polish.Polisher
@@ -58,6 +78,7 @@ type App struct {
 	activeCancel  context.CancelFunc
 	activeSess    *pipeline.Session
 	sessionSeq    uint64
+	lastUndo      *UndoRecord
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -128,6 +149,11 @@ func WithAppDetector(d appcontext.Detector) Option {
 // WithRouter sets a custom polish application route manager.
 func WithRouter(r *polish.Router) Option {
 	return func(a *App) { a.router = r }
+}
+
+// WithReverter sets a custom text reverter implementation.
+func WithReverter(r paste.Reverter) Option {
+	return func(a *App) { a.reverter = r }
 }
 
 // NewApp instantiates a fully configured Cadence daemon application.
@@ -261,6 +287,10 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 		a.paster = paste.NewPreservingPaster(basePaster, cfg.Paste.PreserveClipboard, delay)
 	}
 
+	if a.reverter == nil {
+		a.reverter = paste.NewNativeReverter()
+	}
+
 	if a.capture == nil {
 		a.capture = audio.NewEngine(
 			audio.WithSampleRate(cfg.Audio.SampleRate),
@@ -367,6 +397,13 @@ func (a *App) eventLoop(events <-chan hotkey.Event) {
 }
 
 func (a *App) handleHotkeyEvent(ev hotkey.Event, mode hotkey.Mode) {
+	if a.cfg.Hotkey.UndoShortcut != "" && strings.EqualFold(ev.Shortcut, a.cfg.Hotkey.UndoShortcut) {
+		if ev.Type == hotkey.EventKeyDown {
+			_, _ = a.UndoTransformation("unpolished")
+		}
+		return
+	}
+
 	switch mode {
 	case hotkey.ModePushToTalk:
 		if ev.Type == hotkey.EventKeyDown {
@@ -472,6 +509,24 @@ func (a *App) startDictation() {
 			Snippets:   snippetMap,
 		}
 		_ = a.kernel.Run(sessCtx, sess, pc)
+
+		if sess.FinalText != "" && sess.GetState() == pipeline.Complete {
+			a.mu.Lock()
+			unpolished := sess.GetUnpolishedText()
+			if unpolished == "" {
+				unpolished = sess.FinalText
+			}
+			a.lastUndo = &UndoRecord{
+				SessionID:      sess.ID,
+				RawText:        sess.RawText,
+				UnpolishedText: unpolished,
+				PolishedText:   sess.FinalText,
+				IsPolished:     unpolished != sess.FinalText,
+				PastedAt:       time.Now(),
+				Undone:         false,
+			}
+			a.mu.Unlock()
+		}
 	}()
 }
 
@@ -526,6 +581,88 @@ func (a *App) Router() *polish.Router {
 	return a.router
 }
 
+// Reverter returns the active text paste reverter.
+func (a *App) Reverter() paste.Reverter {
+	return a.reverter
+}
+
+// CanUndo reports whether there is a recent AI transformation available to revert.
+func (a *App) CanUndo() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.lastUndo != nil && !a.lastUndo.Undone && a.lastUndo.IsPolished
+}
+
+// LastUndo returns a snapshot of the last dictation transformation record.
+func (a *App) LastUndo() *UndoRecord {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.lastUndo == nil {
+		return nil
+	}
+	cpy := *a.lastUndo
+	return &cpy
+}
+
+// UndoTransformation reverts the last AI-polished text back to unpolished or raw text.
+func (a *App) UndoTransformation(target string) (*UndoResult, error) {
+	a.mu.Lock()
+	rec := a.lastUndo
+	if rec == nil {
+		a.mu.Unlock()
+		return nil, errors.New("no dictation session available to undo")
+	}
+	if rec.Undone {
+		a.mu.Unlock()
+		return nil, errors.New("last transformation has already been undone")
+	}
+
+	target = strings.ToLower(strings.TrimSpace(target))
+	if target == "" {
+		target = "unpolished"
+	}
+
+	if target != "raw" && !rec.IsPolished {
+		a.mu.Unlock()
+		return nil, errors.New("no AI transformation to undo: polished text matches unpolished text")
+	}
+
+	replacementText := rec.UnpolishedText
+	if target == "raw" {
+		replacementText = rec.RawText
+	}
+	a.mu.Unlock()
+
+	// Revert the paste in the focused UI element
+	if a.reverter != nil {
+		if err := a.reverter.Revert(); err != nil {
+			return nil, fmt.Errorf("revert previous paste: %w", err)
+		}
+	}
+
+	// Brief pause to allow the focused application to process the undo action
+	time.Sleep(50 * time.Millisecond)
+
+	// Paste the replacement text
+	if a.paster != nil && replacementText != "" {
+		if _, err := a.paster.Paste(replacementText); err != nil {
+			return nil, fmt.Errorf("paste replacement text: %w", err)
+		}
+	}
+
+	a.mu.Lock()
+	rec.Undone = true
+	res := &UndoResult{
+		SessionID:    rec.SessionID,
+		RevertedFrom: rec.PolishedText,
+		RevertedTo:   replacementText,
+		Target:       target,
+	}
+	a.mu.Unlock()
+
+	return res, nil
+}
+
 // Handle routes incoming IPC client commands.
 func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 	switch req.Method {
@@ -549,6 +686,17 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			}
 		}
 
+		canUndo := a.CanUndo()
+		var lastUndoMap map[string]any
+		if rec := a.LastUndo(); rec != nil {
+			lastUndoMap = map[string]any{
+				"session_id":  rec.SessionID,
+				"is_polished": rec.IsPolished,
+				"undone":      rec.Undone,
+				"pasted_at":   rec.PastedAt,
+			}
+		}
+
 		return map[string]any{
 			"status":         "running",
 			"version":        version.Version,
@@ -556,12 +704,28 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			"session":        sessID,
 			"partial":        partial,
 			"shortcut":       a.cfg.Hotkey.Shortcut,
+			"undo_shortcut":  a.cfg.Hotkey.UndoShortcut,
 			"mode":           a.cfg.Hotkey.Mode,
 			"polish_enabled": a.cfg.Polish.Enabled,
 			"polish_backend": a.cfg.Polish.Backend,
 			"polish_model":   a.cfg.Polish.Model,
 			"active_app":     appName,
+			"can_undo":       canUndo,
+			"last_undo":      lastUndoMap,
 		}, nil
+
+	case "undo":
+		target := "unpolished"
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if t, ok := params["target"].(string); ok && t != "" {
+				target = t
+			}
+		}
+		res, err := a.UndoTransformation(target)
+		if err != nil {
+			return nil, err
+		}
+		return res, nil
 
 	case "active_app":
 		if a.appDetector == nil {

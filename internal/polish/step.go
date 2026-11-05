@@ -87,6 +87,9 @@ func (s *Step) Apply(text string, ctx postprocess.Context) string {
 		if res.err != nil || strings.TrimSpace(res.resp.Text) == "" {
 			return text
 		}
+		if ctx.OnPolish != nil {
+			ctx.OnPolish(text, res.resp.Text)
+		}
 		return res.resp.Text
 	}
 }

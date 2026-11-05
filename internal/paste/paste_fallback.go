@@ -92,3 +92,24 @@ func SetSystemClipboard(text string) error {
 	fallbackClipboardMu.Unlock()
 	return nil
 }
+
+// NativeReverter sends an Undo shortcut (Ctrl+Z) on Linux or acts as fallback.
+type NativeReverter struct{}
+
+func NewNativeReverter() *NativeReverter {
+	return &NativeReverter{}
+}
+
+func (n *NativeReverter) Revert() error {
+	if _, err := exec.LookPath("xdotool"); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		defer cancel()
+		return exec.CommandContext(ctx, "xdotool", "key", "ctrl+z").Run()
+	}
+	if _, err := exec.LookPath("wtype"); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		defer cancel()
+		return exec.CommandContext(ctx, "wtype", "-M", "ctrl", "-k", "z").Run()
+	}
+	return nil
+}

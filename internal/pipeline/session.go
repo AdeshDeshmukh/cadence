@@ -6,16 +6,17 @@ import (
 )
 
 type Session struct {
-	ID          string
-	State       State
-	Application string
-	RawText     string
-	FinalText   string
-	PartialText string
-	StartedAt   time.Time
-	EndedAt     time.Time
-	onPartial   func(string)
-	mu          sync.RWMutex
+	ID             string
+	State          State
+	Application    string
+	RawText        string
+	UnpolishedText string
+	FinalText      string
+	PartialText    string
+	StartedAt      time.Time
+	EndedAt        time.Time
+	onPartial      func(string)
+	mu             sync.RWMutex
 }
 
 func NewSession(id string) *Session {
@@ -72,4 +73,16 @@ func (s *Session) GetApplication() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.Application
+}
+
+func (s *Session) SetUnpolishedText(text string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.UnpolishedText = text
+}
+
+func (s *Session) GetUnpolishedText() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.UnpolishedText
 }

@@ -974,3 +974,210 @@ func TestApp_ModeRoutingIPC(t *testing.T) {
 		t.Fatalf("unexpected delete result: %+v", delRes)
 	}
 }
+
+func TestApp_UndoTransformationAndIPC(t *testing.T) {
+	cfg := config.Default()
+	cfg.Polish.Enabled = true
+	cfg.Polish.Backend = "mock"
+	cfg.Hotkey.Shortcut = "Cmd+Shift+Space"
+	cfg.Hotkey.UndoShortcut = "Cmd+Shift+U"
+
+	paster := paste.NewClipboard()
+	reverter := paste.NewMockReverter()
+	simHotkey := hotkey.NewSimulatedListener(cfg.Hotkey.Shortcut, hotkey.ModePushToTalk)
+	mockASR := asr.MockEngine{Text: "my original thoughts"}
+	chunk := audio.Chunk{Samples: []float32{0.1, 0.2, -0.1}, SampleRate: 16000, Timestamp: time.Now()}
+	capture := &testLiveCapture{chunk: chunk}
+
+	mockPolisher := polish.NewMockPolisher(func(req polish.Request) (polish.Response, error) {
+		return polish.Response{
+			Text:  "AI: " + req.Text,
+			Model: "mock-llm",
+		}, nil
+	})
+
+	app := NewApp(
+		cfg,
+		WithCapture(capture),
+		WithASR(mockASR),
+		WithPaster(paster),
+		WithReverter(reverter),
+		WithPolisher(mockPolisher),
+		WithHotkeyListener(simHotkey),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := app.Start(ctx); err != nil {
+		t.Fatalf("failed to start app: %v", err)
+	}
+	defer app.Stop()
+
+	// Initial state: nothing to undo
+	if app.CanUndo() {
+		t.Fatal("expected CanUndo to be false initially")
+	}
+	if _, err := app.UndoTransformation("unpolished"); err == nil {
+		t.Fatal("expected error undoing when no dictation has occurred")
+	}
+
+	// 1. Run dictation session
+	simHotkey.Emit(hotkey.EventKeyDown)
+	time.Sleep(50 * time.Millisecond)
+	simHotkey.Emit(hotkey.EventKeyUp)
+
+	// Wait for paste
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if paster.Text() == "AI: My original thoughts." {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if got := paster.Text(); got != "AI: My original thoughts." {
+		t.Fatalf("expected polished text 'AI: My original thoughts.', got %q", got)
+	}
+
+	if !app.CanUndo() {
+		t.Fatal("expected CanUndo to be true after polished dictation")
+	}
+
+	last := app.LastUndo()
+	if last == nil {
+		t.Fatal("expected non-nil LastUndo")
+	}
+	if last.PolishedText != "AI: My original thoughts." {
+		t.Fatalf("expected polished text, got %q", last.PolishedText)
+	}
+	if last.UnpolishedText != "My original thoughts." {
+		t.Fatalf("expected unpolished text, got %q", last.UnpolishedText)
+	}
+
+	// 2. Perform undo via IPC
+	undoRes, err := app.Handle(ctx, ipc.Request{
+		Method: "undo",
+		Params: map[string]any{"target": "unpolished"},
+	})
+	if err != nil {
+		t.Fatalf("undo IPC failed: %v", err)
+	}
+
+	uMap, ok := undoRes.(*UndoResult)
+	if !ok {
+		t.Fatalf("unexpected undo result type: %+v", undoRes)
+	}
+	if uMap.RevertedFrom != "AI: My original thoughts." {
+		t.Errorf("expected reverted from 'AI: My original thoughts.', got %q", uMap.RevertedFrom)
+	}
+	if uMap.RevertedTo != "My original thoughts." {
+		t.Errorf("expected reverted to 'My original thoughts.', got %q", uMap.RevertedTo)
+	}
+
+	if reverter.Count() != 1 {
+		t.Fatalf("expected reverter call count 1, got %d", reverter.Count())
+	}
+	if paster.Text() != "My original thoughts." {
+		t.Fatalf("expected paster to hold unpolished text, got %q", paster.Text())
+	}
+
+	// 3. Second undo attempt should fail
+	if _, err := app.Handle(ctx, ipc.Request{Method: "undo"}); err == nil {
+		t.Fatal("expected error on duplicate undo attempt")
+	}
+
+	// 4. Test Hotkey undo triggering
+	// Start another dictation session
+	simHotkey.Emit(hotkey.EventKeyDown)
+	time.Sleep(50 * time.Millisecond)
+	simHotkey.Emit(hotkey.EventKeyUp)
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if paster.Text() == "AI: My original thoughts." {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Press undo hotkey
+	app.handleHotkeyEvent(hotkey.Event{
+		Type:      hotkey.EventKeyDown,
+		Shortcut:  "Cmd+Shift+U",
+		Timestamp: time.Now(),
+	}, hotkey.ModePushToTalk)
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if paster.Text() == "My original thoughts." {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := paster.Text(); got != "My original thoughts." {
+		t.Fatalf("expected hotkey undo to restore unpolished text, got %q", got)
+	}
+	if reverter.Count() != 2 {
+		t.Fatalf("expected reverter call count 2, got %d", reverter.Count())
+	}
+}
+
+func TestApp_UndoNotPolished(t *testing.T) {
+	cfg := config.Default()
+	cfg.Polish.Enabled = false // No AI polish
+
+	paster := paste.NewClipboard()
+	reverter := paste.NewMockReverter()
+	simHotkey := hotkey.NewSimulatedListener(cfg.Hotkey.Shortcut, hotkey.ModePushToTalk)
+	mockASR := asr.MockEngine{Text: "unpolished simple text"}
+	chunk := audio.Chunk{Samples: []float32{0.1, 0.2, -0.1}, SampleRate: 16000, Timestamp: time.Now()}
+	capture := &testLiveCapture{chunk: chunk}
+
+	app := NewApp(
+		cfg,
+		WithCapture(capture),
+		WithASR(mockASR),
+		WithPaster(paster),
+		WithReverter(reverter),
+		WithHotkeyListener(simHotkey),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := app.Start(ctx); err != nil {
+		t.Fatalf("failed to start app: %v", err)
+	}
+	defer app.Stop()
+
+	simHotkey.Emit(hotkey.EventKeyDown)
+	time.Sleep(50 * time.Millisecond)
+	simHotkey.Emit(hotkey.EventKeyUp)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if paster.Text() != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if app.CanUndo() {
+		t.Fatal("expected CanUndo to be false when polish was not active")
+	}
+
+	// Target "unpolished" fails because it wasn't modified by AI
+	if _, err := app.UndoTransformation("unpolished"); err == nil {
+		t.Fatal("expected error when attempting to undo unpolished dictation")
+	}
+
+	// Target "raw" succeeds
+	res, err := app.UndoTransformation("raw")
+	if err != nil {
+		t.Fatalf("expected undo --raw to succeed, got: %v", err)
+	}
+	if res.RevertedTo != "unpolished simple text" {
+		t.Fatalf("expected raw text, got %q", res.RevertedTo)
+	}
+}
