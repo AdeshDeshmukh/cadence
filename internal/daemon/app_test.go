@@ -908,3 +908,69 @@ func TestApp_ActiveAppContextAndIPC(t *testing.T) {
 		t.Fatalf("unexpected status active_app: %v", statusRes)
 	}
 }
+
+func TestApp_ModeRoutingIPC(t *testing.T) {
+	cfg := config.Default()
+	cfg.Polish.AppRoutes = map[string]string{
+		"slack": "slack_friendly",
+	}
+
+	app := NewApp(cfg)
+	if app.Router() == nil {
+		t.Fatalf("expected non-nil router")
+	}
+
+	ctx := context.Background()
+
+	// 1. List routes
+	listRes, err := app.Handle(ctx, ipc.Request{Method: "polish_route_list"})
+	if err != nil {
+		t.Fatalf("polish_route_list failed: %v", err)
+	}
+	rMap, ok := listRes.(map[string]string)
+	if !ok || rMap["slack"] != "slack_friendly" {
+		t.Fatalf("unexpected route list: %+v", listRes)
+	}
+
+	// 2. Set new route
+	setRes, err := app.Handle(ctx, ipc.Request{
+		Method: "polish_route_set",
+		Params: map[string]any{
+			"app":     "Obsidian",
+			"profile": "academic",
+		},
+	})
+	if err != nil {
+		t.Fatalf("polish_route_set failed: %v", err)
+	}
+	sMap, ok := setRes.(map[string]any)
+	if !ok || sMap["profile"] != "academic" {
+		t.Fatalf("unexpected set result: %+v", setRes)
+	}
+
+	// 3. Test route resolution
+	testRes, err := app.Handle(ctx, ipc.Request{
+		Method: "polish_route_test",
+		Params: map[string]any{"app": "Visual Studio Code"},
+	})
+	if err != nil {
+		t.Fatalf("polish_route_test failed: %v", err)
+	}
+	tMap, ok := testRes.(map[string]any)
+	if !ok || tMap["profile"] != "code" {
+		t.Fatalf("expected profile 'code' for VS Code, got: %+v", testRes)
+	}
+
+	// 4. Delete route
+	delRes, err := app.Handle(ctx, ipc.Request{
+		Method: "polish_route_delete",
+		Params: map[string]any{"app": "Obsidian"},
+	})
+	if err != nil {
+		t.Fatalf("polish_route_delete failed: %v", err)
+	}
+	dMap, ok := delRes.(map[string]any)
+	if !ok || dMap["ok"] != true {
+		t.Fatalf("unexpected delete result: %+v", delRes)
+	}
+}

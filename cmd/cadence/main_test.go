@@ -135,6 +135,20 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 			"pid":          float64(4567),
 			"category":     "code",
 		}, nil
+	case "polish_route_list":
+		return map[string]any{"slack": "friendly_chat"}, nil
+	case "polish_route_set":
+		return map[string]any{"ok": true}, nil
+	case "polish_route_delete":
+		return map[string]any{"ok": true}, nil
+	case "polish_route_test":
+		params, _ := req.Params.(map[string]any)
+		app, _ := params["app"].(string)
+		return map[string]any{
+			"app":      app,
+			"category": "code",
+			"profile":  "code",
+		}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -645,5 +659,53 @@ func TestCLI_App(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Category:     code") {
 		t.Fatalf("expected Category: code, got: %s", out.String())
+	}
+}
+
+func TestCLI_Route(t *testing.T) {
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("cad_route_%d.sock", time.Now().UnixNano()))
+	cleanup := startMockDaemon(t, sockPath)
+	defer cleanup()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sockPath,
+	}
+	cfg := config.Default()
+
+	// 1. List
+	var out bytes.Buffer
+	if err := cmdRoute(context.Background(), cfg, client, []string{"list"}, &out); err != nil {
+		t.Fatalf("cmdRoute list failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Application Polish Profile Routes:") || !strings.Contains(out.String(), "slack") {
+		t.Fatalf("unexpected route list: %s", out.String())
+	}
+
+	// 2. Set
+	out.Reset()
+	if err := cmdRoute(context.Background(), cfg, client, []string{"set", "obsidian", "academic"}, &out); err != nil {
+		t.Fatalf("cmdRoute set failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Route configured: \"obsidian\" -> \"academic\"") {
+		t.Fatalf("unexpected route set: %s", out.String())
+	}
+
+	// 3. Test
+	out.Reset()
+	if err := cmdRoute(context.Background(), cfg, client, []string{"test", "Visual Studio Code"}, &out); err != nil {
+		t.Fatalf("cmdRoute test failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Category: code") || !strings.Contains(out.String(), "Profile:  code") {
+		t.Fatalf("unexpected route test: %s", out.String())
+	}
+
+	// 4. Delete
+	out.Reset()
+	if err := cmdRoute(context.Background(), cfg, client, []string{"delete", "slack"}, &out); err != nil {
+		t.Fatalf("cmdRoute delete failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Route for \"slack\" removed.") {
+		t.Fatalf("unexpected route delete: %s", out.String())
 	}
 }
