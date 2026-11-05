@@ -57,6 +57,8 @@ type PolishConfig struct {
 	TimeoutMs      int
 	Endpoint       string
 	APIKey         string
+	AutoRoute      bool
+	AppRoutes      map[string]string
 }
 
 type PrivacyConfig struct {
@@ -126,6 +128,8 @@ func Default() Config {
 			Model:          "llama3.2",
 			DefaultProfile: "general",
 			TimeoutMs:      2000,
+			AutoRoute:      true,
+			AppRoutes:      map[string]string{},
 		},
 		Privacy: PrivacyConfig{
 			NetworkMode: "local_only",

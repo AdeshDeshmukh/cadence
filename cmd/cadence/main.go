@@ -36,6 +36,7 @@ Commands:
   vocab <subcommand> Manage custom vocabulary (list, add, remove, import, export)
   snippet <subcommand> Manage voice templates with dynamic vars (list, add, remove, test)
   profile <subcommand> Manage prompt profiles (list, show, set, delete)
+  route <subcommand>   Manage active app-to-profile routing rules (list, set, delete, test)
   polish <text>      Format and polish text using configured LLM (Ollama/OpenAI)
   app                Show detected active foreground application and category
   config [show|path] Inspect configuration and system file paths
@@ -125,6 +126,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "profile", "profiles":
 		if err := cmdProfile(ctx, cfg, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "route", "routes":
+		if err := cmdRoute(ctx, cfg, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -1208,5 +1216,123 @@ func cmdApp(ctx context.Context, client ipc.Client, out io.Writer) error {
 		fmt.Fprintf(out, "  PID:          %d\n", info.ProcessID)
 	}
 	fmt.Fprintf(out, "  Category:     %s\n", info.Category)
+	return nil
+}
+
+func cmdRoute(ctx context.Context, cfg config.Config, client ipc.Client, args []string, out io.Writer) error {
+	action := "list"
+	if len(args) > 0 {
+		action = args[0]
+	}
+
+	switch action {
+	case "list":
+		return cmdRouteList(ctx, cfg, client, out)
+	case "set", "add":
+		if len(args) < 3 {
+			return errors.New("usage: cadence route set <app_name> <profile>")
+		}
+		return cmdRouteSet(ctx, client, args[1], args[2], out)
+	case "delete", "remove", "rm":
+		if len(args) < 2 {
+			return errors.New("usage: cadence route delete <app_name>")
+		}
+		return cmdRouteDelete(ctx, client, args[1], out)
+	case "test":
+		if len(args) < 2 {
+			return errors.New("usage: cadence route test <app_name>")
+		}
+		return cmdRouteTest(ctx, cfg, client, args[1], out)
+	default:
+		return fmt.Errorf("unknown route action: %s (supported: list, set, delete, test)", action)
+	}
+}
+
+func cmdRouteList(ctx context.Context, cfg config.Config, client ipc.Client, out io.Writer) error {
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	customRoutes := make(map[string]string)
+	res, err := client.Call(callCtx, "polish_route_list", nil)
+	if err == nil {
+		if m, ok := res.(map[string]any); ok {
+			for k, v := range m {
+				if s, ok := v.(string); ok {
+					customRoutes[k] = s
+				}
+			}
+		}
+	} else {
+		// Offline fallback to config
+		for k, v := range cfg.Polish.AppRoutes {
+			customRoutes[k] = v
+		}
+	}
+
+	fmt.Fprintln(out, "Application Polish Profile Routes:")
+	fmt.Fprintln(out, "  Default Category Rules:")
+	fmt.Fprintln(out, "    Code & Terminal   -> code")
+	fmt.Fprintln(out, "    Medical (EMR/EHR) -> medical")
+	fmt.Fprintln(out, "    Legal Systems     -> legal")
+	fmt.Fprintln(out, "    Other / Browsers  -> general")
+
+	if len(customRoutes) > 0 {
+		fmt.Fprintln(out, "")
+		fmt.Fprintf(out, "  %-25s  %-20s\n", "APPLICATION", "PROFILE")
+		fmt.Fprintf(out, "  %-25s  %-20s\n", "-----------", "-------")
+		for app, prof := range customRoutes {
+			fmt.Fprintf(out, "  %-25s  %-20s\n", app, prof)
+		}
+	}
+	return nil
+}
+
+func cmdRouteSet(ctx context.Context, client ipc.Client, app, profile string, out io.Writer) error {
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	params := map[string]any{"app": app, "profile": profile}
+	if _, err := client.Call(callCtx, "polish_route_set", params); err != nil {
+		return fmt.Errorf("route set failed: %w", err)
+	}
+	fmt.Fprintf(out, "Route configured: %q -> %q\n", app, profile)
+	return nil
+}
+
+func cmdRouteDelete(ctx context.Context, client ipc.Client, app string, out io.Writer) error {
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	params := map[string]any{"app": app}
+	if _, err := client.Call(callCtx, "polish_route_delete", params); err != nil {
+		return fmt.Errorf("route delete failed: %w", err)
+	}
+	fmt.Fprintf(out, "Route for %q removed.\n", app)
+	return nil
+}
+
+func cmdRouteTest(ctx context.Context, cfg config.Config, client ipc.Client, app string, out io.Writer) error {
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	res, err := client.Call(callCtx, "polish_route_test", map[string]any{"app": app})
+	var cat string
+	var prof string
+	if err == nil {
+		if m, ok := res.(map[string]any); ok {
+			cat, _ = m["category"].(string)
+			prof, _ = m["profile"].(string)
+		}
+	} else {
+		// Offline fallback
+		c := appcontext.Categorize(app, "", "")
+		cat = string(c)
+		r := polish.NewRouter(cfg.Polish.AppRoutes)
+		prof = r.Route(app, c)
+	}
+
+	fmt.Fprintf(out, "Routing Resolution for %q:\n", app)
+	fmt.Fprintf(out, "  Category: %s\n", cat)
+	fmt.Fprintf(out, "  Profile:  %s\n", prof)
 	return nil
 }

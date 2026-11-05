@@ -42,6 +42,7 @@ type App struct {
 	process     *postprocess.Pipeline
 	polisher    polish.Polisher
 	profiles    *polish.ProfileRegistry
+	router      *polish.Router
 	appDetector appcontext.Detector
 	detector    vad.Detector
 	hotkey      hotkey.Listener
@@ -124,6 +125,11 @@ func WithAppDetector(d appcontext.Detector) Option {
 	return func(a *App) { a.appDetector = d }
 }
 
+// WithRouter sets a custom polish application route manager.
+func WithRouter(r *polish.Router) Option {
+	return func(a *App) { a.router = r }
+}
+
 // NewApp instantiates a fully configured Cadence daemon application.
 func NewApp(cfg config.Config, opts ...Option) *App {
 	a := &App{
@@ -153,6 +159,10 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 
 	if a.appDetector == nil {
 		a.appDetector = appcontext.NewDefaultDetector()
+	}
+
+	if a.router == nil {
+		a.router = polish.NewRouter(cfg.Polish.AppRoutes)
 	}
 
 	if a.polisher == nil && cfg.Polish.Enabled {
@@ -214,7 +224,11 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 			if timeout <= 0 {
 				timeout = 2 * time.Second
 			}
-			steps = append(steps, polish.NewStep(a.polisher, cfg.Polish.DefaultProfile, timeout))
+			step := polish.NewStep(a.polisher, cfg.Polish.DefaultProfile, timeout)
+			if cfg.Polish.AutoRoute && a.router != nil {
+				step = step.WithRouter(a.router)
+			}
+			steps = append(steps, step)
 		}
 		a.process = postprocess.New(steps...)
 	}
@@ -505,6 +519,11 @@ func (a *App) Profiles() *polish.ProfileRegistry {
 // AppDetector returns the active application context detector.
 func (a *App) AppDetector() appcontext.Detector {
 	return a.appDetector
+}
+
+// Router returns the active application context router.
+func (a *App) Router() *polish.Router {
+	return a.router
 }
 
 // Handle routes incoming IPC client commands.
@@ -826,6 +845,53 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			return nil, err
 		}
 		return map[string]any{"ok": true, "name": name}, nil
+
+	case "polish_route_list":
+		if a.router == nil {
+			return map[string]string{}, nil
+		}
+		return a.router.ListRoutes(), nil
+
+	case "polish_route_set":
+		params, _ := req.Params.(map[string]any)
+		app, _ := params["app"].(string)
+		profile, _ := params["profile"].(string)
+		if strings.TrimSpace(app) == "" || strings.TrimSpace(profile) == "" {
+			return nil, errors.New("missing app or profile parameter")
+		}
+		if a.router == nil {
+			a.router = polish.NewRouter(nil)
+		}
+		a.router.SetRoute(app, profile)
+		return map[string]any{"ok": true, "app": app, "profile": profile}, nil
+
+	case "polish_route_delete":
+		params, _ := req.Params.(map[string]any)
+		app, _ := params["app"].(string)
+		if strings.TrimSpace(app) == "" {
+			return nil, errors.New("missing app parameter")
+		}
+		if a.router != nil {
+			a.router.DeleteRoute(app)
+		}
+		return map[string]any{"ok": true, "app": app}, nil
+
+	case "polish_route_test":
+		params, _ := req.Params.(map[string]any)
+		app, _ := params["app"].(string)
+		if strings.TrimSpace(app) == "" {
+			return nil, errors.New("missing app parameter")
+		}
+		cat := appcontext.Categorize(app, "", "")
+		routed := "general"
+		if a.router != nil {
+			routed = a.router.Route(app, cat)
+		}
+		return map[string]any{
+			"app":      app,
+			"category": string(cat),
+			"profile":  routed,
+		}, nil
 
 	default:
 		return nil, errors.New("unknown method: " + req.Method)

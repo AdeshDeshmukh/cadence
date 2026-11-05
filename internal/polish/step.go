@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	appcontext "github.com/AdeshDeshmukh/cadence/internal/context"
 	"github.com/AdeshDeshmukh/cadence/internal/postprocess"
 )
 
@@ -12,6 +13,7 @@ import (
 type Step struct {
 	polisher Polisher
 	profile  string
+	router   *Router
 	timeout  time.Duration
 }
 
@@ -27,6 +29,12 @@ func NewStep(polisher Polisher, profile string, timeout time.Duration) *Step {
 	}
 }
 
+// WithRouter attaches an application context router for automatic profile selection.
+func (s *Step) WithRouter(r *Router) *Step {
+	s.router = r
+	return s
+}
+
 func (s *Step) Name() string {
 	return "polish"
 }
@@ -37,6 +45,13 @@ func (s *Step) Apply(text string, ctx postprocess.Context) string {
 	}
 
 	profile := s.profile
+	if s.router != nil && ctx.Application != "" && (profile == "" || profile == "general") {
+		cat := appcontext.Categorize(ctx.Application, "", "")
+		if routed := s.router.Route(ctx.Application, cat); routed != "" {
+			profile = routed
+		}
+	}
+
 	if profile == "" {
 		profile = ctx.Mode
 	}
