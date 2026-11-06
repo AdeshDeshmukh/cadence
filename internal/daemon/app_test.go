@@ -1331,3 +1331,79 @@ func TestApp_EditParseIPC(t *testing.T) {
 		t.Fatal("expected error when text parameter is whitespace")
 	}
 }
+
+func TestApp_EditExecuteIPC(t *testing.T) {
+	cfg := config.Default()
+	mockPolisher := polish.NewMockPolisher(func(req polish.Request) (polish.Response, error) {
+		return polish.Response{
+			Text:  "Bonjour le monde",
+			Model: "mock-french",
+		}, nil
+	})
+	paster := &recordingPaster{}
+	mockSel := selection.NewMockCapturer("Hello world", "accessibility_ax")
+
+	app := NewApp(cfg,
+		WithPolisher(mockPolisher),
+		WithPaster(paster),
+		WithSelectionCapturer(mockSel),
+	)
+
+	ctx := context.Background()
+
+	// 1. Execute with automatic selection capture
+	res, err := app.Handle(ctx, ipc.Request{
+		Method: "edit_execute",
+		Params: map[string]any{
+			"instruction": "translate this to French",
+		},
+	})
+	if err != nil {
+		t.Fatalf("edit_execute failed: %v", err)
+	}
+
+	m, ok := res.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any, got %T", res)
+	}
+	if m["edited_text"] != "Bonjour le monde" {
+		t.Fatalf("expected 'Bonjour le monde', got %v", m["edited_text"])
+	}
+	if m["pasted"] != true {
+		t.Fatalf("expected pasted true, got %v", m["pasted"])
+	}
+	if paster.Text() != "Bonjour le monde" {
+		t.Fatalf("expected paster to have 'Bonjour le monde', got %q", paster.Text())
+	}
+
+	// Verify Undo record was set
+	if !app.CanUndo() {
+		t.Fatal("expected CanUndo to be true after edit_execute")
+	}
+	undoRec := app.LastUndo()
+	if undoRec == nil || undoRec.RawText != "Hello world" {
+		t.Fatalf("expected undo record original text 'Hello world', got %+v", undoRec)
+	}
+
+	// 2. Execute with explicit text and dry-run
+	resDry, err := app.Handle(ctx, ipc.Request{
+		Method: "edit_execute",
+		Params: map[string]any{
+			"instruction": "make this shorter",
+			"text":        "A longer custom text to condense",
+			"dry_run":     true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("edit_execute dry run failed: %v", err)
+	}
+	mDry := resDry.(map[string]any)
+	if mDry["dry_run"] != true || mDry["pasted"] != false {
+		t.Fatalf("unexpected dry run response: %+v", mDry)
+	}
+
+	// 3. Error case: missing instruction
+	if _, err := app.Handle(ctx, ipc.Request{Method: "edit_execute"}); err == nil {
+		t.Fatal("expected error on missing instruction")
+	}
+}
