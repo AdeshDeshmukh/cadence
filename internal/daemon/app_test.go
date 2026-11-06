@@ -1560,3 +1560,110 @@ func TestApp_UndoStackChainIPC(t *testing.T) {
 		t.Fatal("expected error on empty stack undo")
 	}
 }
+
+func TestApp_EditorContextIPCAndSelectionFallback(t *testing.T) {
+	cfg := config.Default()
+	app := NewApp(
+		cfg,
+		WithAppDetector(appcontext.NewMockDetector(appcontext.AppInfo{
+			Name:     "Code",
+			Category: appcontext.CategoryCode,
+		})),
+		WithSelectionCapturer(selection.NewMockCapturer("", "none")), // no AX selection
+	)
+
+	ctx := context.Background()
+
+	// 1. Initial editor context should be inactive
+	res, err := app.Handle(ctx, ipc.Request{Method: "editor_context_get"})
+	if err != nil {
+		t.Fatalf("editor_context_get error: %v", err)
+	}
+	statusMap, ok := res.(map[string]any)
+	if !ok || statusMap["active"] != false {
+		t.Fatalf("expected active=false initially, got: %+v", res)
+	}
+
+	// 2. Set editor context from VS Code
+	setPayload := map[string]any{
+		"editor_name":    "vscode",
+		"workspace_root": "/Users/developer/project",
+		"file_path":      "/Users/developer/project/internal/service.go",
+		"file_name":      "service.go",
+		"language_id":    "go",
+		"line":           88,
+		"column":         5,
+		"selection_text": "func Process(data []byte) error { return nil }",
+		"selection_range": map[string]any{
+			"start_line": 88,
+			"start_col":  1,
+			"end_line":   88,
+			"end_col":    47,
+		},
+		"surrounding_context": "package service\n\nfunc Process(data []byte) error { return nil }",
+	}
+
+	setRes, err := app.Handle(ctx, ipc.Request{
+		Method: "editor_context_set",
+		Params: setPayload,
+	})
+	if err != nil {
+		t.Fatalf("editor_context_set error: %v", err)
+	}
+	setMap := setRes.(map[string]any)
+	if setMap["status"] != "ok" {
+		t.Fatalf("expected status=ok, got %+v", setMap)
+	}
+
+	// 3. Query editor context
+	getRes, err := app.Handle(ctx, ipc.Request{Method: "editor_context_get"})
+	if err != nil {
+		t.Fatalf("editor_context_get error: %v", err)
+	}
+	getMap := getRes.(map[string]any)
+	if getMap["active"] != true {
+		t.Fatalf("expected active=true, got %+v", getMap)
+	}
+	if getMap["file_name"] != "service.go" || getMap["language_id"] != "go" {
+		t.Fatalf("unexpected fields in editor context: %+v", getMap)
+	}
+	if getMap["selection_text"] != "func Process(data []byte) error { return nil }" {
+		t.Fatalf("unexpected selection_text: %v", getMap["selection_text"])
+	}
+
+	// 4. selection_get should seamlessly fallback to editor context when AX capturer returns empty
+	selRes, err := app.Handle(ctx, ipc.Request{Method: "selection_get"})
+	if err != nil {
+		t.Fatalf("selection_get fallback error: %v", err)
+	}
+	sel, ok := selRes.(selection.Result)
+	if !ok {
+		t.Fatalf("expected selection.Result, got %T", selRes)
+	}
+	if sel.Text != "func Process(data []byte) error { return nil }" {
+		t.Fatalf("expected fallback selection text, got %q", sel.Text)
+	}
+	if sel.Method != "editor_context" {
+		t.Fatalf("expected method editor_context, got %q", sel.Method)
+	}
+
+	// 5. Clear editor context
+	clearRes, err := app.Handle(ctx, ipc.Request{Method: "editor_context_clear"})
+	if err != nil {
+		t.Fatalf("editor_context_clear error: %v", err)
+	}
+	clearMap := clearRes.(map[string]any)
+	if clearMap["status"] != "cleared" {
+		t.Fatalf("expected status=cleared, got %+v", clearMap)
+	}
+
+	// Verify it's cleared
+	resAfter, err := app.Handle(ctx, ipc.Request{Method: "editor_context_get"})
+	if err != nil {
+		t.Fatalf("editor_context_get after clear error: %v", err)
+	}
+	afterMap := resAfter.(map[string]any)
+	if afterMap["active"] != false {
+		t.Fatalf("expected active=false after clear, got %+v", afterMap)
+	}
+}

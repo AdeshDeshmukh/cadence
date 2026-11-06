@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -88,6 +89,7 @@ type App struct {
 	lastUndo      *UndoRecord
 	undoStack     []*UndoRecord
 	previewMgr    *edit.PreviewManager
+	editorContext *appcontext.EditorContextManager
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -188,6 +190,11 @@ func WithEditor(e *edit.Editor) Option {
 // WithPreviewManager sets a custom preview session manager.
 func WithPreviewManager(m *edit.PreviewManager) Option {
 	return func(a *App) { a.previewMgr = m }
+}
+
+// WithEditorContextManager sets a custom editor context manager.
+func WithEditorContextManager(m *appcontext.EditorContextManager) Option {
+	return func(a *App) { a.editorContext = m }
 }
 
 // NewApp instantiates a fully configured Cadence daemon application.
@@ -346,6 +353,10 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 
 	if a.previewMgr == nil {
 		a.previewMgr = edit.NewPreviewManager(50)
+	}
+
+	if a.editorContext == nil {
+		a.editorContext = appcontext.NewEditorContextManager()
 	}
 
 	if a.capture == nil {
@@ -633,6 +644,11 @@ func (a *App) AppDetector() appcontext.Detector {
 	return a.appDetector
 }
 
+// EditorContextManager returns the active code editor context manager.
+func (a *App) EditorContextManager() *appcontext.EditorContextManager {
+	return a.editorContext
+}
+
 // Router returns the active application context router.
 func (a *App) Router() *polish.Router {
 	return a.router
@@ -913,11 +929,69 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			"corrections_applied": report.CorrectionsApplied,
 		}, nil
 
-	case "selection_get":
-		if a.capturer == nil {
-			return nil, errors.New("selection capturer is not configured")
+	case "editor_context_set":
+		var eCtx appcontext.EditorContext
+		raw, err := json.Marshal(req.Params)
+		if err != nil {
+			return nil, fmt.Errorf("invalid editor context params: %w", err)
 		}
-		res, err := a.capturer.Capture(ctx)
+		if err := json.Unmarshal(raw, &eCtx); err != nil {
+			return nil, fmt.Errorf("decode editor context: %w", err)
+		}
+		if a.editorContext != nil {
+			a.editorContext.Set(eCtx)
+		}
+		return map[string]any{
+			"status":     "ok",
+			"updated_at": eCtx.UpdatedAt,
+		}, nil
+
+	case "editor_context_get":
+		if a.editorContext == nil {
+			return map[string]any{"active": false}, nil
+		}
+		ctxData, ok := a.editorContext.Get()
+		if !ok {
+			return map[string]any{"active": false}, nil
+		}
+		return map[string]any{
+			"active":              true,
+			"editor_name":         ctxData.EditorName,
+			"workspace_root":      ctxData.WorkspaceRoot,
+			"file_path":           ctxData.FilePath,
+			"file_name":           ctxData.FileName,
+			"language_id":         ctxData.LanguageID,
+			"line":                ctxData.Line,
+			"column":              ctxData.Column,
+			"selection_text":      ctxData.SelectionText,
+			"selection_range":     ctxData.SelectionRange,
+			"surrounding_context": ctxData.SurroundingContext,
+			"updated_at":          ctxData.UpdatedAt,
+			"summary":             a.editorContext.FormatContextSummary(),
+		}, nil
+
+	case "editor_context_clear":
+		if a.editorContext != nil {
+			a.editorContext.Clear()
+		}
+		return map[string]any{"status": "cleared"}, nil
+
+	case "selection_get":
+		var res selection.Result
+		var err error
+		if a.capturer != nil {
+			res, err = a.capturer.Capture(ctx)
+		}
+		if (err != nil || strings.TrimSpace(res.Text) == "") && a.editorContext != nil {
+			if eCtx, ok := a.editorContext.Get(); ok && strings.TrimSpace(eCtx.SelectionText) != "" {
+				res = selection.Result{
+					Text:        eCtx.SelectionText,
+					Method:      "editor_context",
+					Application: eCtx.EditorName,
+				}
+				err = nil
+			}
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -966,14 +1040,16 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 		}
 
 		if strings.TrimSpace(text) == "" {
-			if a.capturer == nil {
-				return nil, errors.New("no text provided and selection capturer is not configured")
+			if a.capturer != nil {
+				if sel, err := a.capturer.Capture(ctx); err == nil && strings.TrimSpace(sel.Text) != "" {
+					text = sel.Text
+				}
 			}
-			sel, err := a.capturer.Capture(ctx)
-			if err != nil {
-				return nil, fmt.Errorf("capture selected text: %w", err)
+			if strings.TrimSpace(text) == "" && a.editorContext != nil {
+				if eCtx, ok := a.editorContext.Get(); ok && strings.TrimSpace(eCtx.SelectionText) != "" {
+					text = eCtx.SelectionText
+				}
 			}
-			text = sel.Text
 		}
 
 		if strings.TrimSpace(text) == "" {
@@ -1043,14 +1119,16 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			return nil, errors.New("missing 'instruction' parameter for edit_preview")
 		}
 		if strings.TrimSpace(text) == "" {
-			if a.capturer == nil {
-				return nil, errors.New("no text provided and selection capturer is not configured")
+			if a.capturer != nil {
+				if sel, err := a.capturer.Capture(ctx); err == nil && strings.TrimSpace(sel.Text) != "" {
+					text = sel.Text
+				}
 			}
-			sel, err := a.capturer.Capture(ctx)
-			if err != nil {
-				return nil, fmt.Errorf("capture selected text: %w", err)
+			if strings.TrimSpace(text) == "" && a.editorContext != nil {
+				if eCtx, ok := a.editorContext.Get(); ok && strings.TrimSpace(eCtx.SelectionText) != "" {
+					text = eCtx.SelectionText
+				}
 			}
-			text = sel.Text
 		}
 		if strings.TrimSpace(text) == "" {
 			return nil, errors.New("no text provided and no active selection found")
