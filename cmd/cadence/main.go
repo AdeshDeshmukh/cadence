@@ -40,6 +40,7 @@ Commands:
   polish <text>      Format and polish text using configured LLM (Ollama/OpenAI)
   undo [--raw]       Revert last AI polish transformation to raw post-processed text
   correct <text>     Detect and fix ASR acoustic and homophone errors using context
+  selection [flags]  Capture highlighted text from active application (Edit Mode)
   app                Show detected active foreground application and category
   config [show|path] Inspect configuration and system file paths
   doctor             Perform diagnostics on system, daemon, and storage
@@ -163,6 +164,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "correct":
 		if err := cmdCorrect(ctx, cfg, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "selection", "select":
+		if err := cmdSelection(ctx, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -1469,5 +1477,72 @@ Flags:
 	} else {
 		fmt.Fprintf(stdout, "  Changes:   None (text is clean)\n")
 	}
+	return nil
+}
+
+func cmdSelection(ctx context.Context, client ipc.Client, args []string, stdout io.Writer) error {
+	var copyToClipboard bool
+	var jsonOutput bool
+
+	for _, arg := range args {
+		switch arg {
+		case "-h", "--help":
+			fmt.Fprintf(stdout, `Usage: cadence selection [flags]
+
+Captures highlighted or selected text from the currently focused desktop application.
+
+Flags:
+  -c, --copy   Copy captured selected text to the system clipboard
+  -j, --json   Output selection result as JSON
+  -h, --help   Show this help message
+`)
+			return nil
+		case "-c", "--copy":
+			copyToClipboard = true
+		case "-j", "--json":
+			jsonOutput = true
+		}
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	resp, err := client.Call(callCtx, "selection_get", nil)
+	if err != nil {
+		return fmt.Errorf("capture selection: %w", err)
+	}
+
+	data, err := json.Marshal(resp)
+	if err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+
+	var res struct {
+		Text        string `json:"text"`
+		Method      string `json:"method"`
+		Application string `json:"application,omitempty"`
+	}
+	if err := json.Unmarshal(data, &res); err != nil {
+		return fmt.Errorf("parse response: %w", err)
+	}
+
+	if jsonOutput {
+		fmt.Fprintln(stdout, string(data))
+	} else {
+		appStr := res.Application
+		if appStr == "" {
+			appStr = "Active Application"
+		}
+		fmt.Fprintf(stdout, "Captured Selection from %s (via %s):\n---\n%s\n---\n",
+			appStr, res.Method, res.Text)
+	}
+
+	if copyToClipboard {
+		if err := paste.SetSystemClipboard(res.Text); err != nil {
+			return fmt.Errorf("copy to clipboard: %w", err)
+		}
+		fmt.Fprintln(stdout, "Copied selection to clipboard.")
+	}
+
 	return nil
 }

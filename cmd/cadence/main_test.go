@@ -177,6 +177,12 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 			"category":            "code",
 			"corrections_applied": 2,
 		}, nil
+	case "selection_get":
+		return map[string]any{
+			"text":        "func calculateSum(a, b int) int",
+			"method":      "accessibility_ax",
+			"application": "Visual Studio Code",
+		}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -820,5 +826,53 @@ func TestCLI_Correct(t *testing.T) {
 	// 4. Empty text error
 	if err := cmdCorrect(context.Background(), cfg, client, []string{}, &out); err == nil {
 		t.Fatal("expected error on empty text")
+	}
+}
+
+func TestCLI_Selection(t *testing.T) {
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("cad_sel_%d.sock", time.Now().UnixNano()))
+	cleanup := startMockDaemon(t, sockPath)
+	defer cleanup()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sockPath,
+	}
+
+	// 1. Standard selection display
+	var out bytes.Buffer
+	if err := cmdSelection(context.Background(), client, []string{}, &out); err != nil {
+		t.Fatalf("cmdSelection failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Captured Selection from Visual Studio Code") ||
+		!strings.Contains(out.String(), "func calculateSum") {
+		t.Fatalf("unexpected selection output: %s", out.String())
+	}
+
+	// 2. JSON output
+	out.Reset()
+	if err := cmdSelection(context.Background(), client, []string{"--json"}, &out); err != nil {
+		t.Fatalf("cmdSelection --json failed: %v", err)
+	}
+	if !strings.Contains(out.String(), `"text":"func calculateSum(a, b int) int"`) {
+		t.Fatalf("unexpected JSON output: %s", out.String())
+	}
+
+	// 3. Copy to clipboard
+	out.Reset()
+	if err := cmdSelection(context.Background(), client, []string{"--copy"}, &out); err != nil {
+		t.Fatalf("cmdSelection --copy failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Copied selection to clipboard.") {
+		t.Fatalf("unexpected copy output: %s", out.String())
+	}
+
+	// 4. Help flag
+	out.Reset()
+	if err := cmdSelection(context.Background(), client, []string{"--help"}, &out); err != nil {
+		t.Fatalf("cmdSelection --help failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Usage: cadence selection") {
+		t.Fatalf("unexpected help output: %s", out.String())
 	}
 }
