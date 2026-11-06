@@ -39,6 +39,7 @@ Commands:
   route <subcommand>   Manage active app-to-profile routing rules (list, set, delete, test)
   polish <text>      Format and polish text using configured LLM (Ollama/OpenAI)
   undo [--raw]       Revert last AI polish transformation to raw post-processed text
+  correct <text>     Detect and fix ASR acoustic and homophone errors using context
   app                Show detected active foreground application and category
   config [show|path] Inspect configuration and system file paths
   doctor             Perform diagnostics on system, daemon, and storage
@@ -155,6 +156,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "undo":
 		if err := cmdUndo(ctx, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "correct":
+		if err := cmdCorrect(ctx, cfg, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -1394,6 +1402,72 @@ Flags:
 	} else {
 		fmt.Fprintf(stdout, "Reverted AI polish transformation [%s]:\n  From: %q\n  To:   %q\n",
 			res.SessionID, res.RevertedFrom, res.RevertedTo)
+	}
+	return nil
+}
+
+func cmdCorrect(ctx context.Context, cfg config.Config, client ipc.Client, args []string, stdout io.Writer) error {
+	var app string
+	var textParts []string
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-h", "--help":
+			fmt.Fprintf(stdout, `Usage: cadence correct <text> [--app <application>]
+
+Detects and fixes obvious ASR acoustic misrecognitions and homophones using application context.
+
+Flags:
+  -a, --app <name>   Target application context (e.g. "VS Code", "Terminal", "Epic", "Clio")
+  -h, --help         Show this help message
+`)
+			return nil
+		case "-a", "--app":
+			if i+1 < len(args) {
+				app = args[i+1]
+				i++
+			}
+		default:
+			textParts = append(textParts, args[i])
+		}
+	}
+
+	text := strings.Join(textParts, " ")
+	if strings.TrimSpace(text) == "" {
+		return errors.New("empty text: please provide text to correct")
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	var report postprocess.CorrectionReport
+	resp, err := client.Call(callCtx, "correct", map[string]any{
+		"text": text,
+		"app":  app,
+	})
+
+	if err == nil {
+		data, _ := json.Marshal(resp)
+		_ = json.Unmarshal(data, &report)
+	} else {
+		// Offline fallback
+		corrector := postprocess.NewCorrector(cfg.Post.Corrections)
+		report = corrector.Correct(text, app)
+	}
+
+	appDisplay := report.App
+	if appDisplay == "" {
+		appDisplay = "Default"
+	}
+
+	fmt.Fprintf(stdout, "ASR Self-Correction Resolution:\n")
+	fmt.Fprintf(stdout, "  Original:  %s\n", report.Original)
+	fmt.Fprintf(stdout, "  App:       %s (Category: %s)\n", appDisplay, report.Category)
+	fmt.Fprintf(stdout, "  Corrected: %s\n", report.Corrected)
+	if report.CorrectionsApplied > 0 {
+		fmt.Fprintf(stdout, "  Changes:   %d correction(s) applied\n", report.CorrectionsApplied)
+	} else {
+		fmt.Fprintf(stdout, "  Changes:   None (text is clean)\n")
 	}
 	return nil
 }
