@@ -1381,17 +1381,33 @@ func cmdRouteTest(ctx context.Context, cfg config.Config, client ipc.Client, app
 
 func cmdUndo(ctx context.Context, client ipc.Client, args []string, stdout io.Writer) error {
 	target := "unpolished"
-	for _, arg := range args {
-		if arg == "--raw" || arg == "-r" {
-			target = "raw"
-		} else if arg == "-h" || arg == "--help" {
-			fmt.Fprintf(stdout, `Usage: cadence undo [--raw]
+	depth := 1
+	var listMode bool
 
-Reverts the last AI-polished dictation text in the active application back to the raw unpolished text.
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch arg {
+		case "--raw", "-r":
+			target = "raw"
+		case "-l", "--list":
+			listMode = true
+		case "-d", "--depth":
+			if i+1 < len(args) {
+				if d, err := strconv.Atoi(args[i+1]); err == nil && d > 0 {
+					depth = d
+					i++
+				}
+			}
+		case "-h", "--help":
+			fmt.Fprintf(stdout, `Usage: cadence undo [flags]
+
+Reverts AI-polished dictation or voice text edits in the active application.
 
 Flags:
-  -r, --raw    Revert all the way back to the raw ASR transcript instead of post-processed text
-  -h, --help   Show this help message
+  -r, --raw         Revert all the way back to the raw ASR transcript instead of post-processed text
+  -d, --depth <n>   Number of successive transformations to undo from the stack (default 1)
+  -l, --list        Show recent reversible transformations in the undo stack
+  -h, --help        Show this help message
 `)
 			return nil
 		}
@@ -1400,8 +1416,46 @@ Flags:
 	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
+	if listMode {
+		resp, err := client.Call(callCtx, "undo_list", nil)
+		if err != nil {
+			return fmt.Errorf("retrieve undo stack: %w", err)
+		}
+		data, _ := json.Marshal(resp)
+		var stack []struct {
+			SessionID      string    `json:"session_id"`
+			RawText        string    `json:"raw_text"`
+			UnpolishedText string    `json:"unpolished_text"`
+			PolishedText   string    `json:"polished_text"`
+			IsPolished     bool      `json:"is_polished"`
+			PastedAt       time.Time `json:"pasted_at"`
+			Undone         bool      `json:"undone"`
+		}
+		_ = json.Unmarshal(data, &stack)
+
+		if len(stack) == 0 {
+			fmt.Fprintln(stdout, "Undo Stack is empty (no recent transformations).")
+			return nil
+		}
+
+		fmt.Fprintln(stdout, "Cadence Reversible Transformation Stack:")
+		for i := len(stack) - 1; i >= 0; i-- {
+			rec := stack[i]
+			status := "Active"
+			if rec.Undone {
+				status = "Undone"
+			}
+			fmt.Fprintf(stdout, "  [%d] %s (Session: %s, Time: %s)\n",
+				i+1, status, rec.SessionID, rec.PastedAt.Format("15:04:05"))
+			fmt.Fprintf(stdout, "      Original:   %q\n", rec.UnpolishedText)
+			fmt.Fprintf(stdout, "      Transformed: %q\n", rec.PolishedText)
+		}
+		return nil
+	}
+
 	resp, err := client.Call(callCtx, "undo", map[string]any{
 		"target": target,
+		"depth":  depth,
 	})
 	if err != nil {
 		return err
@@ -1417,6 +1471,7 @@ Flags:
 		RevertedFrom string `json:"reverted_from"`
 		RevertedTo   string `json:"reverted_to"`
 		Target       string `json:"target"`
+		Remaining    int    `json:"remaining"`
 	}
 	if err := json.Unmarshal(data, &res); err != nil {
 		return fmt.Errorf("parse response: %w", err)
@@ -1428,6 +1483,9 @@ Flags:
 	} else {
 		fmt.Fprintf(stdout, "Reverted AI polish transformation [%s]:\n  From: %q\n  To:   %q\n",
 			res.SessionID, res.RevertedFrom, res.RevertedTo)
+	}
+	if res.Remaining > 0 {
+		fmt.Fprintf(stdout, "Remaining reversible transformations in stack: %d\n", res.Remaining)
 	}
 	return nil
 }
@@ -1640,8 +1698,67 @@ Flags:
 }
 
 func cmdEdit(ctx context.Context, cfg config.Config, client ipc.Client, args []string, stdout io.Writer) error {
+	if len(args) > 0 {
+		switch args[0] {
+		case "apply":
+			if len(args) < 2 {
+				return errors.New("missing preview ID: cadence edit apply <id>")
+			}
+			callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			resp, err := client.Call(callCtx, "edit_apply", map[string]any{"id": args[1]})
+			if err != nil {
+				return fmt.Errorf("apply preview: %w", err)
+			}
+			data, _ := json.Marshal(resp)
+			var sess edit.PreviewSession
+			_ = json.Unmarshal(data, &sess)
+			fmt.Fprintf(stdout, "Applied and pasted edit proposal [%s] into active application.\n", sess.ID)
+			return nil
+
+		case "reject":
+			if len(args) < 2 {
+				return errors.New("missing preview ID: cadence edit reject <id>")
+			}
+			callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			resp, err := client.Call(callCtx, "edit_reject", map[string]any{"id": args[1]})
+			if err != nil {
+				return fmt.Errorf("reject preview: %w", err)
+			}
+			data, _ := json.Marshal(resp)
+			var sess edit.PreviewSession
+			_ = json.Unmarshal(data, &sess)
+			fmt.Fprintf(stdout, "Rejected edit proposal [%s].\n", sess.ID)
+			return nil
+
+		case "list", "pending":
+			callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			resp, err := client.Call(callCtx, "edit_preview_list", nil)
+			if err != nil {
+				return fmt.Errorf("list pending previews: %w", err)
+			}
+			data, _ := json.Marshal(resp)
+			var list []*edit.PreviewSession
+			_ = json.Unmarshal(data, &list)
+			if len(list) == 0 {
+				fmt.Fprintln(stdout, "No pending edit proposals.")
+				return nil
+			}
+			fmt.Fprintf(stdout, "Pending Edit Proposals (%d):\n", len(list))
+			for _, s := range list {
+				fmt.Fprintf(stdout, "  [%s] Intent: %s (Time: %s)\n", s.ID, s.Instruction.Intent, s.CreatedAt.Format("15:04:05"))
+				fmt.Fprintf(stdout, "      Original:  %q\n", s.OriginalText)
+				fmt.Fprintf(stdout, "      Candidate: %q\n", s.CandidateText)
+			}
+			return nil
+		}
+	}
+
 	var jsonOutput bool
 	var dryRun bool
+	var previewMode bool
 	var explicitText string
 	var instructionParts []string
 
@@ -1650,10 +1767,14 @@ func cmdEdit(ctx context.Context, cfg config.Config, client ipc.Client, args []s
 		switch arg {
 		case "-h", "--help":
 			fmt.Fprintf(stdout, `Usage: cadence edit <voice-instruction> [flags]
+       cadence edit apply <preview-id>
+       cadence edit reject <preview-id>
+       cadence edit list
 
 Transform selected text in active application using voice edit instructions.
 
 Flags:
+  -p, --preview       Generate an interactive review proposal with diff without pasting
   -t, --text <text>   Provide custom text to edit instead of capturing active selection
   -d, --dry-run       Preview transformation without pasting into target application
   -j, --json          Output result as JSON
@@ -1664,6 +1785,8 @@ Flags:
 			jsonOutput = true
 		case "-d", "--dry-run":
 			dryRun = true
+		case "-p", "--preview":
+			previewMode = true
 		case "-t", "--text":
 			if i+1 < len(args) {
 				explicitText = args[i+1]
@@ -1681,6 +1804,35 @@ Flags:
 
 	callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
+
+	if previewMode {
+		params := map[string]any{"instruction": instruction}
+		if explicitText != "" {
+			params["text"] = explicitText
+		}
+		resp, err := client.Call(callCtx, "edit_preview", params)
+		if err != nil {
+			return fmt.Errorf("generate preview: %w", err)
+		}
+		data, _ := json.Marshal(resp)
+		var sess edit.PreviewSession
+		_ = json.Unmarshal(data, &sess)
+
+		if jsonOutput {
+			out, _ := json.MarshalIndent(sess, "", "  ")
+			fmt.Fprintln(stdout, string(out))
+			return nil
+		}
+
+		fmt.Fprintf(stdout, "Voice Text Edit Proposal [%s]:\n", sess.ID)
+		fmt.Fprintf(stdout, "  Intent:      %s\n", sess.Instruction.Intent)
+		fmt.Fprintln(stdout, "  Diff:")
+		fmt.Fprintln(stdout, sess.DiffSummary)
+		fmt.Fprintln(stdout, "\nActions:")
+		fmt.Fprintf(stdout, "  Apply:   cadence edit apply %s\n", sess.ID)
+		fmt.Fprintf(stdout, "  Reject:  cadence edit reject %s\n", sess.ID)
+		return nil
+	}
 
 	params := map[string]any{
 		"instruction": instruction,

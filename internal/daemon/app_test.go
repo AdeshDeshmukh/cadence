@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1405,5 +1406,157 @@ func TestApp_EditExecuteIPC(t *testing.T) {
 	// 3. Error case: missing instruction
 	if _, err := app.Handle(ctx, ipc.Request{Method: "edit_execute"}); err == nil {
 		t.Fatal("expected error on missing instruction")
+	}
+}
+
+func TestApp_PreviewLifecycleIPC(t *testing.T) {
+	cfg := config.Default()
+	mockPolisher := polish.NewMockPolisher(func(req polish.Request) (polish.Response, error) {
+		return polish.Response{
+			Text:  "Proposal candidate text",
+			Model: "mock-model",
+		}, nil
+	})
+	paster := &recordingPaster{}
+	mockSel := selection.NewMockCapturer("Original selection", "mock")
+
+	app := NewApp(cfg,
+		WithPolisher(mockPolisher),
+		WithPaster(paster),
+		WithSelectionCapturer(mockSel),
+	)
+
+	ctx := context.Background()
+
+	// 1. Generate preview
+	pRes, err := app.Handle(ctx, ipc.Request{
+		Method: "edit_preview",
+		Params: map[string]any{
+			"instruction": "rewrite this",
+		},
+	})
+	if err != nil {
+		t.Fatalf("edit_preview failed: %v", err)
+	}
+
+	sess, ok := pRes.(*edit.PreviewSession)
+	if !ok {
+		t.Fatalf("unexpected type: %T", pRes)
+	}
+	if sess.Status != edit.PreviewPending {
+		t.Fatalf("expected pending status, got %q", sess.Status)
+	}
+	if !strings.Contains(sess.DiffSummary, "- Original selection") {
+		t.Fatalf("unexpected diff: %s", sess.DiffSummary)
+	}
+
+	// 2. List pending previews
+	listRes, err := app.Handle(ctx, ipc.Request{Method: "edit_preview_list"})
+	if err != nil {
+		t.Fatalf("edit_preview_list failed: %v", err)
+	}
+	list := listRes.([]*edit.PreviewSession)
+	if len(list) != 1 || list[0].ID != sess.ID {
+		t.Fatalf("unexpected preview list: %+v", list)
+	}
+
+	// 3. Apply preview
+	applyRes, err := app.Handle(ctx, ipc.Request{
+		Method: "edit_apply",
+		Params: map[string]any{"id": sess.ID},
+	})
+	if err != nil {
+		t.Fatalf("edit_apply failed: %v", err)
+	}
+	appliedSess := applyRes.(*edit.PreviewSession)
+	if appliedSess.Status != edit.PreviewApplied {
+		t.Fatalf("expected applied status, got %q", appliedSess.Status)
+	}
+	if paster.Text() != "Proposal candidate text" {
+		t.Fatalf("expected pasted text, got %q", paster.Text())
+	}
+
+	// 4. Verify undo is ready
+	if !app.CanUndo() {
+		t.Fatal("expected CanUndo after apply")
+	}
+
+	// 5. Reject preview on non-pending returns error
+	if _, err := app.Handle(ctx, ipc.Request{
+		Method: "edit_reject",
+		Params: map[string]any{"id": sess.ID},
+	}); err == nil {
+		t.Fatal("expected error rejecting already applied session")
+	}
+}
+
+func TestApp_UndoStackChainIPC(t *testing.T) {
+	cfg := config.Default()
+	paster := &recordingPaster{}
+	reverter := paste.NewMockReverter()
+	app := NewApp(cfg, WithPaster(paster), WithReverter(reverter))
+	ctx := context.Background()
+
+	// Push 3 transformations to undoStack
+	app.recordUndoLocked(&UndoRecord{
+		SessionID:      "sess-1",
+		RawText:        "raw 1",
+		UnpolishedText: "unpolished 1",
+		PolishedText:   "polished 1",
+		IsPolished:     true,
+	})
+	app.recordUndoLocked(&UndoRecord{
+		SessionID:      "sess-2",
+		RawText:        "raw 2",
+		UnpolishedText: "unpolished 2",
+		PolishedText:   "polished 2",
+		IsPolished:     true,
+	})
+	app.recordUndoLocked(&UndoRecord{
+		SessionID:      "sess-3",
+		RawText:        "raw 3",
+		UnpolishedText: "unpolished 3",
+		PolishedText:   "polished 3",
+		IsPolished:     true,
+	})
+
+	// Check undo stack
+	stack := app.UndoStack()
+	if len(stack) != 3 {
+		t.Fatalf("expected 3 stack entries, got %d", len(stack))
+	}
+
+	// 1. Undo 1 step (depth 1)
+	res1, err := app.Handle(ctx, ipc.Request{
+		Method: "undo",
+		Params: map[string]any{"depth": 1.0},
+	})
+	if err != nil {
+		t.Fatalf("undo failed: %v", err)
+	}
+	u1 := res1.(*UndoResult)
+	if u1.SessionID != "sess-3" || u1.Remaining != 2 {
+		t.Fatalf("unexpected undo result: %+v", u1)
+	}
+
+	// 2. Undo 2 steps (depth 2)
+	res2, err := app.Handle(ctx, ipc.Request{
+		Method: "undo",
+		Params: map[string]any{"depth": 2.0},
+	})
+	if err != nil {
+		t.Fatalf("undo depth 2 failed: %v", err)
+	}
+	u2 := res2.(*UndoResult)
+	if u2.SessionID != "sess-1" || u2.Remaining != 0 {
+		t.Fatalf("unexpected undo result: %+v", u2)
+	}
+
+	// 3. Stack empty, further undo should fail
+	if app.CanUndo() {
+		t.Fatal("expected CanUndo to be false after fully unwinding stack")
+	}
+	if _, err := app.Handle(ctx, ipc.Request{Method: "undo"}); err == nil {
+		t.Fatal("expected error on empty stack undo")
 	}
 }
