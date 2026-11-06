@@ -102,17 +102,17 @@ func TestEditorContextManager_TTL(t *testing.T) {
 
 func TestGuessLanguage(t *testing.T) {
 	cases := map[string]string{
-		"main.go":           "go",
-		"script.py":         "python",
-		"component.tsx":     "typescriptreact",
-		"index.ts":          "typescript",
-		"app.js":            "javascript",
-		"style.css":         "css",
-		"config.yaml":       "yaml",
-		"data.json":         "json",
-		"lib.rs":            "rust",
-		"run.sh":            "shellscript",
-		"unknown.xyz123":    "",
+		"main.go":        "go",
+		"script.py":      "python",
+		"component.tsx":  "typescriptreact",
+		"index.ts":       "typescript",
+		"app.js":         "javascript",
+		"style.css":      "css",
+		"config.yaml":    "yaml",
+		"data.json":      "json",
+		"lib.rs":         "rust",
+		"run.sh":         "shellscript",
+		"unknown.xyz123": "",
 	}
 
 	for path, expected := range cases {

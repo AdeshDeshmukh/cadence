@@ -18,17 +18,17 @@ type SelectionRange struct {
 
 // EditorContext captures rich context from a developer's code editor (VS Code, Cursor, etc.).
 type EditorContext struct {
-	EditorName         string          `json:"editor_name"`          // e.g. "vscode", "vscodium", "cursor"
-	WorkspaceRoot      string          `json:"workspace_root"`       // project root directory
-	FilePath           string          `json:"file_path"`            // full or relative path to open file
-	FileName           string          `json:"file_name"`            // base name, e.g. "app.go"
-	LanguageID         string          `json:"language_id"`          // "go", "typescript", "python", "rust", etc.
-	Line               int             `json:"line"`                 // active cursor line (1-based)
-	Column             int             `json:"column"`               // active cursor column (1-based)
-	SelectionText      string          `json:"selection_text"`       // text currently highlighted in editor
+	EditorName         string          `json:"editor_name"`    // e.g. "vscode", "vscodium", "cursor"
+	WorkspaceRoot      string          `json:"workspace_root"` // project root directory
+	FilePath           string          `json:"file_path"`      // full or relative path to open file
+	FileName           string          `json:"file_name"`      // base name, e.g. "app.go"
+	LanguageID         string          `json:"language_id"`    // "go", "typescript", "python", "rust", etc.
+	Line               int             `json:"line"`           // active cursor line (1-based)
+	Column             int             `json:"column"`         // active cursor column (1-based)
+	SelectionText      string          `json:"selection_text"` // text currently highlighted in editor
 	SelectionRange     *SelectionRange `json:"selection_range,omitempty"`
-	SurroundingContext string          `json:"surrounding_context"`  // nearby code lines for LLM context
-	Active             bool            `json:"active"`               // whether editor is currently active
+	SurroundingContext string          `json:"surrounding_context"` // nearby code lines for LLM context
+	Active             bool            `json:"active"`              // whether editor is currently active
 	UpdatedAt          time.Time       `json:"updated_at"`
 }
 
