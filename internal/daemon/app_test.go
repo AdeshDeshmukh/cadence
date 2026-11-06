@@ -1181,3 +1181,49 @@ func TestApp_UndoNotPolished(t *testing.T) {
 		t.Fatalf("expected raw text, got %q", res.RevertedTo)
 	}
 }
+
+func TestApp_SelfCorrectionIPC(t *testing.T) {
+	cfg := config.Default()
+	cfg.Post.Correction = true
+	app := NewApp(cfg)
+
+	ctx := context.Background()
+
+	// 1. Correct code context
+	res, err := app.Handle(ctx, ipc.Request{
+		Method: "correct",
+		Params: map[string]any{
+			"text": "create a four loop with sink await in pie test",
+			"app":  "Visual Studio Code",
+		},
+	})
+	if err != nil {
+		t.Fatalf("correct IPC failed: %v", err)
+	}
+	rMap, ok := res.(map[string]any)
+	if !ok || rMap["corrected"] != "create a for loop with async await in pytest" {
+		t.Fatalf("unexpected correct result: %+v", res)
+	}
+	if rMap["category"] != "code" {
+		t.Fatalf("expected category code, got: %v", rMap["category"])
+	}
+	if rMap["changed"] != true {
+		t.Fatalf("expected changed true, got: %v", rMap["changed"])
+	}
+
+	// 2. Correct medical context
+	medRes, err := app.Handle(ctx, ipc.Request{
+		Method: "correct",
+		Params: map[string]any{
+			"text": "patient percent with hyper tension",
+			"app":  "Epic Hyperspace",
+		},
+	})
+	if err != nil {
+		t.Fatalf("correct IPC medical failed: %v", err)
+	}
+	mMap, ok := medRes.(map[string]any)
+	if !ok || mMap["corrected"] != "patient presented with hypertension" {
+		t.Fatalf("unexpected medical result: %+v", medRes)
+	}
+}

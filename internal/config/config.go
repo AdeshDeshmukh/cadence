@@ -42,6 +42,8 @@ type PostConfig struct {
 	Vocabulary    bool
 	ITN           bool
 	Snippets      bool
+	Correction    bool
+	Corrections   map[string]string
 }
 
 type PasteConfig struct {
@@ -118,6 +120,8 @@ func Default() Config {
 			Vocabulary:    true,
 			ITN:           true,
 			Snippets:      true,
+			Correction:    true,
+			Corrections:   map[string]string{},
 		},
 		Paste: PasteConfig{
 			PreserveClipboard: true,

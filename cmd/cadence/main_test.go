@@ -166,6 +166,17 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 			"reverted_to":   "unpolished post-processed text",
 			"target":        "unpolished",
 		}, nil
+	case "correct":
+		params, _ := req.Params.(map[string]any)
+		text, _ := params["text"].(string)
+		app, _ := params["app"].(string)
+		return map[string]any{
+			"original":            text,
+			"corrected":           "for loop in pytest",
+			"app":                 app,
+			"category":            "code",
+			"corrections_applied": 2,
+		}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -762,5 +773,52 @@ func TestCLI_Undo(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Usage: cadence undo") {
 		t.Fatalf("unexpected undo help output: %s", out.String())
+	}
+}
+
+func TestCLI_Correct(t *testing.T) {
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("cad_correct_%d.sock", time.Now().UnixNano()))
+	cleanup := startMockDaemon(t, sockPath)
+	defer cleanup()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sockPath,
+	}
+	cfg := config.Default()
+
+	// 1. cadence correct with app
+	var out bytes.Buffer
+	if err := cmdCorrect(context.Background(), cfg, client, []string{"four loop in pie test", "--app", "VS Code"}, &out); err != nil {
+		t.Fatalf("cmdCorrect failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "ASR Self-Correction Resolution") ||
+		!strings.Contains(out.String(), "for loop in pytest") ||
+		!strings.Contains(out.String(), "2 correction(s) applied") {
+		t.Fatalf("unexpected correct output: %s", out.String())
+	}
+
+	// 2. Offline fallback
+	offlineClient := ipc.Client{Network: "unix", Address: "/tmp/nonexistent_sock_offline.sock"}
+	out.Reset()
+	if err := cmdCorrect(context.Background(), cfg, offlineClient, []string{"four loop in pie test", "--app", "VS Code"}, &out); err != nil {
+		t.Fatalf("cmdCorrect offline failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "for loop in pytest") {
+		t.Fatalf("unexpected offline correct output: %s", out.String())
+	}
+
+	// 3. Help
+	out.Reset()
+	if err := cmdCorrect(context.Background(), cfg, client, []string{"--help"}, &out); err != nil {
+		t.Fatalf("cmdCorrect --help failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Usage: cadence correct") {
+		t.Fatalf("unexpected help output: %s", out.String())
+	}
+
+	// 4. Empty text error
+	if err := cmdCorrect(context.Background(), cfg, client, []string{}, &out); err == nil {
+		t.Fatal("expected error on empty text")
 	}
 }

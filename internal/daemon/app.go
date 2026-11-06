@@ -60,6 +60,7 @@ type App struct {
 	reverter    paste.Reverter
 	store       storage.Store
 	process     *postprocess.Pipeline
+	corrector   *postprocess.Corrector
 	polisher    polish.Polisher
 	profiles    *polish.ProfileRegistry
 	router      *polish.Router
@@ -156,6 +157,11 @@ func WithReverter(r paste.Reverter) Option {
 	return func(a *App) { a.reverter = r }
 }
 
+// WithCorrector sets a custom ASR self-corrector.
+func WithCorrector(c *postprocess.Corrector) Option {
+	return func(a *App) { a.corrector = c }
+}
+
 // NewApp instantiates a fully configured Cadence daemon application.
 func NewApp(cfg config.Config, opts ...Option) *App {
 	a := &App{
@@ -228,10 +234,17 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 		}
 	}
 
+	if a.corrector == nil {
+		a.corrector = postprocess.NewCorrector(cfg.Post.Corrections)
+	}
+
 	if a.process == nil {
 		var steps []postprocess.Step
 		if cfg.Post.FillerRemoval {
 			steps = append(steps, postprocess.NewFillerRemoval())
+		}
+		if cfg.Post.Correction && a.corrector != nil {
+			steps = append(steps, a.corrector)
 		}
 		if cfg.Post.Vocabulary {
 			steps = append(steps, postprocess.NewVocabulary())
@@ -586,6 +599,11 @@ func (a *App) Reverter() paste.Reverter {
 	return a.reverter
 }
 
+// Corrector returns the active ASR self-correction engine.
+func (a *App) Corrector() *postprocess.Corrector {
+	return a.corrector
+}
+
 // CanUndo reports whether there is a recent AI transformation available to revert.
 func (a *App) CanUndo() bool {
 	a.mu.Lock()
@@ -698,20 +716,21 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 		}
 
 		return map[string]any{
-			"status":         "running",
-			"version":        version.Version,
-			"recording":      rec,
-			"session":        sessID,
-			"partial":        partial,
-			"shortcut":       a.cfg.Hotkey.Shortcut,
-			"undo_shortcut":  a.cfg.Hotkey.UndoShortcut,
-			"mode":           a.cfg.Hotkey.Mode,
-			"polish_enabled": a.cfg.Polish.Enabled,
-			"polish_backend": a.cfg.Polish.Backend,
-			"polish_model":   a.cfg.Polish.Model,
-			"active_app":     appName,
-			"can_undo":       canUndo,
-			"last_undo":      lastUndoMap,
+			"status":             "running",
+			"version":            version.Version,
+			"recording":          rec,
+			"session":            sessID,
+			"partial":            partial,
+			"shortcut":           a.cfg.Hotkey.Shortcut,
+			"undo_shortcut":      a.cfg.Hotkey.UndoShortcut,
+			"mode":               a.cfg.Hotkey.Mode,
+			"polish_enabled":     a.cfg.Polish.Enabled,
+			"polish_backend":     a.cfg.Polish.Backend,
+			"polish_model":       a.cfg.Polish.Model,
+			"active_app":         appName,
+			"can_undo":           canUndo,
+			"last_undo":          lastUndoMap,
+			"correction_enabled": a.cfg.Post.Correction,
 		}, nil
 
 	case "undo":
@@ -736,6 +755,29 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			return appcontext.AppInfo{Name: "Unknown", Category: appcontext.CategoryGeneral}, nil
 		}
 		return info, nil
+
+	case "correct":
+		params, _ := req.Params.(map[string]any)
+		text, _ := params["text"].(string)
+		app, _ := params["app"].(string)
+		if app == "" && a.appDetector != nil {
+			if info, err := a.appDetector.Detect(ctx); err == nil {
+				app = info.Name
+			}
+		}
+		corrector := a.corrector
+		if corrector == nil {
+			corrector = postprocess.NewCorrector(a.cfg.Post.Corrections)
+		}
+		report := corrector.Correct(text, app)
+		return map[string]any{
+			"original":            report.Original,
+			"corrected":           report.Corrected,
+			"app":                 app,
+			"category":            string(report.Category),
+			"changed":             report.Original != report.Corrected,
+			"corrections_applied": report.CorrectionsApplied,
+		}, nil
 	case "dictate_start":
 		a.startDictation()
 		return map[string]any{"ok": true, "action": "started"}, nil
