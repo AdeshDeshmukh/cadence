@@ -189,6 +189,25 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 		text, _ := params["text"].(string)
 		parser := edit.NewParser(nil)
 		return parser.Parse(context.Background(), text), nil
+	case "edit_execute":
+		params, _ := req.Params.(map[string]any)
+		ins, _ := params["instruction"].(string)
+		txt, _ := params["text"].(string)
+		dryRun, _ := params["dry_run"].(bool)
+		if txt == "" {
+			txt = "func calculateSum(a, b int) int"
+		}
+		parser := edit.NewParser(nil)
+		instr := parser.Parse(context.Background(), ins)
+		return map[string]any{
+			"original_text": txt,
+			"edited_text":   "// rewritten function\nfunc calculateSum(a, b int) int",
+			"instruction":   instr,
+			"dry_run":       dryRun,
+			"pasted":        !dryRun,
+			"model":         "mock-daemon",
+			"latency_ms":    12,
+		}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -936,6 +955,74 @@ func TestCLI_Parse(t *testing.T) {
 		t.Fatalf("cmdParse --help failed: %v", err)
 	}
 	if !strings.Contains(out.String(), "Usage: cadence parse") {
+		t.Fatalf("unexpected help output: %s", out.String())
+	}
+}
+
+func TestCLI_Edit(t *testing.T) {
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("cad_edit_%d.sock", time.Now().UnixNano()))
+	cleanup := startMockDaemon(t, sockPath)
+	defer cleanup()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sockPath,
+	}
+	cfg := config.Default()
+
+	// 1. Edit via mock daemon IPC
+	var out bytes.Buffer
+	if err := cmdEdit(context.Background(), cfg, client, []string{"rewrite", "this", "to", "sound", "professional"}, &out); err != nil {
+		t.Fatalf("cmdEdit failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Voice Text Edit Result:") ||
+		!strings.Contains(out.String(), "Intent:      rewrite") ||
+		!strings.Contains(out.String(), "// rewritten function") ||
+		!strings.Contains(out.String(), "Applied & pasted") {
+		t.Fatalf("unexpected edit output: %s", out.String())
+	}
+
+	// 2. Edit with explicit text and dry-run
+	out.Reset()
+	if err := cmdEdit(context.Background(), cfg, client, []string{"make", "this", "shorter", "-t", "A very long sentence here", "--dry-run"}, &out); err != nil {
+		t.Fatalf("cmdEdit dry run failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Original:    A very long sentence here") ||
+		!strings.Contains(out.String(), "Status:      Dry run") {
+		t.Fatalf("unexpected dry run output: %s", out.String())
+	}
+
+	// 3. Edit with JSON output
+	out.Reset()
+	if err := cmdEdit(context.Background(), cfg, client, []string{"translate", "to", "French", "-t", "Hello", "--json"}, &out); err != nil {
+		t.Fatalf("cmdEdit json failed: %v", err)
+	}
+	if !strings.Contains(out.String(), `"original_text": "Hello"`) ||
+		!strings.Contains(out.String(), `"intent": "translate"`) {
+		t.Fatalf("unexpected json output: %s", out.String())
+	}
+
+	// 4. Offline fallback with explicit text and dry run
+	out.Reset()
+	badClient := ipc.Client{Network: "unix", Address: "/tmp/nonexistent-edit.sock"}
+	if err := cmdEdit(context.Background(), cfg, badClient, []string{"shorten", "this", "-t", "Some input text", "--dry-run"}, &out); err != nil {
+		t.Fatalf("cmdEdit offline failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Intent:      shorten") {
+		t.Fatalf("unexpected offline output: %s", out.String())
+	}
+
+	// 5. Missing instruction error
+	if err := cmdEdit(context.Background(), cfg, client, []string{}, &out); err == nil {
+		t.Fatal("expected error on empty instruction")
+	}
+
+	// 6. Help flag
+	out.Reset()
+	if err := cmdEdit(context.Background(), cfg, client, []string{"--help"}, &out); err != nil {
+		t.Fatalf("cmdEdit --help failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Usage: cadence edit") {
 		t.Fatalf("unexpected help output: %s", out.String())
 	}
 }

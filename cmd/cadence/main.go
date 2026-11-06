@@ -19,6 +19,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/paste"
 	"github.com/AdeshDeshmukh/cadence/internal/polish"
 	"github.com/AdeshDeshmukh/cadence/internal/postprocess"
+	"github.com/AdeshDeshmukh/cadence/internal/selection"
 	"github.com/AdeshDeshmukh/cadence/internal/storage"
 	"github.com/AdeshDeshmukh/cadence/pkg/version"
 )
@@ -43,6 +44,7 @@ Commands:
   correct <text>     Detect and fix ASR acoustic and homophone errors using context
   selection [flags]  Capture highlighted text from active application (Edit Mode)
   parse <text>       Parse voice edit instruction into intent and parameters
+  edit <instruction> Execute voice edit on highlighted text or custom input
   app                Show detected active foreground application and category
   config [show|path] Inspect configuration and system file paths
   doctor             Perform diagnostics on system, daemon, and storage
@@ -180,6 +182,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "parse":
 		if err := cmdParse(ctx, cfg, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "edit":
+		if err := cmdEdit(ctx, cfg, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -1627,5 +1636,167 @@ Flags:
 		fmt.Fprintf(stdout, "  Prompt:      %s\n", instr.Prompt)
 	}
 	fmt.Fprintf(stdout, "  Confidence:  %.2f\n", instr.Confidence)
+	return nil
+}
+
+func cmdEdit(ctx context.Context, cfg config.Config, client ipc.Client, args []string, stdout io.Writer) error {
+	var jsonOutput bool
+	var dryRun bool
+	var explicitText string
+	var instructionParts []string
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch arg {
+		case "-h", "--help":
+			fmt.Fprintf(stdout, `Usage: cadence edit <voice-instruction> [flags]
+
+Transform selected text in active application using voice edit instructions.
+
+Flags:
+  -t, --text <text>   Provide custom text to edit instead of capturing active selection
+  -d, --dry-run       Preview transformation without pasting into target application
+  -j, --json          Output result as JSON
+  -h, --help          Show this help message
+`)
+			return nil
+		case "-j", "--json":
+			jsonOutput = true
+		case "-d", "--dry-run":
+			dryRun = true
+		case "-t", "--text":
+			if i+1 < len(args) {
+				explicitText = args[i+1]
+				i++
+			}
+		default:
+			instructionParts = append(instructionParts, arg)
+		}
+	}
+
+	instruction := strings.Join(instructionParts, " ")
+	if strings.TrimSpace(instruction) == "" {
+		return errors.New("empty instruction: please provide a voice edit instruction (e.g. 'translate this to French', 'make this shorter')")
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	params := map[string]any{
+		"instruction": instruction,
+		"dry_run":     dryRun,
+	}
+	if explicitText != "" {
+		params["text"] = explicitText
+	}
+
+	var result struct {
+		OriginalText string           `json:"original_text"`
+		EditedText   string           `json:"edited_text"`
+		Instruction  edit.Instruction `json:"instruction"`
+		DryRun       bool             `json:"dry_run"`
+		Pasted       bool             `json:"pasted"`
+		Model        string           `json:"model,omitempty"`
+		LatencyMs    int64            `json:"latency_ms,omitempty"`
+	}
+
+	resp, err := client.Call(callCtx, "edit_execute", params)
+	if err == nil {
+		data, _ := json.Marshal(resp)
+		_ = json.Unmarshal(data, &result)
+	} else {
+		// Offline fallback
+		text := explicitText
+		if strings.TrimSpace(text) == "" {
+			capturer := selection.NewDefaultCapturer()
+			selRes, cErr := capturer.Capture(ctx)
+			if cErr != nil {
+				return fmt.Errorf("capture selected text: %w", cErr)
+			}
+			text = selRes.Text
+		}
+		if strings.TrimSpace(text) == "" {
+			return errors.New("no text provided and no active text selection found")
+		}
+
+		parser := edit.NewParser(nil)
+		instr := parser.Parse(ctx, instruction)
+
+		var polisher polish.Polisher = polish.NewNoopPolisher()
+		if cfg.Polish.Enabled {
+			switch cfg.Polish.Backend {
+			case "ollama":
+				polisher = polish.NewOllamaPolisher(
+					polish.WithOllamaEndpoint(cfg.Polish.Endpoint),
+					polish.WithOllamaModel(cfg.Polish.Model),
+				)
+			case "openai":
+				polisher = polish.NewOpenAIPolisher(
+					polish.WithOpenAIEndpoint(cfg.Polish.Endpoint),
+					polish.WithOpenAIModel(cfg.Polish.Model),
+					polish.WithOpenAIAPIKey(cfg.Polish.APIKey),
+				)
+			}
+		}
+
+		editor := edit.NewEditor(polisher)
+		editRes, edErr := editor.Execute(ctx, text, instr)
+		if edErr != nil {
+			return fmt.Errorf("execute edit transformation: %w", edErr)
+		}
+
+		pasted := false
+		if !dryRun {
+			paster := paste.NewDefaultCascade()
+			if _, pErr := paster.Paste(editRes.EditedText); pErr == nil {
+				pasted = true
+			}
+		}
+
+		result = struct {
+			OriginalText string           `json:"original_text"`
+			EditedText   string           `json:"edited_text"`
+			Instruction  edit.Instruction `json:"instruction"`
+			DryRun       bool             `json:"dry_run"`
+			Pasted       bool             `json:"pasted"`
+			Model        string           `json:"model,omitempty"`
+			LatencyMs    int64            `json:"latency_ms,omitempty"`
+		}{
+			OriginalText: editRes.OriginalText,
+			EditedText:   editRes.EditedText,
+			Instruction:  editRes.Instruction,
+			DryRun:       dryRun,
+			Pasted:       pasted,
+			Model:        editRes.Model,
+			LatencyMs:    editRes.Latency.Milliseconds(),
+		}
+	}
+
+	if jsonOutput {
+		data, jErr := json.MarshalIndent(result, "", "  ")
+		if jErr != nil {
+			return jErr
+		}
+		fmt.Fprintln(stdout, string(data))
+		return nil
+	}
+
+	fmt.Fprintln(stdout, "Voice Text Edit Result:")
+	fmt.Fprintf(stdout, "  Intent:      %s\n", result.Instruction.Intent)
+	if result.Instruction.TargetLanguage != "" {
+		fmt.Fprintf(stdout, "  Target Lang: %s\n", result.Instruction.TargetLanguage)
+	}
+	if result.Instruction.Tone != "" {
+		fmt.Fprintf(stdout, "  Tone:        %s\n", result.Instruction.Tone)
+	}
+	fmt.Fprintf(stdout, "  Original:    %s\n", result.OriginalText)
+	fmt.Fprintf(stdout, "  Transformed: %s\n", result.EditedText)
+	if result.DryRun {
+		fmt.Fprintln(stdout, "  Status:      Dry run (not pasted)")
+	} else if result.Pasted {
+		fmt.Fprintln(stdout, "  Status:      Applied & pasted into active window")
+	} else {
+		fmt.Fprintln(stdout, "  Status:      Ready")
+	}
 	return nil
 }

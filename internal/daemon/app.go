@@ -62,6 +62,7 @@ type App struct {
 	reverter    paste.Reverter
 	capturer    selection.Capturer
 	editParser  *edit.Parser
+	editor      *edit.Editor
 	store       storage.Store
 	process     *postprocess.Pipeline
 	corrector   *postprocess.Corrector
@@ -174,6 +175,11 @@ func WithSelectionCapturer(c selection.Capturer) Option {
 // WithEditParser sets a custom voice instruction edit parser.
 func WithEditParser(p *edit.Parser) Option {
 	return func(a *App) { a.editParser = p }
+}
+
+// WithEditor sets a custom text editor implementation.
+func WithEditor(e *edit.Editor) Option {
+	return func(a *App) { a.editor = e }
 }
 
 // NewApp instantiates a fully configured Cadence daemon application.
@@ -324,6 +330,10 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 
 	if a.editParser == nil {
 		a.editParser = edit.NewParser(a.polisher)
+	}
+
+	if a.editor == nil {
+		a.editor = edit.NewEditor(a.polisher)
 	}
 
 	if a.capture == nil {
@@ -636,6 +646,11 @@ func (a *App) EditParser() *edit.Parser {
 	return a.editParser
 }
 
+// Editor returns the active voice text editor.
+func (a *App) Editor() *edit.Editor {
+	return a.editor
+}
+
 // CanUndo reports whether there is a recent AI transformation available to revert.
 func (a *App) CanUndo() bool {
 	a.mu.Lock()
@@ -841,6 +856,88 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 		}
 		instr := a.editParser.Parse(ctx, text)
 		return instr, nil
+
+	case "edit_execute":
+		if a.editor == nil {
+			return nil, errors.New("editor is not configured")
+		}
+		var instruction, text string
+		var dryRun bool
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if ins, ok := params["instruction"].(string); ok {
+				instruction = ins
+			}
+			if t, ok := params["text"].(string); ok {
+				text = t
+			}
+			if dr, ok := params["dry_run"].(bool); ok {
+				dryRun = dr
+			}
+		}
+		if strings.TrimSpace(instruction) == "" {
+			return nil, errors.New("missing 'instruction' parameter for edit_execute")
+		}
+
+		if strings.TrimSpace(text) == "" {
+			if a.capturer == nil {
+				return nil, errors.New("no text provided and selection capturer is not configured")
+			}
+			sel, err := a.capturer.Capture(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("capture selected text: %w", err)
+			}
+			text = sel.Text
+		}
+
+		if strings.TrimSpace(text) == "" {
+			return nil, errors.New("no text provided and no active selection found")
+		}
+
+		var instr edit.Instruction
+		if a.editParser != nil {
+			instr = a.editParser.Parse(ctx, instruction)
+		} else {
+			instr = edit.Instruction{
+				Raw:        instruction,
+				Intent:     edit.IntentCustom,
+				Prompt:     instruction,
+				IsEdit:     true,
+				Confidence: 1.0,
+			}
+		}
+
+		res, err := a.editor.Execute(ctx, text, instr)
+		if err != nil {
+			return nil, fmt.Errorf("execute edit transformation: %w", err)
+		}
+
+		pasted := false
+		if !dryRun && a.paster != nil {
+			if _, pErr := a.paster.Paste(res.EditedText); pErr == nil {
+				pasted = true
+				a.mu.Lock()
+				a.lastUndo = &UndoRecord{
+					SessionID:      fmt.Sprintf("edit-%d", time.Now().UnixNano()),
+					RawText:        text,
+					UnpolishedText: text,
+					PolishedText:   res.EditedText,
+					IsPolished:     true,
+					PastedAt:       time.Now(),
+					Undone:         false,
+				}
+				a.mu.Unlock()
+			}
+		}
+
+		return map[string]any{
+			"original_text": res.OriginalText,
+			"edited_text":   res.EditedText,
+			"instruction":   res.Instruction,
+			"dry_run":       dryRun,
+			"pasted":        pasted,
+			"model":         res.Model,
+			"latency_ms":    res.Latency.Milliseconds(),
+		}, nil
 	case "dictate_start":
 		a.startDictation()
 		return map[string]any{"ok": true, "action": "started"}, nil
