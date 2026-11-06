@@ -34,12 +34,13 @@ const (
 
 // Instruction captures the parsed intent, target parameters, and metadata of an edit command.
 type Instruction struct {
-	Raw            string  `json:"raw"`
-	Intent         Intent  `json:"intent"`
-	IsEdit         bool    `json:"is_edit"`
-	TargetLanguage string  `json:"target_language,omitempty"`
-	Tone           string  `json:"tone,omitempty"`
-	Format         string  `json:"format,omitempty"`
-	Prompt         string  `json:"prompt"`
-	Confidence     float64 `json:"confidence"`
+	Raw            string   `json:"raw"`
+	Intent         Intent   `json:"intent"`
+	IsEdit         bool     `json:"is_edit"`
+	TargetLanguage string   `json:"target_language,omitempty"`
+	Tone           string   `json:"tone,omitempty"`
+	Format         string   `json:"format,omitempty"`
+	Columns        []string `json:"columns,omitempty"`
+	Prompt         string   `json:"prompt"`
+	Confidence     float64  `json:"confidence"`
 }
