@@ -1,0 +1,116 @@
+{
+  "name": "cadence-vscode",
+  "displayName": "Cadence - Voice Dictation & AI Editing",
+  "description": "VS Code integration for Cadence: active file, selection, and language context bridge for voice dictation and code transformations.",
+  "version": "0.1.0",
+  "publisher": "cadence",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "cadence",
+    "voice",
+    "dictation",
+    "speech-to-text",
+    "ai-editing"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "cadence.dictate",
+        "title": "Cadence: Toggle Dictation",
+        "category": "Cadence"
+      },
+      {
+        "command": "cadence.editSelection",
+        "title": "Cadence: Edit Selection with Voice",
+        "category": "Cadence"
+      },
+      {
+        "command": "cadence.undo",
+        "title": "Cadence: Undo Last Voice Edit",
+        "category": "Cadence"
+      },
+      {
+        "command": "cadence.syncContext",
+        "title": "Cadence: Sync Editor Context",
+        "category": "Cadence"
+      },
+      {
+        "command": "cadence.status",
+        "title": "Cadence: Show Status",
+        "category": "Cadence"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "cadence.editSelection",
+          "when": "editorHasSelection",
+          "group": "cadence@1"
+        },
+        {
+          "command": "cadence.dictate",
+          "group": "cadence@2"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "cadence.dictate",
+        "key": "ctrl+alt+d",
+        "mac": "cmd+alt+d",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "cadence.editSelection",
+        "key": "ctrl+alt+e",
+        "mac": "cmd+alt+e",
+        "when": "editorHasSelection"
+      },
+      {
+        "command": "cadence.undo",
+        "key": "ctrl+alt+z",
+        "mac": "cmd+alt+z",
+        "when": "editorTextFocus"
+      }
+    ],
+    "configuration": {
+      "title": "Cadence",
+      "properties": {
+        "cadence.socketPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to Cadence daemon UNIX socket (defaults to ~/.cadence/cadence.sock)"
+        },
+        "cadence.autoSync": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically broadcast file and selection context to Cadence daemon on cursor or tab switch"
+        },
+        "cadence.surroundingLines": {
+          "type": "number",
+          "default": 15,
+          "description": "Number of lines of code around cursor/selection to provide as context"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.3.3"
+  }
+}

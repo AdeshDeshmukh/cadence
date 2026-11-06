@@ -275,6 +275,22 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 				CreatedAt:     time.Now(),
 			},
 		}, nil
+	case "editor_context_set":
+		return map[string]any{"status": "ok"}, nil
+	case "editor_context_get":
+		return map[string]any{
+			"active":         true,
+			"editor_name":    "vscode",
+			"file_path":      "/path/to/main.go",
+			"file_name":      "main.go",
+			"language_id":    "go",
+			"line":           42.0,
+			"column":         10.0,
+			"selection_text": "fmt.Println(\"test\")",
+			"summary":        "Editor: vscode | File: main.go | Lang: go | Line: 42:10 | Selected: 18 chars",
+		}, nil
+	case "editor_context_clear":
+		return map[string]any{"status": "cleared"}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -1145,5 +1161,62 @@ func TestCLI_Edit(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Rejected edit proposal [prev-mock-123]") {
 		t.Fatalf("unexpected reject output: %s", out.String())
+	}
+}
+
+func TestCLI_Context(t *testing.T) {
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("cad_ctx_%d.sock", time.Now().UnixNano()))
+	cleanup := startMockDaemon(t, sockPath)
+	defer cleanup()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sockPath,
+	}
+	ctx := context.Background()
+
+	var out bytes.Buffer
+
+	// 1. Context show (text)
+	if err := cmdContext(ctx, client, []string{"show"}, &out); err != nil {
+		t.Fatalf("cmdContext show failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Active Application Context:") ||
+		!strings.Contains(out.String(), "Code Editor Context:") ||
+		!strings.Contains(out.String(), "Editor:       vscode") ||
+		!strings.Contains(out.String(), "File:         /path/to/main.go") {
+		t.Fatalf("unexpected context show output:\n%s", out.String())
+	}
+
+	// 2. Context show (--json)
+	out.Reset()
+	if err := cmdContext(ctx, client, []string{"show", "--json"}, &out); err != nil {
+		t.Fatalf("cmdContext show --json failed: %v", err)
+	}
+	var jsonMap map[string]any
+	if err := json.Unmarshal(out.Bytes(), &jsonMap); err != nil {
+		t.Fatalf("invalid json output: %v", err)
+	}
+	if jsonMap["editor"] == nil {
+		t.Fatalf("expected editor key in json output: %+v", jsonMap)
+	}
+
+	// 3. Context set
+	out.Reset()
+	setArgs := []string{"set", "--file", "internal/server.go", "--lang", "go", "--line", "55", "--col", "12", "--selection", "go func() {}()"}
+	if err := cmdContext(ctx, client, setArgs, &out); err != nil {
+		t.Fatalf("cmdContext set failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Editor context updated.") {
+		t.Fatalf("unexpected set output: %s", out.String())
+	}
+
+	// 4. Context clear
+	out.Reset()
+	if err := cmdContext(ctx, client, []string{"clear"}, &out); err != nil {
+		t.Fatalf("cmdContext clear failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Editor context cleared.") {
+		t.Fatalf("unexpected clear output: %s", out.String())
 	}
 }

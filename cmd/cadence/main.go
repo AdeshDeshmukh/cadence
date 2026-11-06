@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -45,6 +46,7 @@ Commands:
   selection [flags]  Capture highlighted text from active application (Edit Mode)
   parse <text>       Parse voice edit instruction into intent and parameters
   edit <instruction> Execute voice edit on highlighted text or custom input
+  context [show|set|clear] Show or manage developer/code editor context (file, language, selection)
   app                Show detected active foreground application and category
   config [show|path] Inspect configuration and system file paths
   doctor             Perform diagnostics on system, daemon, and storage
@@ -154,6 +156,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "app", "active-app":
 		if err := cmdApp(ctx, client, stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "context", "ctx":
+		if err := cmdContext(ctx, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -1258,6 +1267,191 @@ func cmdApp(ctx context.Context, client ipc.Client, out io.Writer) error {
 		fmt.Fprintf(out, "  PID:          %d\n", info.ProcessID)
 	}
 	fmt.Fprintf(out, "  Category:     %s\n", info.Category)
+	return nil
+}
+
+func cmdContext(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	action := "show"
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		action = args[0]
+		args = args[1:]
+	}
+
+	switch action {
+	case "show", "get", "status":
+		return cmdContextShow(ctx, client, args, out)
+	case "set":
+		return cmdContextSet(ctx, client, args, out)
+	case "clear", "reset":
+		return cmdContextClear(ctx, client, out)
+	default:
+		return fmt.Errorf("unknown context action %q (expected show, set, or clear)", action)
+	}
+}
+
+func cmdContextShow(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	jsonOutput := false
+	for _, arg := range args {
+		if arg == "-j" || arg == "--json" {
+			jsonOutput = true
+		}
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	// Query active app
+	var appInfo any
+	if res, err := client.Call(callCtx, "active_app", nil); err == nil {
+		appInfo = res
+	}
+
+	// Query editor context
+	var editorCtx map[string]any
+	if res, err := client.Call(callCtx, "editor_context_get", nil); err == nil {
+		if m, ok := res.(map[string]any); ok {
+			editorCtx = m
+		}
+	}
+
+	if jsonOutput {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(map[string]any{
+			"app":    appInfo,
+			"editor": editorCtx,
+		})
+	}
+
+	// Format text output
+	fmt.Fprintf(out, "Active Application Context:\n")
+	if m, ok := appInfo.(map[string]any); ok && len(m) > 0 {
+		name, _ := m["name"].(string)
+		cat, _ := m["category"].(string)
+		title, _ := m["window_title"].(string)
+		fmt.Fprintf(out, "  Name:         %s\n", name)
+		if title != "" {
+			fmt.Fprintf(out, "  Window Title: %s\n", title)
+		}
+		fmt.Fprintf(out, "  Category:     %s\n", cat)
+	} else {
+		fmt.Fprintf(out, "  (not detected or daemon offline)\n")
+	}
+
+	fmt.Fprintf(out, "\nCode Editor Context:\n")
+	if editorCtx != nil && editorCtx["active"] == true {
+		editorName, _ := editorCtx["editor_name"].(string)
+		filePath, _ := editorCtx["file_path"].(string)
+		fileName, _ := editorCtx["file_name"].(string)
+		lang, _ := editorCtx["language_id"].(string)
+		line, _ := editorCtx["line"].(float64)
+		col, _ := editorCtx["column"].(float64)
+		selection, _ := editorCtx["selection_text"].(string)
+		summary, _ := editorCtx["summary"].(string)
+
+		if editorName == "" {
+			editorName = "vscode"
+		}
+		fmt.Fprintf(out, "  Editor:       %s\n", editorName)
+		if filePath != "" {
+			fmt.Fprintf(out, "  File:         %s\n", filePath)
+		} else if fileName != "" {
+			fmt.Fprintf(out, "  File:         %s\n", fileName)
+		}
+		if lang != "" {
+			fmt.Fprintf(out, "  Language:     %s\n", lang)
+		}
+		if line > 0 {
+			fmt.Fprintf(out, "  Cursor:       line %.0f, col %.0f\n", line, col)
+		}
+		if selection != "" {
+			fmt.Fprintf(out, "  Selection:    %d characters\n", len(selection))
+		}
+		if summary != "" {
+			fmt.Fprintf(out, "  Summary:      %s\n", summary)
+		}
+	} else {
+		fmt.Fprintf(out, "  Status:       Not active (no editor connected)\n")
+	}
+
+	return nil
+}
+
+func cmdContextSet(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	payload := map[string]any{
+		"editor_name": "vscode",
+	}
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-f", "--file":
+			if i+1 < len(args) {
+				payload["file_path"] = args[i+1]
+				payload["file_name"] = filepath.Base(args[i+1])
+				i++
+			}
+		case "-l", "--lang", "--language":
+			if i+1 < len(args) {
+				payload["language_id"] = args[i+1]
+				i++
+			}
+		case "--line":
+			if i+1 < len(args) {
+				var line int
+				fmt.Sscanf(args[i+1], "%d", &line)
+				payload["line"] = line
+				i++
+			}
+		case "--col", "--column":
+			if i+1 < len(args) {
+				var col int
+				fmt.Sscanf(args[i+1], "%d", &col)
+				payload["column"] = col
+				i++
+			}
+		case "-s", "--selection":
+			if i+1 < len(args) {
+				payload["selection_text"] = args[i+1]
+				i++
+			}
+		case "-e", "--editor":
+			if i+1 < len(args) {
+				payload["editor_name"] = args[i+1]
+				i++
+			}
+		case "-r", "--root", "--workspace":
+			if i+1 < len(args) {
+				payload["workspace_root"] = args[i+1]
+				i++
+			}
+		case "-c", "--context":
+			if i+1 < len(args) {
+				payload["surrounding_context"] = args[i+1]
+				i++
+			}
+		}
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	if _, err := client.Call(callCtx, "editor_context_set", payload); err != nil {
+		return fmt.Errorf("set editor context: %w", err)
+	}
+
+	fmt.Fprintln(out, "Editor context updated.")
+	return nil
+}
+
+func cmdContextClear(ctx context.Context, client ipc.Client, out io.Writer) error {
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	if _, err := client.Call(callCtx, "editor_context_clear", nil); err != nil {
+		return fmt.Errorf("clear editor context: %w", err)
+	}
+
+	fmt.Fprintln(out, "Editor context cleared.")
 	return nil
 }
 
