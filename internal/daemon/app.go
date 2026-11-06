@@ -24,6 +24,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/pipeline"
 	"github.com/AdeshDeshmukh/cadence/internal/polish"
 	"github.com/AdeshDeshmukh/cadence/internal/postprocess"
+	"github.com/AdeshDeshmukh/cadence/internal/selection"
 	"github.com/AdeshDeshmukh/cadence/internal/storage"
 	"github.com/AdeshDeshmukh/cadence/internal/vad"
 	"github.com/AdeshDeshmukh/cadence/internal/worker"
@@ -58,6 +59,7 @@ type App struct {
 	workerMgr   *worker.Manager
 	paster      paste.Paster
 	reverter    paste.Reverter
+	capturer    selection.Capturer
 	store       storage.Store
 	process     *postprocess.Pipeline
 	corrector   *postprocess.Corrector
@@ -160,6 +162,11 @@ func WithReverter(r paste.Reverter) Option {
 // WithCorrector sets a custom ASR self-corrector.
 func WithCorrector(c *postprocess.Corrector) Option {
 	return func(a *App) { a.corrector = c }
+}
+
+// WithSelectionCapturer sets a custom selection capturer implementation.
+func WithSelectionCapturer(c selection.Capturer) Option {
+	return func(a *App) { a.capturer = c }
 }
 
 // NewApp instantiates a fully configured Cadence daemon application.
@@ -302,6 +309,10 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 
 	if a.reverter == nil {
 		a.reverter = paste.NewNativeReverter()
+	}
+
+	if a.capturer == nil {
+		a.capturer = selection.NewDefaultCapturer()
 	}
 
 	if a.capture == nil {
@@ -604,6 +615,11 @@ func (a *App) Corrector() *postprocess.Corrector {
 	return a.corrector
 }
 
+// SelectionCapturer returns the active selection capturer.
+func (a *App) SelectionCapturer() selection.Capturer {
+	return a.capturer
+}
+
 // CanUndo reports whether there is a recent AI transformation available to revert.
 func (a *App) CanUndo() bool {
 	a.mu.Lock()
@@ -778,6 +794,21 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			"changed":             report.Original != report.Corrected,
 			"corrections_applied": report.CorrectionsApplied,
 		}, nil
+
+	case "selection_get":
+		if a.capturer == nil {
+			return nil, errors.New("selection capturer is not configured")
+		}
+		res, err := a.capturer.Capture(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if a.appDetector != nil && res.Application == "" {
+			if info, aErr := a.appDetector.Detect(ctx); aErr == nil {
+				res.Application = info.Name
+			}
+		}
+		return res, nil
 	case "dictate_start":
 		a.startDictation()
 		return map[string]any{"ok": true, "action": "started"}, nil

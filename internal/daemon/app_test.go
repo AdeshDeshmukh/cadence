@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/paste"
 	"github.com/AdeshDeshmukh/cadence/internal/polish"
 	"github.com/AdeshDeshmukh/cadence/internal/postprocess"
+	"github.com/AdeshDeshmukh/cadence/internal/selection"
 	"github.com/AdeshDeshmukh/cadence/internal/storage"
 	"github.com/AdeshDeshmukh/cadence/internal/vad"
 )
@@ -1225,5 +1227,43 @@ func TestApp_SelfCorrectionIPC(t *testing.T) {
 	mMap, ok := medRes.(map[string]any)
 	if !ok || mMap["corrected"] != "patient presented with hypertension" {
 		t.Fatalf("unexpected medical result: %+v", medRes)
+	}
+}
+
+func TestApp_SelectionIPC(t *testing.T) {
+	cfg := config.Default()
+	mockSel := selection.NewMockCapturer("const hello = 'world';", "accessibility_ax")
+	app := NewApp(
+		cfg,
+		WithSelectionCapturer(mockSel),
+	)
+
+	ctx := context.Background()
+
+	res, err := app.Handle(ctx, ipc.Request{
+		Method: "selection_get",
+	})
+	if err != nil {
+		t.Fatalf("selection_get failed: %v", err)
+	}
+
+	selRes, ok := res.(selection.Result)
+	if !ok {
+		t.Fatalf("unexpected type: %T", res)
+	}
+	if selRes.Text != "const hello = 'world';" {
+		t.Fatalf("expected 'const hello = \\'world\\';', got %q", selRes.Text)
+	}
+	if selRes.Method != "accessibility_ax" {
+		t.Fatalf("expected method 'accessibility_ax', got %q", selRes.Method)
+	}
+	if mockSel.CallCount() != 1 {
+		t.Fatalf("expected call count 1, got %d", mockSel.CallCount())
+	}
+
+	// Test error case
+	mockSel.SetError(selection.ErrNoSelection)
+	if _, err := app.Handle(ctx, ipc.Request{Method: "selection_get"}); !errors.Is(err, selection.ErrNoSelection) {
+		t.Fatalf("expected ErrNoSelection, got %v", err)
 	}
 }
