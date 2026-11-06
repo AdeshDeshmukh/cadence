@@ -130,6 +130,27 @@ func TestParser_Parse(t *testing.T) {
 			wantFormat: "table",
 		},
 		{
+			name:       "Format as table with columns",
+			input:      "turn this into a table with columns Name, Role, Team",
+			wantIntent: IntentFormatTable,
+			wantIsEdit: true,
+			wantFormat: "table",
+		},
+		{
+			name:       "Tabularize this",
+			input:      "tabularize this",
+			wantIntent: IntentFormatTable,
+			wantIsEdit: true,
+			wantFormat: "table",
+		},
+		{
+			name:       "Format as checklist",
+			input:      "make this into a checklist",
+			wantIntent: IntentFormatList,
+			wantIsEdit: true,
+			wantFormat: "checklist",
+		},
+		{
 			name:       "Format as bullet list",
 			input:      "convert this into a bullet list",
 			wantIntent: IntentFormatList,
@@ -195,4 +216,11 @@ func TestParser_Parse(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("Table columns extraction", func(t *testing.T) {
+		res := parser.Parse(ctx, "turn this into a table with columns Name, Role, Team")
+		if len(res.Columns) != 3 || res.Columns[0] != "Name" || res.Columns[1] != "Role" || res.Columns[2] != "Team" {
+			t.Errorf("unexpected columns: %v", res.Columns)
+		}
+	})
 }

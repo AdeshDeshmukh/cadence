@@ -61,11 +61,37 @@ func (e *Editor) Execute(ctx context.Context, text string, instr Instruction) (E
 
 	rawOutput := resp.Text
 	if e.polisher.Name() == "noop" || resp.Model == "noop" {
-		// Pass-through fallback when LLM is inactive
-		rawOutput = cleanText
+		// Pass-through / rule-based fallback when LLM is inactive
+		switch instr.Intent {
+		case IntentFormatList:
+			rawOutput = FormatAsList(cleanText, instr.Format)
+		case IntentFormatTable:
+			lines := strings.Split(cleanText, "\n")
+			var rows [][]string
+			for _, l := range lines {
+				if strings.TrimSpace(l) != "" {
+					parts := reItemSplit.Split(strings.TrimSpace(l), -1)
+					var cleanParts []string
+					for _, p := range parts {
+						if strings.TrimSpace(p) != "" {
+							cleanParts = append(cleanParts, strings.TrimSpace(p))
+						}
+					}
+					if len(cleanParts) > 0 {
+						rows = append(rows, cleanParts)
+					}
+				}
+			}
+			rawOutput = FormatAsTable(rows, instr.Columns)
+		default:
+			rawOutput = cleanText
+		}
 	}
 
 	edited := cleanLLMOutput(rawOutput)
+	if instr.Intent == IntentFormatTable && ValidateMarkdownTable(edited) {
+		edited = AlignMarkdownTable(edited)
+	}
 
 	// Preserve surrounding whitespace from the original selection if present
 	edited = preserveSurroundingWhitespace(text, edited)
@@ -122,13 +148,20 @@ CRITICAL RULES:
 		instruction = fmt.Sprintf("Translate the text into %s. Maintain the exact nuance, tone, and formatting of the original.", targetLang)
 
 	case IntentFormatTable:
-		instruction = "Convert the information in the text into a clean Markdown table with headers and row separators."
+		if len(instr.Columns) > 0 {
+			instruction = fmt.Sprintf("Convert the information in the text into a clean Markdown table with exactly these column headers: %s. Include a header separator row with dashes.", strings.Join(instr.Columns, ", "))
+		} else {
+			instruction = "Convert the information in the text into a clean Markdown table with headers and row separators."
+		}
 
 	case IntentFormatList:
-		if instr.Format == "numbered_list" {
-			instruction = "Format the text into a clean numbered list."
-		} else {
-			instruction = "Format the text into a clean bulleted list."
+		switch instr.Format {
+		case "checklist":
+			instruction = "Convert the text into a clean markdown checklist/todo list with unchecked brackets ('- [ ] item')."
+		case "numbered_list":
+			instruction = "Format the text into a clean numbered list ('1. item')."
+		default:
+			instruction = "Format the text into a clean bulleted list ('- item')."
 		}
 
 	case IntentCustom:

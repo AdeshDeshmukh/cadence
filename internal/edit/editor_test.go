@@ -169,8 +169,41 @@ func TestEditor_Execute(t *testing.T) {
 		if !strings.Contains(mock.lastReq.Text, "Markdown table") {
 			t.Errorf("expected prompt to request Markdown table, got %q", mock.lastReq.Text)
 		}
-		if !strings.Contains(res.EditedText, "| Name | Age |") {
+		if !strings.Contains(res.EditedText, "Alice") || !strings.Contains(res.EditedText, "30") {
 			t.Errorf("got %q", res.EditedText)
+		}
+	})
+
+	t.Run("Noop polisher list formatting fallback", func(t *testing.T) {
+		ed := NewEditor(nil) // Noop polisher
+		instr := Instruction{
+			Intent: IntentFormatList,
+			Format: "bullet_list",
+		}
+
+		res, err := ed.Execute(ctx, "alpha, beta, gamma", instr)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		expected := "- alpha\n- beta\n- gamma"
+		if res.EditedText != expected {
+			t.Errorf("got:\n%s\nwant:\n%s", res.EditedText, expected)
+		}
+	})
+
+	t.Run("Noop polisher table formatting fallback", func(t *testing.T) {
+		ed := NewEditor(nil) // Noop polisher
+		instr := Instruction{
+			Intent:  IntentFormatTable,
+			Columns: []string{"Item", "Qty"},
+		}
+
+		res, err := ed.Execute(ctx, "apples 5\noranges 10", instr)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(res.EditedText, "| Item") || !strings.Contains(res.EditedText, "| Qty") {
+			t.Errorf("unexpected table result:\n%s", res.EditedText)
 		}
 	})
 }

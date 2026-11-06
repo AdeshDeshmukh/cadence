@@ -22,10 +22,11 @@ func NewParser(polisher polish.Polisher) *Parser {
 
 var (
 	// Format table patterns
-	reFormatTable = regexp.MustCompile(`(?i)^(?:please\s+)?(?:convert|format|turn|make)(?:\s+this)?\s+(?:(?:in)?to|as)\s+(?:a\s+)?(?:markdown\s+)?table\s*(.*)$`)
+	reFormatTable = regexp.MustCompile(`(?i)^(?:please\s+)?(?:(?:convert|format|turn|make)(?:\s+this)?\s+(?:(?:in)?to|as)?\s*(?:a\s+)?(?:markdown\s+)?table|tabularize(?:\s+this)?)\s*(.*)$`)
+	reColumns     = regexp.MustCompile(`(?i)(?:with\s+)?(?:columns?|headers?)\s+(.*)$`)
 
 	// Format list patterns
-	reFormatList = regexp.MustCompile(`(?i)^(?:please\s+)?(?:convert|format|turn|make)(?:\s+this)?\s+(?:(?:in)?to|as)\s+(?:a\s+)?(bullet(?:ed)?\s+list|numbered\s+list|bullets?|list)\s*(.*)$`)
+	reFormatList = regexp.MustCompile(`(?i)^(?:please\s+)?(?:convert|format|turn|make|bulletize)(?:\s+this)?\s+(?:(?:in)?to|as)?\s*(?:a\s+)?(bullet(?:ed)?\s+list|numbered\s+list|checklist|check\s+list|todo\s+list|task\s+list|bullets?|list)\s*(.*)$`)
 
 	// Translate patterns
 	reTranslate = regexp.MustCompile(`(?i)^(?:please\s+)?(?:translate(?:\s+this)?\s+(?:in)?to|say(?:\s+this)?\s+in|convert(?:\s+this)?\s+(?:in)?to)\s+(?:the\s+)?([a-zA-Z]+)(?:\s+(?:language|please))?\s*(.*)$`)
@@ -78,11 +79,22 @@ func (p *Parser) Parse(ctx context.Context, input string) Instruction {
 		if len(m) > 1 {
 			extra = strings.TrimSpace(m[1])
 		}
+		var cols []string
+		if cm := reColumns.FindStringSubmatch(extra); len(cm) > 1 {
+			rawCols := reItemSplit.Split(cm[1], -1)
+			for _, c := range rawCols {
+				cl := strings.TrimSpace(c)
+				if cl != "" {
+					cols = append(cols, cl)
+				}
+			}
+		}
 		return Instruction{
 			Raw:        input,
 			Intent:     IntentFormatTable,
 			IsEdit:     true,
 			Format:     "table",
+			Columns:    cols,
 			Prompt:     extra,
 			Confidence: 0.95,
 		}
@@ -91,8 +103,11 @@ func (p *Parser) Parse(ctx context.Context, input string) Instruction {
 	// 2. Format as List
 	if m := reFormatList.FindStringSubmatch(clean); len(m) > 1 {
 		listType := "bullet_list"
-		if strings.Contains(strings.ToLower(m[1]), "numbered") {
+		lowerMatch := strings.ToLower(m[1])
+		if strings.Contains(lowerMatch, "numbered") {
 			listType = "numbered_list"
+		} else if strings.Contains(lowerMatch, "check") || strings.Contains(lowerMatch, "todo") || strings.Contains(lowerMatch, "task") {
+			listType = "checklist"
 		}
 		extra := ""
 		if len(m) > 2 {
