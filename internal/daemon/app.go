@@ -18,6 +18,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/audio"
 	"github.com/AdeshDeshmukh/cadence/internal/config"
 	appcontext "github.com/AdeshDeshmukh/cadence/internal/context"
+	"github.com/AdeshDeshmukh/cadence/internal/edit"
 	"github.com/AdeshDeshmukh/cadence/internal/hotkey"
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
 	"github.com/AdeshDeshmukh/cadence/internal/paste"
@@ -60,6 +61,7 @@ type App struct {
 	paster      paste.Paster
 	reverter    paste.Reverter
 	capturer    selection.Capturer
+	editParser  *edit.Parser
 	store       storage.Store
 	process     *postprocess.Pipeline
 	corrector   *postprocess.Corrector
@@ -167,6 +169,11 @@ func WithCorrector(c *postprocess.Corrector) Option {
 // WithSelectionCapturer sets a custom selection capturer implementation.
 func WithSelectionCapturer(c selection.Capturer) Option {
 	return func(a *App) { a.capturer = c }
+}
+
+// WithEditParser sets a custom voice instruction edit parser.
+func WithEditParser(p *edit.Parser) Option {
+	return func(a *App) { a.editParser = p }
 }
 
 // NewApp instantiates a fully configured Cadence daemon application.
@@ -313,6 +320,10 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 
 	if a.capturer == nil {
 		a.capturer = selection.NewDefaultCapturer()
+	}
+
+	if a.editParser == nil {
+		a.editParser = edit.NewParser(a.polisher)
 	}
 
 	if a.capture == nil {
@@ -620,6 +631,11 @@ func (a *App) SelectionCapturer() selection.Capturer {
 	return a.capturer
 }
 
+// EditParser returns the active voice instruction parser.
+func (a *App) EditParser() *edit.Parser {
+	return a.editParser
+}
+
 // CanUndo reports whether there is a recent AI transformation available to revert.
 func (a *App) CanUndo() bool {
 	a.mu.Lock()
@@ -809,6 +825,22 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			}
 		}
 		return res, nil
+
+	case "edit_parse":
+		if a.editParser == nil {
+			return nil, errors.New("edit parser is not configured")
+		}
+		var text string
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if t, ok := params["text"].(string); ok {
+				text = t
+			}
+		}
+		if strings.TrimSpace(text) == "" {
+			return nil, errors.New("missing 'text' parameter for edit_parse")
+		}
+		instr := a.editParser.Parse(ctx, text)
+		return instr, nil
 	case "dictate_start":
 		a.startDictation()
 		return map[string]any{"ok": true, "action": "started"}, nil
