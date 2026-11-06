@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/AdeshDeshmukh/cadence/internal/config"
+	"github.com/AdeshDeshmukh/cadence/internal/edit"
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
 	"github.com/AdeshDeshmukh/cadence/internal/storage"
 	"github.com/AdeshDeshmukh/cadence/pkg/version"
@@ -183,6 +184,11 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 			"method":      "accessibility_ax",
 			"application": "Visual Studio Code",
 		}, nil
+	case "edit_parse":
+		params, _ := req.Params.(map[string]any)
+		text, _ := params["text"].(string)
+		parser := edit.NewParser(nil)
+		return parser.Parse(context.Background(), text), nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -873,6 +879,63 @@ func TestCLI_Selection(t *testing.T) {
 		t.Fatalf("cmdSelection --help failed: %v", err)
 	}
 	if !strings.Contains(out.String(), "Usage: cadence selection") {
+		t.Fatalf("unexpected help output: %s", out.String())
+	}
+}
+
+func TestCLI_Parse(t *testing.T) {
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("cad_parse_%d.sock", time.Now().UnixNano()))
+	cleanup := startMockDaemon(t, sockPath)
+	defer cleanup()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sockPath,
+	}
+	cfg := config.Default()
+
+	// 1. Parse translate command via daemon IPC
+	var out bytes.Buffer
+	if err := cmdParse(context.Background(), cfg, client, []string{"translate", "this", "to", "French"}, &out); err != nil {
+		t.Fatalf("cmdParse failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Intent:      translate") ||
+		!strings.Contains(out.String(), "Target Lang: French") ||
+		!strings.Contains(out.String(), "Is Edit:     true") {
+		t.Fatalf("unexpected parse output: %s", out.String())
+	}
+
+	// 2. Parse shorten command as JSON
+	out.Reset()
+	if err := cmdParse(context.Background(), cfg, client, []string{"make", "this", "shorter", "--json"}, &out); err != nil {
+		t.Fatalf("cmdParse --json failed: %v", err)
+	}
+	if !strings.Contains(out.String(), `"intent": "shorten"`) ||
+		!strings.Contains(out.String(), `"tone": "concise"`) {
+		t.Fatalf("unexpected JSON output: %s", out.String())
+	}
+
+	// 3. Offline fallback (disconnected client)
+	out.Reset()
+	badClient := ipc.Client{Network: "unix", Address: "/tmp/nonexistent-parse.sock"}
+	if err := cmdParse(context.Background(), cfg, badClient, []string{"summarize", "this"}, &out); err != nil {
+		t.Fatalf("cmdParse offline failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Intent:      summarize") {
+		t.Fatalf("unexpected offline output: %s", out.String())
+	}
+
+	// 4. Empty text error
+	if err := cmdParse(context.Background(), cfg, client, []string{}, &out); err == nil {
+		t.Fatal("expected error on empty text")
+	}
+
+	// 5. Help flag
+	out.Reset()
+	if err := cmdParse(context.Background(), cfg, client, []string{"--help"}, &out); err != nil {
+		t.Fatalf("cmdParse --help failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Usage: cadence parse") {
 		t.Fatalf("unexpected help output: %s", out.String())
 	}
 }

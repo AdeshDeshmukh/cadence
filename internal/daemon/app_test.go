@@ -12,6 +12,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/audio"
 	"github.com/AdeshDeshmukh/cadence/internal/config"
 	appcontext "github.com/AdeshDeshmukh/cadence/internal/context"
+	"github.com/AdeshDeshmukh/cadence/internal/edit"
 	"github.com/AdeshDeshmukh/cadence/internal/hotkey"
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
 	"github.com/AdeshDeshmukh/cadence/internal/paste"
@@ -1265,5 +1266,68 @@ func TestApp_SelectionIPC(t *testing.T) {
 	mockSel.SetError(selection.ErrNoSelection)
 	if _, err := app.Handle(ctx, ipc.Request{Method: "selection_get"}); !errors.Is(err, selection.ErrNoSelection) {
 		t.Fatalf("expected ErrNoSelection, got %v", err)
+	}
+}
+
+func TestApp_EditParseIPC(t *testing.T) {
+	cfg := config.Default()
+	app := NewApp(cfg)
+
+	if app.EditParser() == nil {
+		t.Fatal("expected non-nil EditParser")
+	}
+
+	ctx := context.Background()
+
+	// 1. Successful parse of translation instruction
+	res, err := app.Handle(ctx, ipc.Request{
+		Method: "edit_parse",
+		Params: map[string]any{
+			"text": "translate this to French",
+		},
+	})
+	if err != nil {
+		t.Fatalf("edit_parse failed: %v", err)
+	}
+
+	instr, ok := res.(edit.Instruction)
+	if !ok {
+		t.Fatalf("unexpected result type: %T", res)
+	}
+	if instr.Intent != edit.IntentTranslate {
+		t.Fatalf("expected IntentTranslate, got %q", instr.Intent)
+	}
+	if instr.TargetLanguage != "French" {
+		t.Fatalf("expected TargetLanguage French, got %q", instr.TargetLanguage)
+	}
+	if !instr.IsEdit {
+		t.Fatal("expected IsEdit to be true")
+	}
+
+	// 2. Shorten command
+	res2, err := app.Handle(ctx, ipc.Request{
+		Method: "edit_parse",
+		Params: map[string]any{
+			"text": "make this shorter",
+		},
+	})
+	if err != nil {
+		t.Fatalf("edit_parse shorten failed: %v", err)
+	}
+	instr2 := res2.(edit.Instruction)
+	if instr2.Intent != edit.IntentShorten || instr2.Tone != "concise" {
+		t.Fatalf("unexpected shorten instruction: %+v", instr2)
+	}
+
+	// 3. Error case: missing text
+	if _, err := app.Handle(ctx, ipc.Request{Method: "edit_parse"}); err == nil {
+		t.Fatal("expected error when text parameter is missing")
+	}
+
+	if _, err := app.Handle(ctx, ipc.Request{
+		Method: "edit_parse",
+		Params: map[string]any{"text": "   "},
+	}); err == nil {
+		t.Fatal("expected error when text parameter is whitespace")
 	}
 }

@@ -14,6 +14,7 @@ import (
 
 	"github.com/AdeshDeshmukh/cadence/internal/config"
 	appcontext "github.com/AdeshDeshmukh/cadence/internal/context"
+	"github.com/AdeshDeshmukh/cadence/internal/edit"
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
 	"github.com/AdeshDeshmukh/cadence/internal/paste"
 	"github.com/AdeshDeshmukh/cadence/internal/polish"
@@ -41,6 +42,7 @@ Commands:
   undo [--raw]       Revert last AI polish transformation to raw post-processed text
   correct <text>     Detect and fix ASR acoustic and homophone errors using context
   selection [flags]  Capture highlighted text from active application (Edit Mode)
+  parse <text>       Parse voice edit instruction into intent and parameters
   app                Show detected active foreground application and category
   config [show|path] Inspect configuration and system file paths
   doctor             Perform diagnostics on system, daemon, and storage
@@ -171,6 +173,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "selection", "select":
 		if err := cmdSelection(ctx, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "parse":
+		if err := cmdParse(ctx, cfg, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -1544,5 +1553,79 @@ Flags:
 		fmt.Fprintln(stdout, "Copied selection to clipboard.")
 	}
 
+	return nil
+}
+
+func cmdParse(ctx context.Context, cfg config.Config, client ipc.Client, args []string, stdout io.Writer) error {
+	var jsonOutput bool
+	var textParts []string
+
+	for _, arg := range args {
+		switch arg {
+		case "-h", "--help":
+			fmt.Fprintf(stdout, `Usage: cadence parse <voice-command-text> [flags]
+
+Parse voice edit instruction into structured intent and parameters.
+
+Flags:
+  -j, --json   Output parsed instruction as JSON
+  -h, --help   Show this help message
+`)
+			return nil
+		case "-j", "--json":
+			jsonOutput = true
+		default:
+			textParts = append(textParts, arg)
+		}
+	}
+
+	text := strings.Join(textParts, " ")
+	if strings.TrimSpace(text) == "" {
+		return errors.New("empty text: please provide a voice instruction to parse")
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	var instr edit.Instruction
+	resp, err := client.Call(callCtx, "edit_parse", map[string]any{
+		"text": text,
+	})
+
+	if err == nil {
+		data, _ := json.Marshal(resp)
+		_ = json.Unmarshal(data, &instr)
+	} else {
+		// Offline fallback
+		parser := edit.NewParser(nil)
+		instr = parser.Parse(ctx, text)
+	}
+
+	if jsonOutput {
+		data, err := json.MarshalIndent(instr, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(stdout, string(data))
+		return nil
+	}
+
+	fmt.Fprintln(stdout, "Voice Instruction Parse Result:")
+	fmt.Fprintf(stdout, "  Raw:         %s\n", instr.Raw)
+	fmt.Fprintf(stdout, "  Intent:      %s\n", instr.Intent)
+	fmt.Fprintf(stdout, "  Is Edit:     %v\n", instr.IsEdit)
+	if instr.TargetLanguage != "" {
+		fmt.Fprintf(stdout, "  Target Lang: %s\n", instr.TargetLanguage)
+	}
+	if instr.Tone != "" {
+		fmt.Fprintf(stdout, "  Tone:        %s\n", instr.Tone)
+	}
+	if instr.Format != "" {
+		fmt.Fprintf(stdout, "  Format:      %s\n", instr.Format)
+	}
+	if instr.Prompt != "" {
+		fmt.Fprintf(stdout, "  Prompt:      %s\n", instr.Prompt)
+	}
+	fmt.Fprintf(stdout, "  Confidence:  %.2f\n", instr.Confidence)
 	return nil
 }
