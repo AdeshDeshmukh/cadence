@@ -159,6 +159,7 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 				"reverted_from": "AI Polished Text",
 				"reverted_to":   "raw asr text",
 				"target":        "raw",
+				"remaining":     1,
 			}, nil
 		}
 		return map[string]any{
@@ -166,6 +167,19 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 			"reverted_from": "AI Polished Text",
 			"reverted_to":   "unpolished post-processed text",
 			"target":        "unpolished",
+			"remaining":     1,
+		}, nil
+	case "undo_list":
+		return []map[string]any{
+			{
+				"session_id":      "sess-99",
+				"raw_text":        "raw asr text",
+				"unpolished_text": "unpolished post-processed text",
+				"polished_text":   "AI Polished Text",
+				"is_polished":     true,
+				"pasted_at":       time.Now(),
+				"undone":          false,
+			},
 		}, nil
 	case "correct":
 		params, _ := req.Params.(map[string]any)
@@ -207,6 +221,59 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 			"pasted":        !dryRun,
 			"model":         "mock-daemon",
 			"latency_ms":    12,
+		}, nil
+	case "edit_preview":
+		params, _ := req.Params.(map[string]any)
+		ins, _ := params["instruction"].(string)
+		txt, _ := params["text"].(string)
+		if txt == "" {
+			txt = "func calculateSum(a, b int) int"
+		}
+		parser := edit.NewParser(nil)
+		instr := parser.Parse(context.Background(), ins)
+		return &edit.PreviewSession{
+			ID:            "prev-mock-123",
+			OriginalText:  txt,
+			CandidateText: "// preview candidate\n" + txt,
+			Instruction:   instr,
+			DiffSummary:   "- " + txt + "\n+ // preview candidate\n+ " + txt,
+			Status:        edit.PreviewPending,
+			CreatedAt:     time.Now(),
+		}, nil
+	case "edit_apply":
+		params, _ := req.Params.(map[string]any)
+		id, _ := params["id"].(string)
+		now := time.Now()
+		return &edit.PreviewSession{
+			ID:            id,
+			OriginalText:  "Original text",
+			CandidateText: "Applied text",
+			Status:        edit.PreviewApplied,
+			CreatedAt:     now,
+			ResolvedAt:    &now,
+		}, nil
+	case "edit_reject":
+		params, _ := req.Params.(map[string]any)
+		id, _ := params["id"].(string)
+		now := time.Now()
+		return &edit.PreviewSession{
+			ID:            id,
+			OriginalText:  "Original text",
+			CandidateText: "Candidate text",
+			Status:        edit.PreviewRejected,
+			CreatedAt:     now,
+			ResolvedAt:    &now,
+		}, nil
+	case "edit_preview_list":
+		return []*edit.PreviewSession{
+			{
+				ID:            "prev-mock-123",
+				OriginalText:  "Original",
+				CandidateText: "Candidate",
+				Instruction:   edit.Instruction{Intent: edit.IntentRewrite},
+				Status:        edit.PreviewPending,
+				CreatedAt:     time.Now(),
+			},
 		}, nil
 	default:
 		return nil, os.ErrInvalid
@@ -805,6 +872,24 @@ func TestCLI_Undo(t *testing.T) {
 	if !strings.Contains(out.String(), "Usage: cadence undo") {
 		t.Fatalf("unexpected undo help output: %s", out.String())
 	}
+
+	// 4. cadence undo --list
+	out.Reset()
+	if err := cmdUndo(context.Background(), client, []string{"--list"}, &out); err != nil {
+		t.Fatalf("cmdUndo --list failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Cadence Reversible Transformation Stack:") || !strings.Contains(out.String(), "sess-99") {
+		t.Fatalf("unexpected undo --list output: %s", out.String())
+	}
+
+	// 5. cadence undo --depth 2
+	out.Reset()
+	if err := cmdUndo(context.Background(), client, []string{"--depth", "2"}, &out); err != nil {
+		t.Fatalf("cmdUndo --depth failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Remaining reversible transformations in stack:") {
+		t.Fatalf("unexpected undo depth output: %s", out.String())
+	}
 }
 
 func TestCLI_Correct(t *testing.T) {
@@ -1024,5 +1109,41 @@ func TestCLI_Edit(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Usage: cadence edit") {
 		t.Fatalf("unexpected help output: %s", out.String())
+	}
+
+	// 7. Preview mode
+	out.Reset()
+	if err := cmdEdit(context.Background(), cfg, client, []string{"--preview", "make", "this", "shorter"}, &out); err != nil {
+		t.Fatalf("cmdEdit --preview failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Voice Text Edit Proposal") || !strings.Contains(out.String(), "cadence edit apply") {
+		t.Fatalf("unexpected preview output: %s", out.String())
+	}
+
+	// 8. Pending list
+	out.Reset()
+	if err := cmdEdit(context.Background(), cfg, client, []string{"list"}, &out); err != nil {
+		t.Fatalf("cmdEdit list failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Pending Edit Proposals") || !strings.Contains(out.String(), "prev-mock-123") {
+		t.Fatalf("unexpected pending list: %s", out.String())
+	}
+
+	// 9. Apply preview
+	out.Reset()
+	if err := cmdEdit(context.Background(), cfg, client, []string{"apply", "prev-mock-123"}, &out); err != nil {
+		t.Fatalf("cmdEdit apply failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Applied and pasted edit proposal [prev-mock-123]") {
+		t.Fatalf("unexpected apply output: %s", out.String())
+	}
+
+	// 10. Reject preview
+	out.Reset()
+	if err := cmdEdit(context.Background(), cfg, client, []string{"reject", "prev-mock-123"}, &out); err != nil {
+		t.Fatalf("cmdEdit reject failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Rejected edit proposal [prev-mock-123]") {
+		t.Fatalf("unexpected reject output: %s", out.String())
 	}
 }

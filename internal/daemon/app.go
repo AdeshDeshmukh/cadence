@@ -49,6 +49,7 @@ type UndoResult struct {
 	RevertedFrom string `json:"reverted_from"`
 	RevertedTo   string `json:"reverted_to"`
 	Target       string `json:"target"`
+	Remaining    int    `json:"remaining"`
 }
 
 // App manages the lifecycle, hardware bindings, and IPC for the Cadence daemon.
@@ -85,6 +86,8 @@ type App struct {
 	activeSess    *pipeline.Session
 	sessionSeq    uint64
 	lastUndo      *UndoRecord
+	undoStack     []*UndoRecord
+	previewMgr    *edit.PreviewManager
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -180,6 +183,11 @@ func WithEditParser(p *edit.Parser) Option {
 // WithEditor sets a custom text editor implementation.
 func WithEditor(e *edit.Editor) Option {
 	return func(a *App) { a.editor = e }
+}
+
+// WithPreviewManager sets a custom preview session manager.
+func WithPreviewManager(m *edit.PreviewManager) Option {
+	return func(a *App) { a.previewMgr = m }
 }
 
 // NewApp instantiates a fully configured Cadence daemon application.
@@ -334,6 +342,10 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 
 	if a.editor == nil {
 		a.editor = edit.NewEditor(a.polisher)
+	}
+
+	if a.previewMgr == nil {
+		a.previewMgr = edit.NewPreviewManager(50)
 	}
 
 	if a.capture == nil {
@@ -561,7 +573,7 @@ func (a *App) startDictation() {
 			if unpolished == "" {
 				unpolished = sess.FinalText
 			}
-			a.lastUndo = &UndoRecord{
+			a.recordUndoLocked(&UndoRecord{
 				SessionID:      sess.ID,
 				RawText:        sess.RawText,
 				UnpolishedText: unpolished,
@@ -569,7 +581,7 @@ func (a *App) startDictation() {
 				IsPolished:     unpolished != sess.FinalText,
 				PastedAt:       time.Now(),
 				Undone:         false,
-			}
+			})
 			a.mu.Unlock()
 		}
 	}()
@@ -651,17 +663,36 @@ func (a *App) Editor() *edit.Editor {
 	return a.editor
 }
 
-// CanUndo reports whether there is a recent AI transformation available to revert.
+func (a *App) recordUndoLocked(rec *UndoRecord) {
+	a.lastUndo = rec
+	a.undoStack = append(a.undoStack, rec)
+	if len(a.undoStack) > 50 {
+		a.undoStack = a.undoStack[1:]
+	}
+}
+
+// CanUndo reports whether there is an AI transformation available to revert in the undo stack.
 func (a *App) CanUndo() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	for i := len(a.undoStack) - 1; i >= 0; i-- {
+		if !a.undoStack[i].Undone && a.undoStack[i].IsPolished {
+			return true
+		}
+	}
 	return a.lastUndo != nil && !a.lastUndo.Undone && a.lastUndo.IsPolished
 }
 
-// LastUndo returns a snapshot of the last dictation transformation record.
+// LastUndo returns a snapshot of the top reversible record from the undo stack.
 func (a *App) LastUndo() *UndoRecord {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	for i := len(a.undoStack) - 1; i >= 0; i-- {
+		if !a.undoStack[i].Undone && a.undoStack[i].IsPolished {
+			cpy := *a.undoStack[i]
+			return &cpy
+		}
+	}
 	if a.lastUndo == nil {
 		return nil
 	}
@@ -669,13 +700,39 @@ func (a *App) LastUndo() *UndoRecord {
 	return &cpy
 }
 
-// UndoTransformation reverts the last AI-polished text back to unpolished or raw text.
+// UndoStack returns a snapshot of the full undo history stack.
+func (a *App) UndoStack() []*UndoRecord {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]*UndoRecord, len(a.undoStack))
+	for i, r := range a.undoStack {
+		cpy := *r
+		out[i] = &cpy
+	}
+	return out
+}
+
+// PreviewManager returns the active preview session manager.
+func (a *App) PreviewManager() *edit.PreviewManager {
+	return a.previewMgr
+}
+
+// UndoTransformation reverts the most recent AI-polished or edited text back to original/raw text.
 func (a *App) UndoTransformation(target string) (*UndoResult, error) {
 	a.mu.Lock()
-	rec := a.lastUndo
+	var rec *UndoRecord
+	for i := len(a.undoStack) - 1; i >= 0; i-- {
+		if !a.undoStack[i].Undone && a.undoStack[i].IsPolished {
+			rec = a.undoStack[i]
+			break
+		}
+	}
+	if rec == nil {
+		rec = a.lastUndo
+	}
 	if rec == nil {
 		a.mu.Unlock()
-		return nil, errors.New("no dictation session available to undo")
+		return nil, errors.New("no dictation or edit session available to undo")
 	}
 	if rec.Undone {
 		a.mu.Unlock()
@@ -717,11 +774,21 @@ func (a *App) UndoTransformation(target string) (*UndoResult, error) {
 
 	a.mu.Lock()
 	rec.Undone = true
+
+	// Count remaining reversible items in the undo stack
+	remaining := 0
+	for _, r := range a.undoStack {
+		if !r.Undone && r.IsPolished {
+			remaining++
+		}
+	}
+
 	res := &UndoResult{
 		SessionID:    rec.SessionID,
 		RevertedFrom: rec.PolishedText,
 		RevertedTo:   replacementText,
 		Target:       target,
+		Remaining:    remaining,
 	}
 	a.mu.Unlock()
 
@@ -782,16 +849,36 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 
 	case "undo":
 		target := "unpolished"
+		depth := 1
 		if params, ok := req.Params.(map[string]any); ok && params != nil {
 			if t, ok := params["target"].(string); ok && t != "" {
 				target = t
 			}
+			if d, ok := params["depth"].(float64); ok && d > 0 {
+				depth = int(d)
+			}
 		}
-		res, err := a.UndoTransformation(target)
-		if err != nil {
-			return nil, err
+		var lastRes *UndoResult
+		for i := 0; i < depth; i++ {
+			if !a.CanUndo() {
+				if i == 0 {
+					return nil, errors.New("no dictation or edit session available to undo")
+				}
+				break
+			}
+			res, err := a.UndoTransformation(target)
+			if err != nil {
+				if i == 0 {
+					return nil, err
+				}
+				break
+			}
+			lastRes = res
 		}
-		return res, nil
+		return lastRes, nil
+
+	case "undo_list":
+		return a.UndoStack(), nil
 
 	case "active_app":
 		if a.appDetector == nil {
@@ -916,7 +1003,7 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			if _, pErr := a.paster.Paste(res.EditedText); pErr == nil {
 				pasted = true
 				a.mu.Lock()
-				a.lastUndo = &UndoRecord{
+				a.recordUndoLocked(&UndoRecord{
 					SessionID:      fmt.Sprintf("edit-%d", time.Now().UnixNano()),
 					RawText:        text,
 					UnpolishedText: text,
@@ -924,7 +1011,7 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 					IsPolished:     true,
 					PastedAt:       time.Now(),
 					Undone:         false,
-				}
+				})
 				a.mu.Unlock()
 			}
 		}
@@ -938,6 +1025,110 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			"model":         res.Model,
 			"latency_ms":    res.Latency.Milliseconds(),
 		}, nil
+
+	case "edit_preview":
+		if a.editor == nil {
+			return nil, errors.New("editor is not configured")
+		}
+		var instruction, text string
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if ins, ok := params["instruction"].(string); ok {
+				instruction = ins
+			}
+			if t, ok := params["text"].(string); ok {
+				text = t
+			}
+		}
+		if strings.TrimSpace(instruction) == "" {
+			return nil, errors.New("missing 'instruction' parameter for edit_preview")
+		}
+		if strings.TrimSpace(text) == "" {
+			if a.capturer == nil {
+				return nil, errors.New("no text provided and selection capturer is not configured")
+			}
+			sel, err := a.capturer.Capture(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("capture selected text: %w", err)
+			}
+			text = sel.Text
+		}
+		if strings.TrimSpace(text) == "" {
+			return nil, errors.New("no text provided and no active selection found")
+		}
+
+		var instr edit.Instruction
+		if a.editParser != nil {
+			instr = a.editParser.Parse(ctx, instruction)
+		} else {
+			instr = edit.Instruction{
+				Raw:        instruction,
+				Intent:     edit.IntentCustom,
+				Prompt:     instruction,
+				IsEdit:     true,
+				Confidence: 1.0,
+			}
+		}
+
+		res, err := a.editor.Execute(ctx, text, instr)
+		if err != nil {
+			return nil, fmt.Errorf("execute edit transformation: %w", err)
+		}
+
+		sess := a.previewMgr.Create(text, res.EditedText, instr)
+		return sess, nil
+
+	case "edit_apply":
+		var id string
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if s, ok := params["id"].(string); ok {
+				id = s
+			}
+		}
+		if id == "" {
+			return nil, errors.New("missing 'id' parameter for edit_apply")
+		}
+
+		sess, err := a.previewMgr.Apply(id)
+		if err != nil {
+			return nil, err
+		}
+
+		if a.paster != nil {
+			if _, pErr := a.paster.Paste(sess.CandidateText); pErr != nil {
+				return nil, fmt.Errorf("paste applied text: %w", pErr)
+			}
+			a.mu.Lock()
+			a.recordUndoLocked(&UndoRecord{
+				SessionID:      fmt.Sprintf("edit-%d", time.Now().UnixNano()),
+				RawText:        sess.OriginalText,
+				UnpolishedText: sess.OriginalText,
+				PolishedText:   sess.CandidateText,
+				IsPolished:     true,
+				PastedAt:       time.Now(),
+				Undone:         false,
+			})
+			a.mu.Unlock()
+		}
+		return sess, nil
+
+	case "edit_reject":
+		var id string
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if s, ok := params["id"].(string); ok {
+				id = s
+			}
+		}
+		if id == "" {
+			return nil, errors.New("missing 'id' parameter for edit_reject")
+		}
+		sess, err := a.previewMgr.Reject(id)
+		if err != nil {
+			return nil, err
+		}
+		return sess, nil
+
+	case "edit_preview_list":
+		return a.previewMgr.ListPending(), nil
 	case "dictate_start":
 		a.startDictation()
 		return map[string]any{"ok": true, "action": "started"}, nil
