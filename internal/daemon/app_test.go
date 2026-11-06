@@ -1667,3 +1667,79 @@ func TestApp_EditorContextIPCAndSelectionFallback(t *testing.T) {
 		t.Fatalf("expected active=false after clear, got %+v", afterMap)
 	}
 }
+
+func TestApp_TerminalContextIPC(t *testing.T) {
+	cfg := config.Default()
+	app := NewApp(cfg)
+	ctx := context.Background()
+
+	// 1. Initial terminal context should be inactive
+	res, err := app.Handle(ctx, ipc.Request{Method: "terminal_context_get"})
+	if err != nil {
+		t.Fatalf("terminal_context_get error: %v", err)
+	}
+	initMap := res.(map[string]any)
+	if initMap["active"] != false {
+		t.Fatalf("expected active=false initially, got: %+v", initMap)
+	}
+
+	// 2. Set terminal context from shell hook
+	setPayload := map[string]any{
+		"terminal_app":    "Ghostty",
+		"shell":           "zsh",
+		"pid":             12345,
+		"working_dir":     "/Users/dev/cadence",
+		"git_branch":      "main",
+		"last_command":    "git commit -m 'feat: terminal context'",
+		"last_exit_code":  0,
+		"recent_commands": []string{"git status", "git commit -m 'feat: terminal context'"},
+	}
+
+	setRes, err := app.Handle(ctx, ipc.Request{
+		Method: "terminal_context_set",
+		Params: setPayload,
+	})
+	if err != nil {
+		t.Fatalf("terminal_context_set error: %v", err)
+	}
+	setMap := setRes.(map[string]any)
+	if setMap["status"] != "ok" {
+		t.Fatalf("expected status=ok, got %+v", setMap)
+	}
+
+	// 3. Query terminal context
+	getRes, err := app.Handle(ctx, ipc.Request{Method: "terminal_context_get"})
+	if err != nil {
+		t.Fatalf("terminal_context_get error: %v", err)
+	}
+	getMap := getRes.(map[string]any)
+	if getMap["active"] != true {
+		t.Fatalf("expected active=true, got %+v", getMap)
+	}
+	if getMap["terminal_app"] != "Ghostty" || getMap["shell"] != "zsh" || getMap["git_branch"] != "main" {
+		t.Fatalf("unexpected fields in terminal context: %+v", getMap)
+	}
+	if getMap["last_command"] != "git commit -m 'feat: terminal context'" {
+		t.Fatalf("unexpected last_command: %v", getMap["last_command"])
+	}
+
+	// 4. Clear terminal context
+	clearRes, err := app.Handle(ctx, ipc.Request{Method: "terminal_context_clear"})
+	if err != nil {
+		t.Fatalf("terminal_context_clear error: %v", err)
+	}
+	clearMap := clearRes.(map[string]any)
+	if clearMap["status"] != "cleared" {
+		t.Fatalf("expected status=cleared, got %+v", clearMap)
+	}
+
+	// 5. Query after clear
+	afterRes, err := app.Handle(ctx, ipc.Request{Method: "terminal_context_get"})
+	if err != nil {
+		t.Fatalf("terminal_context_get after clear error: %v", err)
+	}
+	afterMap := afterRes.(map[string]any)
+	if afterMap["active"] != false {
+		t.Fatalf("expected active=false after clear, got %+v", afterMap)
+	}
+}

@@ -291,6 +291,23 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 		}, nil
 	case "editor_context_clear":
 		return map[string]any{"status": "cleared"}, nil
+	case "terminal_context_set":
+		return map[string]any{"status": "ok"}, nil
+	case "terminal_context_get":
+		return map[string]any{
+			"active":          true,
+			"terminal_app":    "iTerm2",
+			"shell":           "zsh",
+			"pid":             12345.0,
+			"working_dir":     "/Users/test/Cadence",
+			"git_branch":      "main",
+			"last_command":    "go test ./...",
+			"last_exit_code":  0.0,
+			"recent_commands": []string{"git status", "go test ./..."},
+			"summary":         "Terminal: iTerm2 | Shell: zsh | pwd: /Users/test/Cadence (main) | Last: go test ./... [0]",
+		}, nil
+	case "terminal_context_clear":
+		return map[string]any{"status": "cleared"}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -1184,7 +1201,9 @@ func TestCLI_Context(t *testing.T) {
 	if !strings.Contains(out.String(), "Active Application Context:") ||
 		!strings.Contains(out.String(), "Code Editor Context:") ||
 		!strings.Contains(out.String(), "Editor:       vscode") ||
-		!strings.Contains(out.String(), "File:         /path/to/main.go") {
+		!strings.Contains(out.String(), "File:         /path/to/main.go") ||
+		!strings.Contains(out.String(), "Terminal & Shell Context:") ||
+		!strings.Contains(out.String(), "Terminal:     iTerm2") {
 		t.Fatalf("unexpected context show output:\n%s", out.String())
 	}
 
@@ -1197,8 +1216,8 @@ func TestCLI_Context(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &jsonMap); err != nil {
 		t.Fatalf("invalid json output: %v", err)
 	}
-	if jsonMap["editor"] == nil {
-		t.Fatalf("expected editor key in json output: %+v", jsonMap)
+	if jsonMap["editor"] == nil || jsonMap["terminal"] == nil {
+		t.Fatalf("expected editor and terminal keys in json output: %+v", jsonMap)
 	}
 
 	// 3. Context set
@@ -1211,12 +1230,55 @@ func TestCLI_Context(t *testing.T) {
 		t.Fatalf("unexpected set output: %s", out.String())
 	}
 
+	// 3b. Context set terminal
+	out.Reset()
+	termArgs := []string{"set", "--shell", "zsh", "--pwd", "/workspace", "--cmd", "go test ./...", "--exit-code", "0"}
+	if err := cmdContext(ctx, client, termArgs, &out); err != nil {
+		t.Fatalf("cmdContext set terminal failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Terminal context updated.") {
+		t.Fatalf("unexpected set terminal output: %s", out.String())
+	}
+
 	// 4. Context clear
 	out.Reset()
 	if err := cmdContext(ctx, client, []string{"clear"}, &out); err != nil {
 		t.Fatalf("cmdContext clear failed: %v", err)
 	}
-	if !strings.Contains(out.String(), "Editor context cleared.") {
+	if !strings.Contains(out.String(), "Developer context cleared.") {
 		t.Fatalf("unexpected clear output: %s", out.String())
+	}
+}
+
+func TestCLI_Terminal(t *testing.T) {
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("cad_term_%d.sock", time.Now().UnixNano()))
+	cleanup := startMockDaemon(t, sockPath)
+	defer cleanup()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sockPath,
+	}
+	ctx := context.Background()
+
+	var out bytes.Buffer
+
+	// 1. Terminal status
+	if err := cmdTerminal(ctx, client, []string{"status"}, &out); err != nil {
+		t.Fatalf("cmdTerminal status failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Terminal:     iTerm2") {
+		t.Fatalf("unexpected terminal status: %s", out.String())
+	}
+
+	// 2. Terminal hooks
+	for _, sh := range []string{"zsh", "bash", "fish"} {
+		out.Reset()
+		if err := cmdTerminal(ctx, client, []string{"hook", sh}, &out); err != nil {
+			t.Fatalf("cmdTerminal hook %s failed: %v", sh, err)
+		}
+		if !strings.Contains(out.String(), "cadence context set") {
+			t.Fatalf("expected hook script for %s, got:\n%s", sh, out.String())
+		}
 	}
 }

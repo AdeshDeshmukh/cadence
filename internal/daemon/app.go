@@ -80,16 +80,17 @@ type App struct {
 	ipcSocket    string
 	ownsListener bool
 
-	mu            sync.Mutex
-	isRecording   bool
-	stopRequested bool
-	activeCancel  context.CancelFunc
-	activeSess    *pipeline.Session
-	sessionSeq    uint64
-	lastUndo      *UndoRecord
-	undoStack     []*UndoRecord
-	previewMgr    *edit.PreviewManager
-	editorContext *appcontext.EditorContextManager
+	mu              sync.Mutex
+	isRecording     bool
+	stopRequested   bool
+	activeCancel    context.CancelFunc
+	activeSess      *pipeline.Session
+	sessionSeq      uint64
+	lastUndo        *UndoRecord
+	undoStack       []*UndoRecord
+	previewMgr      *edit.PreviewManager
+	editorContext   *appcontext.EditorContextManager
+	terminalContext *appcontext.TerminalContextManager
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -195,6 +196,11 @@ func WithPreviewManager(m *edit.PreviewManager) Option {
 // WithEditorContextManager sets a custom editor context manager.
 func WithEditorContextManager(m *appcontext.EditorContextManager) Option {
 	return func(a *App) { a.editorContext = m }
+}
+
+// WithTerminalContextManager sets a custom terminal context manager.
+func WithTerminalContextManager(m *appcontext.TerminalContextManager) Option {
+	return func(a *App) { a.terminalContext = m }
 }
 
 // NewApp instantiates a fully configured Cadence daemon application.
@@ -357,6 +363,10 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 
 	if a.editorContext == nil {
 		a.editorContext = appcontext.NewEditorContextManager()
+	}
+
+	if a.terminalContext == nil {
+		a.terminalContext = appcontext.NewTerminalContextManager()
 	}
 
 	if a.capture == nil {
@@ -647,6 +657,11 @@ func (a *App) AppDetector() appcontext.Detector {
 // EditorContextManager returns the active code editor context manager.
 func (a *App) EditorContextManager() *appcontext.EditorContextManager {
 	return a.editorContext
+}
+
+// TerminalContextManager returns the active terminal context manager.
+func (a *App) TerminalContextManager() *appcontext.TerminalContextManager {
+	return a.terminalContext
 }
 
 // Router returns the active application context router.
@@ -973,6 +988,51 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 	case "editor_context_clear":
 		if a.editorContext != nil {
 			a.editorContext.Clear()
+		}
+		return map[string]any{"status": "cleared"}, nil
+
+	case "terminal_context_set":
+		var tCtx appcontext.TerminalContext
+		raw, err := json.Marshal(req.Params)
+		if err != nil {
+			return nil, fmt.Errorf("invalid terminal context params: %w", err)
+		}
+		if err := json.Unmarshal(raw, &tCtx); err != nil {
+			return nil, fmt.Errorf("decode terminal context: %w", err)
+		}
+		if a.terminalContext != nil {
+			a.terminalContext.Set(tCtx)
+		}
+		return map[string]any{
+			"status":     "ok",
+			"updated_at": tCtx.UpdatedAt,
+		}, nil
+
+	case "terminal_context_get":
+		if a.terminalContext == nil {
+			return map[string]any{"active": false}, nil
+		}
+		tCtx, ok := a.terminalContext.Get()
+		if !ok {
+			return map[string]any{"active": false}, nil
+		}
+		return map[string]any{
+			"active":          true,
+			"terminal_app":    tCtx.TerminalApp,
+			"shell":           tCtx.Shell,
+			"pid":             tCtx.PID,
+			"working_dir":     tCtx.WorkingDir,
+			"git_branch":      tCtx.GitBranch,
+			"last_command":    tCtx.LastCommand,
+			"last_exit_code":  tCtx.LastExitCode,
+			"recent_commands": tCtx.RecentCommands,
+			"updated_at":      tCtx.UpdatedAt,
+			"summary":         a.terminalContext.FormatContextSummary(),
+		}, nil
+
+	case "terminal_context_clear":
+		if a.terminalContext != nil {
+			a.terminalContext.Clear()
 		}
 		return map[string]any{"status": "cleared"}, nil
 

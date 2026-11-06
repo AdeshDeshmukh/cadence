@@ -47,6 +47,7 @@ Commands:
   parse <text>       Parse voice edit instruction into intent and parameters
   edit <instruction> Execute voice edit on highlighted text or custom input
   context [show|set|clear] Show or manage developer/code editor context (file, language, selection)
+  terminal [status|hook] Inspect terminal/shell context or generate shell integration hooks
   app                Show detected active foreground application and category
   config [show|path] Inspect configuration and system file paths
   doctor             Perform diagnostics on system, daemon, and storage
@@ -163,6 +164,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "context", "ctx":
 		if err := cmdContext(ctx, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "terminal", "term":
+		if err := cmdTerminal(ctx, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -1314,12 +1322,21 @@ func cmdContextShow(ctx context.Context, client ipc.Client, args []string, out i
 		}
 	}
 
+	// Query terminal context
+	var terminalCtx map[string]any
+	if res, err := client.Call(callCtx, "terminal_context_get", nil); err == nil {
+		if m, ok := res.(map[string]any); ok {
+			terminalCtx = m
+		}
+	}
+
 	if jsonOutput {
 		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
 		return enc.Encode(map[string]any{
-			"app":    appInfo,
-			"editor": editorCtx,
+			"app":      appInfo,
+			"editor":   editorCtx,
+			"terminal": terminalCtx,
 		})
 	}
 
@@ -1374,59 +1391,157 @@ func cmdContextShow(ctx context.Context, client ipc.Client, args []string, out i
 		fmt.Fprintf(out, "  Status:       Not active (no editor connected)\n")
 	}
 
+	fmt.Fprintf(out, "\nTerminal & Shell Context:\n")
+	if terminalCtx != nil && terminalCtx["active"] == true {
+		termApp, _ := terminalCtx["terminal_app"].(string)
+		shell, _ := terminalCtx["shell"].(string)
+		pid, _ := terminalCtx["pid"].(float64)
+		workingDir, _ := terminalCtx["working_dir"].(string)
+		gitBranch, _ := terminalCtx["git_branch"].(string)
+		lastCmd, _ := terminalCtx["last_command"].(string)
+		lastExit, _ := terminalCtx["last_exit_code"].(float64)
+		summary, _ := terminalCtx["summary"].(string)
+
+		if termApp == "" {
+			termApp = "Terminal"
+		}
+		fmt.Fprintf(out, "  Terminal:     %s\n", termApp)
+		if shell != "" {
+			if pid > 0 {
+				fmt.Fprintf(out, "  Shell:        %s (PID: %.0f)\n", shell, pid)
+			} else {
+				fmt.Fprintf(out, "  Shell:        %s\n", shell)
+			}
+		}
+		if workingDir != "" {
+			fmt.Fprintf(out, "  Directory:    %s\n", workingDir)
+		}
+		if gitBranch != "" {
+			fmt.Fprintf(out, "  Git Branch:   %s\n", gitBranch)
+		}
+		if lastCmd != "" {
+			fmt.Fprintf(out, "  Last Command: %s (Exit Code: %.0f)\n", lastCmd, lastExit)
+		}
+		if summary != "" {
+			fmt.Fprintf(out, "  Summary:      %s\n", summary)
+		}
+	} else {
+		fmt.Fprintf(out, "  Status:       Not active (no terminal tracked)\n")
+	}
+
 	return nil
 }
 
 func cmdContextSet(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
-	payload := map[string]any{
-		"editor_name": "vscode",
-	}
+	editorPayload := map[string]any{}
+	terminalPayload := map[string]any{}
+	hasEditor := false
+	hasTerminal := false
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "-f", "--file":
 			if i+1 < len(args) {
-				payload["file_path"] = args[i+1]
-				payload["file_name"] = filepath.Base(args[i+1])
+				editorPayload["file_path"] = args[i+1]
+				editorPayload["file_name"] = filepath.Base(args[i+1])
+				hasEditor = true
 				i++
 			}
 		case "-l", "--lang", "--language":
 			if i+1 < len(args) {
-				payload["language_id"] = args[i+1]
+				editorPayload["language_id"] = args[i+1]
+				hasEditor = true
 				i++
 			}
 		case "--line":
 			if i+1 < len(args) {
 				var line int
 				fmt.Sscanf(args[i+1], "%d", &line)
-				payload["line"] = line
+				editorPayload["line"] = line
+				hasEditor = true
 				i++
 			}
 		case "--col", "--column":
 			if i+1 < len(args) {
 				var col int
 				fmt.Sscanf(args[i+1], "%d", &col)
-				payload["column"] = col
+				editorPayload["column"] = col
+				hasEditor = true
 				i++
 			}
 		case "-s", "--selection":
 			if i+1 < len(args) {
-				payload["selection_text"] = args[i+1]
+				editorPayload["selection_text"] = args[i+1]
+				hasEditor = true
 				i++
 			}
 		case "-e", "--editor":
 			if i+1 < len(args) {
-				payload["editor_name"] = args[i+1]
+				ed := args[i+1]
+				if ed == "terminal" {
+					hasTerminal = true
+				} else {
+					editorPayload["editor_name"] = ed
+					hasEditor = true
+				}
 				i++
 			}
 		case "-r", "--root", "--workspace":
 			if i+1 < len(args) {
-				payload["workspace_root"] = args[i+1]
+				editorPayload["workspace_root"] = args[i+1]
+				hasEditor = true
 				i++
 			}
 		case "-c", "--context":
 			if i+1 < len(args) {
-				payload["surrounding_context"] = args[i+1]
+				editorPayload["surrounding_context"] = args[i+1]
+				hasEditor = true
+				i++
+			}
+		case "--shell":
+			if i+1 < len(args) {
+				terminalPayload["shell"] = args[i+1]
+				hasTerminal = true
+				i++
+			}
+		case "--pwd", "--dir":
+			if i+1 < len(args) {
+				terminalPayload["working_dir"] = args[i+1]
+				hasTerminal = true
+				i++
+			}
+		case "--cmd":
+			if i+1 < len(args) {
+				terminalPayload["last_command"] = args[i+1]
+				hasTerminal = true
+				i++
+			}
+		case "--exit-code", "--code":
+			if i+1 < len(args) {
+				var code int
+				fmt.Sscanf(args[i+1], "%d", &code)
+				terminalPayload["last_exit_code"] = code
+				hasTerminal = true
+				i++
+			}
+		case "--pid":
+			if i+1 < len(args) {
+				var pid int
+				fmt.Sscanf(args[i+1], "%d", &pid)
+				terminalPayload["pid"] = pid
+				hasTerminal = true
+				i++
+			}
+		case "--branch", "--git":
+			if i+1 < len(args) {
+				terminalPayload["git_branch"] = args[i+1]
+				hasTerminal = true
+				i++
+			}
+		case "--term", "--terminal-app":
+			if i+1 < len(args) {
+				terminalPayload["terminal_app"] = args[i+1]
+				hasTerminal = true
 				i++
 			}
 		}
@@ -1435,11 +1550,26 @@ func cmdContextSet(ctx context.Context, client ipc.Client, args []string, out io
 	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
-	if _, err := client.Call(callCtx, "editor_context_set", payload); err != nil {
-		return fmt.Errorf("set editor context: %w", err)
+	if hasTerminal {
+		if terminalPayload["terminal_app"] == nil {
+			terminalPayload["terminal_app"] = "Terminal"
+		}
+		if _, err := client.Call(callCtx, "terminal_context_set", terminalPayload); err != nil {
+			return fmt.Errorf("set terminal context: %w", err)
+		}
+		fmt.Fprintln(out, "Terminal context updated.")
 	}
 
-	fmt.Fprintln(out, "Editor context updated.")
+	if hasEditor || !hasTerminal {
+		if editorPayload["editor_name"] == nil {
+			editorPayload["editor_name"] = "vscode"
+		}
+		if _, err := client.Call(callCtx, "editor_context_set", editorPayload); err != nil {
+			return fmt.Errorf("set editor context: %w", err)
+		}
+		fmt.Fprintln(out, "Editor context updated.")
+	}
+
 	return nil
 }
 
@@ -1447,13 +1577,96 @@ func cmdContextClear(ctx context.Context, client ipc.Client, out io.Writer) erro
 	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
-	if _, err := client.Call(callCtx, "editor_context_clear", nil); err != nil {
-		return fmt.Errorf("clear editor context: %w", err)
-	}
+	_, _ = client.Call(callCtx, "editor_context_clear", nil)
+	_, _ = client.Call(callCtx, "terminal_context_clear", nil)
 
-	fmt.Fprintln(out, "Editor context cleared.")
+	fmt.Fprintln(out, "Developer context cleared.")
 	return nil
 }
+
+func cmdTerminal(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	action := "status"
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		action = args[0]
+		args = args[1:]
+	}
+
+	switch action {
+	case "status", "show", "get":
+		return cmdContextShow(ctx, client, args, out)
+	case "set":
+		return cmdContextSet(ctx, client, args, out)
+	case "hook":
+		shell := "zsh"
+		if len(args) > 0 {
+			shell = strings.ToLower(args[0])
+		}
+		switch shell {
+		case "zsh":
+			fmt.Fprint(out, zshHookScript)
+		case "bash":
+			fmt.Fprint(out, bashHookScript)
+		case "fish":
+			fmt.Fprint(out, fishHookScript)
+		default:
+			return fmt.Errorf("unsupported shell %q (supported: zsh, bash, fish)", shell)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown terminal action %q (expected status or hook)", action)
+	}
+}
+
+const zshHookScript = `if [[ -n "$ZSH_VERSION" ]]; then
+  _cadence_zsh_preexec() {
+    local cmd="$1"
+    export _CADENCE_LAST_CMD="$cmd"
+    (cadence context set --editor terminal --shell zsh --pid "$$" --pwd "$PWD" --cmd "$cmd" >/dev/null 2>&1 &)
+  }
+
+  _cadence_zsh_precmd() {
+    local exit_code=$?
+    if [[ -n "$_CADENCE_LAST_CMD" ]]; then
+      (cadence context set --editor terminal --shell zsh --pid "$$" --pwd "$PWD" --cmd "$_CADENCE_LAST_CMD" --exit-code "$exit_code" >/dev/null 2>&1 &)
+      unset _CADENCE_LAST_CMD
+    else
+      (cadence context set --editor terminal --shell zsh --pid "$$" --pwd "$PWD" --exit-code "$exit_code" >/dev/null 2>&1 &)
+    fi
+  }
+
+  autoload -Uz add-zsh-hook
+  add-zsh-hook preexec _cadence_zsh_preexec
+  add-zsh-hook precmd _cadence_zsh_precmd
+fi
+`
+
+const bashHookScript = `if [ -n "$BASH_VERSION" ]; then
+  _cadence_bash_prompt() {
+    local exit_code=$?
+    (cadence context set --editor terminal --shell bash --pid "$$" --pwd "$PWD" --exit-code "$exit_code" >/dev/null 2>&1 &)
+  }
+
+  if [[ ";$PROMPT_COMMAND;" != *";_cadence_bash_prompt;"* ]]; then
+    PROMPT_COMMAND="_cadence_bash_prompt;${PROMPT_COMMAND:-}"
+  fi
+fi
+`
+
+const fishHookScript = `function _cadence_fish_preexec --on-event fish_preexec
+    set -g _CADENCE_LAST_CMD $argv[1]
+    command cadence context set --editor terminal --shell fish --pid $fish_pid --pwd "$PWD" --cmd "$argv[1]" >/dev/null 2>&1 &
+end
+
+function _cadence_fish_postexec --on-event fish_postexec
+    set -l exit_code $status
+    if set -q _CADENCE_LAST_CMD
+        command cadence context set --editor terminal --shell fish --pid $fish_pid --pwd "$PWD" --cmd "$_CADENCE_LAST_CMD" --exit-code $exit_code >/dev/null 2>&1 &
+        set -e _CADENCE_LAST_CMD
+    else
+        command cadence context set --editor terminal --shell fish --pid $fish_pid --pwd "$PWD" --exit-code $exit_code >/dev/null 2>&1 &
+    end
+end
+`
 
 func cmdRoute(ctx context.Context, cfg config.Config, client ipc.Client, args []string, out io.Writer) error {
 	action := "list"
