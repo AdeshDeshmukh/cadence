@@ -182,3 +182,149 @@ func TestGenerator_LLMFallback(t *testing.T) {
 		t.Fatalf("expected source 'llm', got %s", res.Source)
 	}
 }
+
+func TestRisk_ClassifySafe(t *testing.T) {
+	safeCommands := []string{
+		"git status",
+		"git diff HEAD~1",
+		"git log -n 5 --oneline",
+		"git show HEAD",
+		"git branch -a",
+		"git remote -v",
+		"go test -v ./...",
+		"cargo test",
+		"npm test",
+		"pnpm test",
+		"pytest tests/",
+		"ls -la /tmp",
+		"pwd",
+		"cat README.md",
+		"head -n 20 file.go",
+		"grep -r 'func' .",
+		"echo 'hello world'",
+		"ps aux",
+		"which cadence",
+	}
+
+	for _, cmd := range safeCommands {
+		risk := ClassifyCommand(cmd)
+		if risk.Level != RiskSafe {
+			t.Errorf("expected command %q to be Safe, got %s (rule: %s, reason: %s)", cmd, risk.Level, risk.Rule, risk.Reason)
+		}
+		if risk.RequiresConfirmation {
+			t.Errorf("expected Safe command %q not to require confirmation", cmd)
+		}
+	}
+}
+
+func TestRisk_ClassifyRisky(t *testing.T) {
+	riskyCommands := []string{
+		`git commit -m "feat: new feature"`,
+		"git add .",
+		"git push origin main",
+		"git pull --rebase origin main",
+		"git checkout -b feature-branch",
+		"git switch develop",
+		"git merge feature",
+		"git stash pop",
+		"mv file1.txt file2.txt",
+		"cp -r src/ dst/",
+		"mkdir -p /tmp/cadence-test",
+		"touch newfile.txt",
+		"chmod 755 script.sh",
+		"npm install",
+		"pnpm add lodash",
+		"cargo add serde",
+		"go get github.com/stretchr/testify",
+		"kill 1234",
+		"systemctl restart nginx",
+	}
+
+	for _, cmd := range riskyCommands {
+		risk := ClassifyCommand(cmd)
+		if risk.Level != RiskRisky {
+			t.Errorf("expected command %q to be Risky, got %s (rule: %s, reason: %s)", cmd, risk.Level, risk.Rule, risk.Reason)
+		}
+		if !risk.RequiresConfirmation {
+			t.Errorf("expected Risky command %q to require confirmation", cmd)
+		}
+	}
+}
+
+func TestRisk_ClassifyDestructive(t *testing.T) {
+	destructiveCommands := []string{
+		"git reset --hard HEAD~1",
+		"git push --force origin main",
+		"git push -f",
+		"git push origin +main",
+		"git clean -fd",
+		"git branch -D old-branch",
+		"git checkout -- .",
+		"git restore .",
+		"git prune",
+		"rm -rf /tmp/test",
+		"rm -f file.txt",
+		"rm file.txt",
+		"shred -u secret.txt",
+		"dd if=/dev/zero of=/dev/sda",
+		"mkfs.ext4 /dev/sdb1",
+		"kill -9 9876",
+		"kill -SIGKILL 1234",
+		"killall -9 cadenced",
+		"shutdown -h now",
+		"reboot",
+		"echo '' > /etc/hosts",
+	}
+
+	for _, cmd := range destructiveCommands {
+		risk := ClassifyCommand(cmd)
+		if risk.Level != RiskDestructive {
+			t.Errorf("expected command %q to be Destructive, got %s (rule: %s, reason: %s)", cmd, risk.Level, risk.Rule, risk.Reason)
+		}
+		if !risk.RequiresConfirmation {
+			t.Errorf("expected Destructive command %q to require confirmation", cmd)
+		}
+	}
+}
+
+func TestRisk_CompoundCommands(t *testing.T) {
+	// Compound where one part is destructive -> overall is destructive
+	compoundDestructive := "npm test && git add . && git push --force origin main"
+	risk := ClassifyCommand(compoundDestructive)
+	if risk.Level != RiskDestructive {
+		t.Fatalf("expected compound with force push to be Destructive, got %s", risk.Level)
+	}
+
+	// Compound where all are safe -> overall is safe
+	compoundSafe := "cat README.md | grep Cadence | wc -l"
+	safeRisk := ClassifyCommand(compoundSafe)
+	if safeRisk.Level != RiskSafe {
+		t.Fatalf("expected pipeline of safe commands to be Safe, got %s", safeRisk.Level)
+	}
+
+	// Compound with risky and safe -> overall is risky
+	compoundRisky := "git status && git add . && git commit -m 'quick fix'"
+	riskyRisk := ClassifyCommand(compoundRisky)
+	if riskyRisk.Level != RiskRisky {
+		t.Fatalf("expected compound with commit to be Risky, got %s", riskyRisk.Level)
+	}
+}
+
+func TestRisk_SudoElevations(t *testing.T) {
+	// Safe command elevated via sudo becomes risky
+	sudoSafe := "sudo cat /etc/hosts"
+	risk := ClassifyCommand(sudoSafe)
+	if risk.Level != RiskRisky {
+		t.Fatalf("expected sudo cat to be Risky, got %s", risk.Level)
+	}
+
+	// Destructive command under sudo remains destructive with superuser warning
+	sudoDestructive := "sudo rm -rf /var/cache/*"
+	destRisk := ClassifyCommand(sudoDestructive)
+	if destRisk.Level != RiskDestructive {
+		t.Fatalf("expected sudo rm -rf to be Destructive, got %s", destRisk.Level)
+	}
+	if !strings.Contains(destRisk.Reason, "Superuser execution") {
+		t.Fatalf("expected superuser execution reason, got %s", destRisk.Reason)
+	}
+}

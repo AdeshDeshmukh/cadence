@@ -1084,6 +1084,19 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 		}
 		return cmdRes, nil
 
+	case "dev_command_risk":
+		var command string
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if cmd, ok := params["command"].(string); ok {
+				command = cmd
+			}
+		}
+		if strings.TrimSpace(command) == "" {
+			return nil, errors.New("missing 'command' parameter for dev_command_risk")
+		}
+		risk := developer.ClassifyCommand(command)
+		return risk, nil
+
 	case "selection_get":
 		var res selection.Result
 		var err error

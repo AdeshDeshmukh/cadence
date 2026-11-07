@@ -1799,4 +1799,47 @@ func TestApp_DevCommandGenerateIPC(t *testing.T) {
 	if commitCmd.Command != `git commit -m "add new feature"` {
 		t.Fatalf("expected git commit command, got %q", commitCmd.Command)
 	}
+	if commitCmd.Risk.Level != developer.RiskRisky {
+		t.Fatalf("expected commit to be risky, got %s", commitCmd.Risk.Level)
+	}
+}
+
+func TestApp_DevCommandRiskIPC(t *testing.T) {
+	cfg := config.Default()
+	app := NewApp(cfg)
+	ctx := context.Background()
+
+	// 1. Missing command error
+	if _, err := app.Handle(ctx, ipc.Request{Method: "dev_command_risk"}); err == nil {
+		t.Fatal("expected error on missing command")
+	}
+
+	// 2. Safe command check
+	safeRes, err := app.Handle(ctx, ipc.Request{
+		Method: "dev_command_risk",
+		Params: map[string]any{"command": "go test ./..."},
+	})
+	if err != nil {
+		t.Fatalf("dev_command_risk failed: %v", err)
+	}
+	safeRisk, ok := safeRes.(developer.RiskAssessment)
+	if !ok {
+		t.Fatalf("expected RiskAssessment, got %T", safeRes)
+	}
+	if safeRisk.Level != developer.RiskSafe || safeRisk.RequiresConfirmation {
+		t.Fatalf("expected safe with no confirmation, got %+v", safeRisk)
+	}
+
+	// 3. Destructive command check
+	destRes, err := app.Handle(ctx, ipc.Request{
+		Method: "dev_command_risk",
+		Params: map[string]any{"command": "rm -rf /tmp/test && git push --force origin main"},
+	})
+	if err != nil {
+		t.Fatalf("dev_command_risk destructive failed: %v", err)
+	}
+	destRisk := destRes.(developer.RiskAssessment)
+	if destRisk.Level != developer.RiskDestructive || !destRisk.RequiresConfirmation {
+		t.Fatalf("expected destructive with confirmation, got %+v", destRisk)
+	}
 }

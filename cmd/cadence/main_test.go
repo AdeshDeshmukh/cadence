@@ -315,6 +315,10 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 		gen := developer.NewGenerator(nil)
 		wd, _ := params["working_dir"].(string)
 		return gen.Generate(context.Background(), instr, wd)
+	case "dev_command_risk":
+		params, _ := req.Params.(map[string]any)
+		cmd, _ := params["command"].(string)
+		return developer.ClassifyCommand(cmd), nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -1348,7 +1352,16 @@ func TestCLI_Cmd(t *testing.T) {
 		t.Fatalf("unexpected help output: %s", out.String())
 	}
 
-	// 6. Offline fallback (offline socket)
+	// 6. Risk flag
+	out.Reset()
+	if err := cmdGenerate(ctx, cfg, client, []string{"--risk", "run", "the", "tests"}, &out); err != nil {
+		t.Fatalf("cmdGenerate --risk failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "[SAFE]") {
+		t.Fatalf("expected [SAFE] badge, got %s", out.String())
+	}
+
+	// 7. Offline fallback (offline socket)
 	offlineClient := ipc.Client{Network: "unix", Address: "/nonexistent.sock"}
 	out.Reset()
 	if err := cmdGenerate(ctx, cfg, offlineClient, []string{"show", "diff"}, &out); err != nil {
@@ -1356,5 +1369,73 @@ func TestCLI_Cmd(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "git diff") {
 		t.Fatalf("expected offline fallback to generate 'git diff', got %s", out.String())
+	}
+}
+
+func TestCLI_Risk(t *testing.T) {
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("cad_risk_%d.sock", time.Now().UnixNano()))
+	cleanup := startMockDaemon(t, sockPath)
+	defer cleanup()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sockPath,
+	}
+	ctx := context.Background()
+
+	var out bytes.Buffer
+
+	// 1. Safe command
+	if err := cmdRisk(ctx, client, []string{"git", "status"}, &out); err != nil {
+		t.Fatalf("cmdRisk safe failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "SAFE") || !strings.Contains(out.String(), "Confirm:      No") {
+		t.Fatalf("unexpected safe output: %s", out.String())
+	}
+
+	// 2. Destructive command
+	out.Reset()
+	if err := cmdRisk(ctx, client, []string{"rm", "-rf", "/tmp/cadence"}, &out); err != nil {
+		t.Fatalf("cmdRisk destructive failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "DESTRUCTIVE") || !strings.Contains(out.String(), "Confirm:      Yes") {
+		t.Fatalf("unexpected destructive output: %s", out.String())
+	}
+
+	// 3. JSON output
+	out.Reset()
+	if err := cmdRisk(ctx, client, []string{"--json", "git", "reset", "--hard"}, &out); err != nil {
+		t.Fatalf("cmdRisk --json failed: %v", err)
+	}
+	var res map[string]any
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if res["level"] != "destructive" || res["requires_confirmation"] != true {
+		t.Fatalf("expected destructive in json, got %+v", res)
+	}
+
+	// 4. Missing command error
+	if err := cmdRisk(ctx, client, []string{}, &out); err == nil {
+		t.Fatal("expected error on empty command")
+	}
+
+	// 5. Help flag
+	out.Reset()
+	if err := cmdRisk(ctx, client, []string{"--help"}, &out); err != nil {
+		t.Fatalf("cmdRisk --help failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Usage: cadence risk") {
+		t.Fatalf("unexpected help output: %s", out.String())
+	}
+
+	// 6. Offline fallback
+	offlineClient := ipc.Client{Network: "unix", Address: "/nonexistent.sock"}
+	out.Reset()
+	if err := cmdRisk(ctx, offlineClient, []string{"kill", "-9", "1234"}, &out); err != nil {
+		t.Fatalf("cmdRisk offline failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "DESTRUCTIVE") {
+		t.Fatalf("expected offline destructive classification, got %s", out.String())
 	}
 }
