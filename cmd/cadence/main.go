@@ -48,6 +48,7 @@ Commands:
   parse <text>       Parse voice edit instruction into intent and parameters
   edit <instruction> Execute voice edit on highlighted text or custom input
   cmd <instruction>  Generate shell/CLI command from voice instruction (e.g. "run tests", "git commit...")
+  risk <command>     Audit and classify shell command risk level (Safe, Risky, Destructive)
   context [show|set|clear] Show or manage developer/code editor context (file, language, selection)
   terminal [status|hook] Inspect terminal/shell context or generate shell integration hooks
   app                Show detected active foreground application and category
@@ -180,6 +181,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "cmd", "dev", "command":
 		if err := cmdGenerate(ctx, cfg, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "risk", "classify":
+		if err := cmdRisk(ctx, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -1681,6 +1689,7 @@ func cmdGenerate(ctx context.Context, cfg config.Config, client ipc.Client, args
 	jsonOutput := false
 	explain := false
 	pasteOutput := false
+	showRisk := false
 	var workingDir string
 	var words []string
 
@@ -1693,7 +1702,8 @@ Translate natural language voice instructions into executable shell commands.
 
 Flags:
   -j, --json     Output result as JSON
-  -e, --explain  Print human-readable explanation and metadata
+  -e, --explain  Print human-readable explanation, ecosystem, and risk metadata
+  -r, --risk     Prefix command with risk classification badge ([SAFE], [RISKY], [DESTRUCTIVE])
   -p, --paste    Paste the generated command into the active application
   -d, --dir      Specify project working directory (default: active terminal or current dir)
   -h, --help     Show this help message
@@ -1701,13 +1711,15 @@ Flags:
 Examples:
   cadence cmd "run the tests"
   cadence cmd "git commit with message updated terminal context"
-  cadence cmd "create a new branch called feat voice auth"
+  cadence cmd --risk "reset hard head"
   cadence cmd --explain "install dependencies"`)
 			return nil
 		case "-j", "--json":
 			jsonOutput = true
 		case "-e", "--explain":
 			explain = true
+		case "-r", "--risk":
+			showRisk = true
 		case "-p", "--paste":
 			pasteOutput = true
 		case "-d", "--dir", "--pwd":
@@ -1766,18 +1778,108 @@ Examples:
 	if explain {
 		fmt.Fprintf(out, "Generated Command:\n  %s\n\n", result.Command)
 		fmt.Fprintf(out, "Details:\n")
-		fmt.Fprintf(out, "  Instruction: %s\n", result.RawInstruction)
+		fmt.Fprintf(out, "  Instruction:  %s\n", result.RawInstruction)
 		if result.Ecosystem != "" && result.Ecosystem != developer.EcosystemUnknown {
-			fmt.Fprintf(out, "  Ecosystem:   %s\n", result.Ecosystem)
+			fmt.Fprintf(out, "  Ecosystem:    %s\n", result.Ecosystem)
 		}
 		if result.Explanation != "" {
-			fmt.Fprintf(out, "  Explanation: %s\n", result.Explanation)
+			fmt.Fprintf(out, "  Explanation:  %s\n", result.Explanation)
 		}
-		fmt.Fprintf(out, "  Source:      %s (confidence: %.2f)\n", result.Source, result.Confidence)
+		fmt.Fprintf(out, "  Source:       %s (confidence: %.2f)\n", result.Source, result.Confidence)
+		riskLevel := strings.ToUpper(string(result.Risk.Level))
+		if riskLevel == "" {
+			riskLevel = "SAFE"
+		}
+		fmt.Fprintf(out, "  Risk Level:   %s\n", riskLevel)
+		if result.Risk.Reason != "" {
+			fmt.Fprintf(out, "  Risk Reason:  %s\n", result.Risk.Reason)
+		}
+		confirmStr := "No"
+		if result.Risk.RequiresConfirmation {
+			confirmStr = "Yes"
+		}
+		fmt.Fprintf(out, "  Confirmation: %s\n", confirmStr)
+		return nil
+	}
+
+	if showRisk {
+		badge := fmt.Sprintf("[%s]", strings.ToUpper(string(result.Risk.Level)))
+		fmt.Fprintf(out, "%s %s\n", badge, result.Command)
 		return nil
 	}
 
 	fmt.Fprintln(out, result.Command)
+	return nil
+}
+
+func cmdRisk(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	jsonOutput := false
+	var words []string
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-h", "--help":
+			fmt.Fprintln(out, `Usage: cadence risk [flags] <command...>
+
+Audit and classify shell commands into Safe, Risky, or Destructive levels.
+
+Flags:
+  -j, --json     Output classification as JSON
+  -h, --help     Show this help message
+
+Examples:
+  cadence risk "git status"
+  cadence risk "git commit -m 'feat: add auth'"
+  cadence risk "rm -rf /tmp/data"
+  cadence risk "git reset --hard HEAD~1"`)
+			return nil
+		case "-j", "--json":
+			jsonOutput = true
+		default:
+			words = append(words, args[i])
+		}
+	}
+
+	command := strings.TrimSpace(strings.Join(words, " "))
+	if command == "" {
+		return errors.New("missing command to classify (usage: cadence risk <command>)")
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	var assessment developer.RiskAssessment
+	ipcRes, err := client.Call(callCtx, "dev_command_risk", map[string]any{
+		"command": command,
+	})
+	if err == nil {
+		if raw, mErr := json.Marshal(ipcRes); mErr == nil {
+			_ = json.Unmarshal(raw, &assessment)
+		}
+	} else {
+		// Offline fallback
+		assessment = developer.ClassifyCommand(command)
+	}
+
+	if jsonOutput {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(assessment)
+	}
+
+	// Human readable output
+	fmt.Fprintf(out, "Command:      %s\n", command)
+	fmt.Fprintf(out, "Risk Level:   %s\n", strings.ToUpper(string(assessment.Level)))
+	fmt.Fprintf(out, "Rule:         %s\n", assessment.Rule)
+	confirmStr := "No"
+	if assessment.RequiresConfirmation {
+		confirmStr = "Yes"
+	}
+	fmt.Fprintf(out, "Confirm:      %s\n", confirmStr)
+	fmt.Fprintf(out, "Reason:       %s\n", assessment.Reason)
+	if len(assessment.HighlightedTokens) > 0 {
+		fmt.Fprintf(out, "Key Tokens:   %s\n", strings.Join(assessment.HighlightedTokens, ", "))
+	}
 	return nil
 }
 

@@ -12,13 +12,14 @@ import (
 
 // GeneratedCommand represents the generated shell command outcome from a natural voice instruction.
 type GeneratedCommand struct {
-	RawInstruction string        `json:"raw_instruction"`
-	Command        string        `json:"command"`
-	Explanation    string        `json:"explanation,omitempty"`
-	Ecosystem      Ecosystem     `json:"ecosystem,omitempty"`
-	Confidence     float64       `json:"confidence"`
-	Source         string        `json:"source"` // "rule" or "llm"
-	Latency        time.Duration `json:"latency"`
+	RawInstruction string         `json:"raw_instruction"`
+	Command        string         `json:"command"`
+	Explanation    string         `json:"explanation,omitempty"`
+	Ecosystem      Ecosystem      `json:"ecosystem,omitempty"`
+	Confidence     float64        `json:"confidence"`
+	Source         string         `json:"source"` // "rule" or "llm"
+	Latency        time.Duration  `json:"latency"`
+	Risk           RiskAssessment `json:"risk"`
 }
 
 // Generator translates natural language voice instructions into executable shell commands.
@@ -74,6 +75,7 @@ func (g *Generator) Generate(ctx context.Context, instruction string, workingDir
 			Confidence:     1.0,
 			Source:         "rule",
 			Latency:        time.Since(start),
+			Risk:           ClassifyCommand(cmd),
 		}, nil
 	}
 
@@ -99,6 +101,7 @@ func (g *Generator) Generate(ctx context.Context, instruction string, workingDir
 			Confidence:     0.5,
 			Source:         "fallback",
 			Latency:        time.Since(start),
+			Risk:           ClassifyCommand(clean),
 		}, nil
 	}
 
@@ -115,6 +118,7 @@ func (g *Generator) Generate(ctx context.Context, instruction string, workingDir
 		Confidence:     0.9,
 		Source:         "llm",
 		Latency:        time.Since(start),
+		Risk:           ClassifyCommand(genCmd),
 	}, nil
 }
 
