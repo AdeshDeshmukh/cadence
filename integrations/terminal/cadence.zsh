@@ -23,3 +23,4 @@ if [[ -n "$ZSH_VERSION" ]]; then
   add-zsh-hook preexec _cadence_zsh_preexec
   add-zsh-hook precmd _cadence_zsh_precmd
 fi
+

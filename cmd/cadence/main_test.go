@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/AdeshDeshmukh/cadence/internal/config"
+	"github.com/AdeshDeshmukh/cadence/internal/developer"
 	"github.com/AdeshDeshmukh/cadence/internal/edit"
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
 	"github.com/AdeshDeshmukh/cadence/internal/storage"
@@ -308,6 +309,12 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 		}, nil
 	case "terminal_context_clear":
 		return map[string]any{"status": "cleared"}, nil
+	case "dev_command_generate":
+		params, _ := req.Params.(map[string]any)
+		instr, _ := params["instruction"].(string)
+		gen := developer.NewGenerator(nil)
+		wd, _ := params["working_dir"].(string)
+		return gen.Generate(context.Background(), instr, wd)
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -1280,5 +1287,74 @@ func TestCLI_Terminal(t *testing.T) {
 		if !strings.Contains(out.String(), "cadence context set") {
 			t.Fatalf("expected hook script for %s, got:\n%s", sh, out.String())
 		}
+	}
+}
+
+func TestCLI_Cmd(t *testing.T) {
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("cad_cmd_%d.sock", time.Now().UnixNano()))
+	cleanup := startMockDaemon(t, sockPath)
+	defer cleanup()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sockPath,
+	}
+	ctx := context.Background()
+	cfg := config.Default()
+
+	var out bytes.Buffer
+
+	// 1. Run tests command (mock daemon returns go test)
+	if err := cmdGenerate(ctx, cfg, client, []string{"run", "the", "tests"}, &out); err != nil {
+		t.Fatalf("cmdGenerate failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "go test") {
+		t.Fatalf("expected 'go test', got %s", out.String())
+	}
+
+	// 2. Explain flag
+	out.Reset()
+	if err := cmdGenerate(ctx, cfg, client, []string{"--explain", "git", "commit", "with", "message", "fix", "auth"}, &out); err != nil {
+		t.Fatalf("cmdGenerate --explain failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Generated Command:") || !strings.Contains(out.String(), `git commit -m "fix auth"`) {
+		t.Fatalf("unexpected explain output: %s", out.String())
+	}
+
+	// 3. JSON flag
+	out.Reset()
+	if err := cmdGenerate(ctx, cfg, client, []string{"--json", "check", "status"}, &out); err != nil {
+		t.Fatalf("cmdGenerate --json failed: %v", err)
+	}
+	var resMap map[string]any
+	if err := json.Unmarshal(out.Bytes(), &resMap); err != nil {
+		t.Fatalf("invalid json output: %v", err)
+	}
+	if resMap["command"] != "git status" {
+		t.Fatalf("expected 'git status', got %v", resMap["command"])
+	}
+
+	// 4. Missing instruction error
+	if err := cmdGenerate(ctx, cfg, client, []string{}, &out); err == nil {
+		t.Fatal("expected error on empty instruction")
+	}
+
+	// 5. Help flag
+	out.Reset()
+	if err := cmdGenerate(ctx, cfg, client, []string{"--help"}, &out); err != nil {
+		t.Fatalf("cmdGenerate --help failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Usage: cadence cmd") {
+		t.Fatalf("unexpected help output: %s", out.String())
+	}
+
+	// 6. Offline fallback (offline socket)
+	offlineClient := ipc.Client{Network: "unix", Address: "/nonexistent.sock"}
+	out.Reset()
+	if err := cmdGenerate(ctx, cfg, offlineClient, []string{"show", "diff"}, &out); err != nil {
+		t.Fatalf("offline fallback failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "git diff") {
+		t.Fatalf("expected offline fallback to generate 'git diff', got %s", out.String())
 	}
 }

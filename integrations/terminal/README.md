@@ -38,3 +38,4 @@ Or manually broadcast terminal context:
 ```bash
 cadence context set --editor terminal --shell zsh --pwd "$PWD" --cmd "go test ./..." --exit-code 0
 ```
+

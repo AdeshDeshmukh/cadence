@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -13,6 +15,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/audio"
 	"github.com/AdeshDeshmukh/cadence/internal/config"
 	appcontext "github.com/AdeshDeshmukh/cadence/internal/context"
+	"github.com/AdeshDeshmukh/cadence/internal/developer"
 	"github.com/AdeshDeshmukh/cadence/internal/edit"
 	"github.com/AdeshDeshmukh/cadence/internal/hotkey"
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
@@ -1741,5 +1744,59 @@ func TestApp_TerminalContextIPC(t *testing.T) {
 	afterMap := afterRes.(map[string]any)
 	if afterMap["active"] != false {
 		t.Fatalf("expected active=false after clear, got %+v", afterMap)
+	}
+}
+
+func TestApp_DevCommandGenerateIPC(t *testing.T) {
+	cfg := config.Default()
+	app := NewApp(cfg)
+	ctx := context.Background()
+
+	// 1. Missing instruction error
+	if _, err := app.Handle(ctx, ipc.Request{Method: "dev_command_generate"}); err == nil {
+		t.Fatal("expected error on missing instruction")
+	}
+
+	// 2. Set terminal working directory to a Go project
+	tmpDir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte("module test"), 0644)
+	app.TerminalContextManager().Set(appcontext.TerminalContext{
+		WorkingDir: tmpDir,
+	})
+
+	// 3. Generate "run the tests" - should use terminal context working dir
+	res, err := app.Handle(ctx, ipc.Request{
+		Method: "dev_command_generate",
+		Params: map[string]any{
+			"instruction": "run the tests",
+		},
+	})
+	if err != nil {
+		t.Fatalf("dev_command_generate failed: %v", err)
+	}
+	genCmd, ok := res.(developer.GeneratedCommand)
+	if !ok {
+		t.Fatalf("expected developer.GeneratedCommand, got %T", res)
+	}
+	if genCmd.Command != "go test -v ./..." {
+		t.Fatalf("expected 'go test -v ./...', got %q", genCmd.Command)
+	}
+	if genCmd.Ecosystem != developer.EcosystemGo {
+		t.Fatalf("expected ecosystem go, got %s", genCmd.Ecosystem)
+	}
+
+	// 4. Test git commit generation
+	resCommit, err := app.Handle(ctx, ipc.Request{
+		Method: "dev_command_generate",
+		Params: map[string]any{
+			"instruction": "git commit with message add new feature",
+		},
+	})
+	if err != nil {
+		t.Fatalf("dev_command_generate commit failed: %v", err)
+	}
+	commitCmd := resCommit.(developer.GeneratedCommand)
+	if commitCmd.Command != `git commit -m "add new feature"` {
+		t.Fatalf("expected git commit command, got %q", commitCmd.Command)
 	}
 }

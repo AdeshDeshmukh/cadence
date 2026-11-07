@@ -16,3 +16,4 @@ function _cadence_fish_postexec --on-event fish_postexec
         command cadence context set --editor terminal --shell fish --pid $fish_pid --pwd "$PWD" --exit-code $exit_code >/dev/null 2>&1 &
     end
 end
+

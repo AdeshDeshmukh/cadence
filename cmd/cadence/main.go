@@ -15,6 +15,7 @@ import (
 
 	"github.com/AdeshDeshmukh/cadence/internal/config"
 	appcontext "github.com/AdeshDeshmukh/cadence/internal/context"
+	"github.com/AdeshDeshmukh/cadence/internal/developer"
 	"github.com/AdeshDeshmukh/cadence/internal/edit"
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
 	"github.com/AdeshDeshmukh/cadence/internal/paste"
@@ -46,6 +47,7 @@ Commands:
   selection [flags]  Capture highlighted text from active application (Edit Mode)
   parse <text>       Parse voice edit instruction into intent and parameters
   edit <instruction> Execute voice edit on highlighted text or custom input
+  cmd <instruction>  Generate shell/CLI command from voice instruction (e.g. "run tests", "git commit...")
   context [show|set|clear] Show or manage developer/code editor context (file, language, selection)
   terminal [status|hook] Inspect terminal/shell context or generate shell integration hooks
   app                Show detected active foreground application and category
@@ -171,6 +173,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "terminal", "term":
 		if err := cmdTerminal(ctx, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "cmd", "dev", "command":
+		if err := cmdGenerate(ctx, cfg, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -1667,6 +1676,110 @@ function _cadence_fish_postexec --on-event fish_postexec
     end
 end
 `
+
+func cmdGenerate(ctx context.Context, cfg config.Config, client ipc.Client, args []string, out io.Writer) error {
+	jsonOutput := false
+	explain := false
+	pasteOutput := false
+	var workingDir string
+	var words []string
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-h", "--help":
+			fmt.Fprintln(out, `Usage: cadence cmd [flags] <voice-instruction>
+
+Translate natural language voice instructions into executable shell commands.
+
+Flags:
+  -j, --json     Output result as JSON
+  -e, --explain  Print human-readable explanation and metadata
+  -p, --paste    Paste the generated command into the active application
+  -d, --dir      Specify project working directory (default: active terminal or current dir)
+  -h, --help     Show this help message
+
+Examples:
+  cadence cmd "run the tests"
+  cadence cmd "git commit with message updated terminal context"
+  cadence cmd "create a new branch called feat voice auth"
+  cadence cmd --explain "install dependencies"`)
+			return nil
+		case "-j", "--json":
+			jsonOutput = true
+		case "-e", "--explain":
+			explain = true
+		case "-p", "--paste":
+			pasteOutput = true
+		case "-d", "--dir", "--pwd":
+			if i+1 < len(args) {
+				workingDir = args[i+1]
+				i++
+			}
+		default:
+			words = append(words, args[i])
+		}
+	}
+
+	instruction := strings.TrimSpace(strings.Join(words, " "))
+	if instruction == "" {
+		return errors.New("missing voice instruction for command generation (usage: cadence cmd <instruction>)")
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+
+	var result developer.GeneratedCommand
+
+	// 1. Try querying daemon over IPC
+	ipcRes, err := client.Call(callCtx, "dev_command_generate", map[string]any{
+		"instruction": instruction,
+		"working_dir": workingDir,
+	})
+
+	if err == nil {
+		if raw, mErr := json.Marshal(ipcRes); mErr == nil {
+			_ = json.Unmarshal(raw, &result)
+		}
+	} else {
+		// 2. Offline fallback generator
+		gen := developer.NewGenerator(nil)
+		result, err = gen.Generate(ctx, instruction, workingDir)
+		if err != nil {
+			return fmt.Errorf("generate command: %w", err)
+		}
+	}
+
+	// If paste requested
+	if pasteOutput {
+		paster := paste.NewDefaultCascade()
+		if _, pErr := paster.Paste(result.Command); pErr != nil {
+			return fmt.Errorf("paste command: %w", pErr)
+		}
+	}
+
+	if jsonOutput {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result)
+	}
+
+	if explain {
+		fmt.Fprintf(out, "Generated Command:\n  %s\n\n", result.Command)
+		fmt.Fprintf(out, "Details:\n")
+		fmt.Fprintf(out, "  Instruction: %s\n", result.RawInstruction)
+		if result.Ecosystem != "" && result.Ecosystem != developer.EcosystemUnknown {
+			fmt.Fprintf(out, "  Ecosystem:   %s\n", result.Ecosystem)
+		}
+		if result.Explanation != "" {
+			fmt.Fprintf(out, "  Explanation: %s\n", result.Explanation)
+		}
+		fmt.Fprintf(out, "  Source:      %s (confidence: %.2f)\n", result.Source, result.Confidence)
+		return nil
+	}
+
+	fmt.Fprintln(out, result.Command)
+	return nil
+}
 
 func cmdRoute(ctx context.Context, cfg config.Config, client ipc.Client, args []string, out io.Writer) error {
 	action := "list"
