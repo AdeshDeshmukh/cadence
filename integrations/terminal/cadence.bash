@@ -12,3 +12,4 @@ if [ -n "$BASH_VERSION" ]; then
     PROMPT_COMMAND="_cadence_bash_prompt;${PROMPT_COMMAND:-}"
   fi
 fi
+

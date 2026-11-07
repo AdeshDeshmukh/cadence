@@ -19,6 +19,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/audio"
 	"github.com/AdeshDeshmukh/cadence/internal/config"
 	appcontext "github.com/AdeshDeshmukh/cadence/internal/context"
+	"github.com/AdeshDeshmukh/cadence/internal/developer"
 	"github.com/AdeshDeshmukh/cadence/internal/edit"
 	"github.com/AdeshDeshmukh/cadence/internal/hotkey"
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
@@ -91,6 +92,7 @@ type App struct {
 	previewMgr      *edit.PreviewManager
 	editorContext   *appcontext.EditorContextManager
 	terminalContext *appcontext.TerminalContextManager
+	devGenerator    *developer.Generator
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -201,6 +203,11 @@ func WithEditorContextManager(m *appcontext.EditorContextManager) Option {
 // WithTerminalContextManager sets a custom terminal context manager.
 func WithTerminalContextManager(m *appcontext.TerminalContextManager) Option {
 	return func(a *App) { a.terminalContext = m }
+}
+
+// WithDevGenerator sets a custom developer command generator.
+func WithDevGenerator(g *developer.Generator) Option {
+	return func(a *App) { a.devGenerator = g }
 }
 
 // NewApp instantiates a fully configured Cadence daemon application.
@@ -367,6 +374,10 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 
 	if a.terminalContext == nil {
 		a.terminalContext = appcontext.NewTerminalContextManager()
+	}
+
+	if a.devGenerator == nil {
+		a.devGenerator = developer.NewGenerator(a.polisher)
 	}
 
 	if a.capture == nil {
@@ -662,6 +673,11 @@ func (a *App) EditorContextManager() *appcontext.EditorContextManager {
 // TerminalContextManager returns the active terminal context manager.
 func (a *App) TerminalContextManager() *appcontext.TerminalContextManager {
 	return a.terminalContext
+}
+
+// DevGenerator returns the active developer command generator.
+func (a *App) DevGenerator() *developer.Generator {
+	return a.devGenerator
 }
 
 // Router returns the active application context router.
@@ -1035,6 +1051,38 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			a.terminalContext.Clear()
 		}
 		return map[string]any{"status": "cleared"}, nil
+
+	case "dev_command_generate":
+		if a.devGenerator == nil {
+			return nil, errors.New("dev command generator is not configured")
+		}
+		var instruction, workingDir string
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if ins, ok := params["instruction"].(string); ok {
+				instruction = ins
+			}
+			if wd, ok := params["working_dir"].(string); ok {
+				workingDir = wd
+			}
+		}
+		if strings.TrimSpace(instruction) == "" {
+			return nil, errors.New("missing 'instruction' parameter for dev_command_generate")
+		}
+		if workingDir == "" && a.terminalContext != nil {
+			if tCtx, ok := a.terminalContext.Get(); ok && tCtx.WorkingDir != "" {
+				workingDir = tCtx.WorkingDir
+			}
+		}
+		if workingDir == "" && a.editorContext != nil {
+			if eCtx, ok := a.editorContext.Get(); ok && eCtx.WorkspaceRoot != "" {
+				workingDir = eCtx.WorkspaceRoot
+			}
+		}
+		cmdRes, err := a.devGenerator.Generate(ctx, instruction, workingDir)
+		if err != nil {
+			return nil, fmt.Errorf("generate dev command: %w", err)
+		}
+		return cmdRes, nil
 
 	case "selection_get":
 		var res selection.Result
