@@ -94,6 +94,7 @@ type App struct {
 	terminalContext  *appcontext.TerminalContextManager
 	devGenerator     *developer.Generator
 	devPreviewEngine *developer.PreviewEngine
+	gitAssistant     *developer.GitAssistant
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -214,6 +215,11 @@ func WithDevGenerator(g *developer.Generator) Option {
 // WithDevPreviewEngine sets a custom developer dry-run preview and execution engine.
 func WithDevPreviewEngine(e *developer.PreviewEngine) Option {
 	return func(a *App) { a.devPreviewEngine = e }
+}
+
+// WithGitAssistant sets a custom Git assistant.
+func WithGitAssistant(g *developer.GitAssistant) Option {
+	return func(a *App) { a.gitAssistant = g }
 }
 
 // NewApp instantiates a fully configured Cadence daemon application.
@@ -388,6 +394,10 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 
 	if a.devPreviewEngine == nil {
 		a.devPreviewEngine = developer.NewPreviewEngine()
+	}
+
+	if a.gitAssistant == nil {
+		a.gitAssistant = developer.NewGitAssistant(a.polisher)
 	}
 
 	if a.capture == nil {
@@ -693,6 +703,11 @@ func (a *App) DevGenerator() *developer.Generator {
 // DevPreviewEngine returns the active developer preview and execution engine.
 func (a *App) DevPreviewEngine() *developer.PreviewEngine {
 	return a.devPreviewEngine
+}
+
+// GitAssistant returns the active Git assistant.
+func (a *App) GitAssistant() *developer.GitAssistant {
+	return a.gitAssistant
 }
 
 // Router returns the active application context router.
@@ -1189,6 +1204,74 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			return res, fmt.Errorf("execute command: %w", err)
 		}
 		return res, nil
+
+	case "git_commit_generate":
+		if a.gitAssistant == nil {
+			return nil, errors.New("git assistant is not configured")
+		}
+		var workingDir, hint string
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if wd, ok := params["working_dir"].(string); ok {
+				workingDir = wd
+			}
+			if h, ok := params["spoken_hint"].(string); ok {
+				hint = h
+			}
+		}
+		if workingDir == "" && a.terminalContext != nil {
+			if tCtx, ok := a.terminalContext.Get(); ok && tCtx.WorkingDir != "" {
+				workingDir = tCtx.WorkingDir
+			}
+		}
+		if workingDir == "" && a.editorContext != nil {
+			if eCtx, ok := a.editorContext.Get(); ok && eCtx.WorkspaceRoot != "" {
+				workingDir = eCtx.WorkspaceRoot
+			}
+		}
+		commitRes, err := a.gitAssistant.GenerateCommit(ctx, developer.CommitGenRequest{
+			WorkingDir: workingDir,
+			SpokenHint: hint,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("generate git commit: %w", err)
+		}
+		return commitRes, nil
+
+	case "git_pr_generate":
+		if a.gitAssistant == nil {
+			return nil, errors.New("git assistant is not configured")
+		}
+		var workingDir, baseBranch, notes string
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if wd, ok := params["working_dir"].(string); ok {
+				workingDir = wd
+			}
+			if b, ok := params["base_branch"].(string); ok {
+				baseBranch = b
+			}
+			if n, ok := params["spoken_notes"].(string); ok {
+				notes = n
+			}
+		}
+		if workingDir == "" && a.terminalContext != nil {
+			if tCtx, ok := a.terminalContext.Get(); ok && tCtx.WorkingDir != "" {
+				workingDir = tCtx.WorkingDir
+			}
+		}
+		if workingDir == "" && a.editorContext != nil {
+			if eCtx, ok := a.editorContext.Get(); ok && eCtx.WorkspaceRoot != "" {
+				workingDir = eCtx.WorkspaceRoot
+			}
+		}
+		prRes, err := a.gitAssistant.GeneratePR(ctx, developer.PRGenRequest{
+			WorkingDir:  workingDir,
+			BaseBranch:  baseBranch,
+			SpokenNotes: notes,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("generate git PR: %w", err)
+		}
+		return prRes, nil
 
 	case "selection_get":
 		var res selection.Result

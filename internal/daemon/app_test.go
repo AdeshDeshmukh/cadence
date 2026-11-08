@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1923,5 +1924,70 @@ func TestApp_DevCommandPreviewAndExecuteIPC(t *testing.T) {
 	confirmResult := confirmExec.(developer.ExecutionResult)
 	if confirmResult.ExitCode != 0 {
 		t.Fatalf("expected exit code 0, got %d", confirmResult.ExitCode)
+	}
+}
+
+func TestApp_GitAssistantIPC(t *testing.T) {
+	cfg := config.Default()
+	app := NewApp(cfg)
+	ctx := context.Background()
+
+	// 1. Setup mock git repository
+	tmpDir := t.TempDir()
+	runCmd := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = tmpDir
+		_ = cmd.Run()
+	}
+	runCmd("init")
+	runCmd("checkout", "-B", "main")
+	runCmd("config", "user.name", "Tester")
+	runCmd("config", "user.email", "tester@test.local")
+	_ = os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("# Test Repo\n"), 0644)
+	runCmd("add", "README.md")
+	runCmd("commit", "-m", "chore: init")
+
+	// 2. Stage a file
+	_ = os.WriteFile(filepath.Join(tmpDir, "feature.go"), []byte("package main\n"), 0644)
+	runCmd("add", "feature.go")
+
+	// 3. Test git_commit_generate IPC
+	resCommit, err := app.Handle(ctx, ipc.Request{
+		Method: "git_commit_generate",
+		Params: map[string]any{
+			"working_dir": tmpDir,
+			"spoken_hint": "add main feature file",
+		},
+	})
+	if err != nil {
+		t.Fatalf("git_commit_generate failed: %v", err)
+	}
+	commitMsg, ok := resCommit.(developer.CommitMessage)
+	if !ok {
+		t.Fatalf("expected CommitMessage, got %T", resCommit)
+	}
+	if !strings.Contains(commitMsg.Title, "add main feature file") {
+		t.Fatalf("expected hint in title, got %s", commitMsg.Title)
+	}
+
+	// 4. Test git_pr_generate IPC
+	runCmd("commit", "-m", "feat: add feature file")
+	resPR, err := app.Handle(ctx, ipc.Request{
+		Method: "git_pr_generate",
+		Params: map[string]any{
+			"working_dir":  tmpDir,
+			"base_branch":  "HEAD~1",
+			"spoken_notes": "Implemented feature scaffold.",
+		},
+	})
+	if err != nil {
+		t.Fatalf("git_pr_generate failed: %v", err)
+	}
+	prDesc, ok := resPR.(developer.PRDescription)
+	if !ok {
+		t.Fatalf("expected PRDescription, got %T", resPR)
+	}
+	if !strings.Contains(prDesc.Body, "Overview") {
+		t.Fatalf("expected Overview in PR body, got %s", prDesc.Body)
 	}
 }
