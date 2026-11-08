@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -332,6 +333,26 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 		confirm, _ := params["confirm"].(bool)
 		engine := developer.NewPreviewEngine()
 		return engine.Execute(context.Background(), cmd, wd, confirm)
+	case "git_commit_generate":
+		params, _ := req.Params.(map[string]any)
+		wd, _ := params["working_dir"].(string)
+		hint, _ := params["spoken_hint"].(string)
+		assistant := developer.NewGitAssistant(nil)
+		return assistant.GenerateCommit(context.Background(), developer.CommitGenRequest{
+			WorkingDir: wd,
+			SpokenHint: hint,
+		})
+	case "git_pr_generate":
+		params, _ := req.Params.(map[string]any)
+		wd, _ := params["working_dir"].(string)
+		base, _ := params["base_branch"].(string)
+		notes, _ := params["spoken_notes"].(string)
+		assistant := developer.NewGitAssistant(nil)
+		return assistant.GeneratePR(context.Background(), developer.PRGenRequest{
+			WorkingDir:  wd,
+			BaseBranch:  base,
+			SpokenNotes: notes,
+		})
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -1552,5 +1573,95 @@ func TestCLI_Exec(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Usage: cadence exec") {
 		t.Fatalf("unexpected help text: %s", out.String())
+	}
+}
+
+func TestCLI_Git(t *testing.T) {
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("cad_git_%d.sock", time.Now().UnixNano()))
+	cleanup := startMockDaemon(t, sockPath)
+	defer cleanup()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sockPath,
+	}
+	ctx := context.Background()
+
+	// 1. Setup mock repo
+	tmpDir := t.TempDir()
+	runCmd := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = tmpDir
+		_ = cmd.Run()
+	}
+	runCmd("init")
+	runCmd("config", "user.name", "Tester")
+	runCmd("config", "user.email", "test@test.local")
+	_ = os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("# Initial\n"), 0644)
+	runCmd("add", "README.md")
+	runCmd("commit", "-m", "chore: init")
+
+	var out, errOut bytes.Buffer
+
+	// 2. Help output
+	if err := cmdGit(ctx, client, []string{"--help"}, &out, &errOut); err != nil {
+		t.Fatalf("cmdGit --help failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Usage: cadence git") {
+		t.Fatalf("unexpected git help text: %s", out.String())
+	}
+
+	// 3. Commit with no staged changes should fail
+	out.Reset()
+	if err := cmdGit(ctx, client, []string{"commit", "--dir", tmpDir}, &out, &errOut); err == nil {
+		t.Fatal("expected error on empty staged changes")
+	}
+
+	// 4. Commit with staged change and hint
+	_ = os.WriteFile(filepath.Join(tmpDir, "service.go"), []byte("package service\n"), 0644)
+	runCmd("add", "service.go")
+
+	out.Reset()
+	if err := cmdGit(ctx, client, []string{"commit", "--dir", tmpDir, "--hint", "implement service registry"}, &out, &errOut); err != nil {
+		t.Fatalf("cmdGit commit failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "implement service registry") {
+		t.Fatalf("expected hint in commit output: %s", out.String())
+	}
+
+	// 5. Commit with --json
+	out.Reset()
+	if err := cmdGit(ctx, client, []string{"commit", "--dir", tmpDir, "--json", "quick fix"}, &out, &errOut); err != nil {
+		t.Fatalf("cmdGit commit --json failed: %v", err)
+	}
+	var commitMap map[string]any
+	if err := json.Unmarshal(out.Bytes(), &commitMap); err != nil {
+		t.Fatalf("invalid json commit output: %v", err)
+	}
+	if commitMap["title"] == nil {
+		t.Fatalf("expected title in json commit: %+v", commitMap)
+	}
+
+	// 6. PR command
+	runCmd("commit", "-m", "feat(service): implement service registry")
+	out.Reset()
+	if err := cmdGit(ctx, client, []string{"pr", "--dir", tmpDir, "--base", "HEAD~1", "--notes", "Added service registry."}, &out, &errOut); err != nil {
+		t.Fatalf("cmdGit pr failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Title:") || !strings.Contains(out.String(), "Overview") {
+		t.Fatalf("unexpected PR output: %s", out.String())
+	}
+
+	// 7. PR with --json
+	out.Reset()
+	if err := cmdGit(ctx, client, []string{"pr", "--dir", tmpDir, "--base", "HEAD~1", "--json"}, &out, &errOut); err != nil {
+		t.Fatalf("cmdGit pr --json failed: %v", err)
+	}
+	var prMap map[string]any
+	if err := json.Unmarshal(out.Bytes(), &prMap); err != nil {
+		t.Fatalf("invalid json PR output: %v", err)
+	}
+	if prMap["title"] == nil || prMap["body"] == nil {
+		t.Fatalf("expected title and body in json PR: %+v", prMap)
 	}
 }

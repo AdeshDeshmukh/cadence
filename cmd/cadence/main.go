@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -51,6 +52,7 @@ Commands:
   cmd <instruction>  Generate shell/CLI command from voice instruction (e.g. "run tests", "git commit...")
   exec <command>     Safely execute shell command with dry-run preview and confirmation guard
   risk <command>     Audit and classify shell command risk level (Safe, Risky, Destructive)
+  git <subcommand>   Git AI integration: commit message and PR description generation (commit, pr)
   context [show|set|clear] Show or manage developer/code editor context (file, language, selection)
   terminal [status|hook] Inspect terminal/shell context or generate shell integration hooks
   app                Show detected active foreground application and category
@@ -197,6 +199,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "risk", "classify":
 		if err := cmdRisk(ctx, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "git":
+		if err := cmdGit(ctx, client, args[1:], stdout, stderr); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -2064,6 +2073,252 @@ Examples:
 	if len(assessment.HighlightedTokens) > 0 {
 		fmt.Fprintf(out, "Key Tokens:   %s\n", strings.Join(assessment.HighlightedTokens, ", "))
 	}
+	return nil
+}
+
+func cmdGit(ctx context.Context, client ipc.Client, args []string, out, errOut io.Writer) error {
+	if len(args) == 0 {
+		fmt.Fprintln(out, `Usage: cadence git <subcommand> [flags]
+
+AI-driven Git integrations powered by staged diffs, commit deltas, and voice hints.
+
+Subcommands:
+  commit [flags] [hint...]  Generate Conventional Commit message from staged changes
+  pr [flags] [notes...]     Generate Pull Request title and Markdown description
+
+Flags:
+  -h, --help                Show this help message
+
+Run 'cadence git <subcommand> --help' for details on specific commands.`)
+		return nil
+	}
+
+	switch args[0] {
+	case "commit":
+		return cmdGitCommit(ctx, client, args[1:], out)
+	case "pr":
+		return cmdGitPR(ctx, client, args[1:], out)
+	case "-h", "--help", "help":
+		fmt.Fprintln(out, `Usage: cadence git <subcommand> [flags]
+
+Subcommands:
+  commit [flags] [hint...]  Generate Conventional Commit message from staged changes
+  pr [flags] [notes...]     Generate Pull Request title and Markdown description`)
+		return nil
+	default:
+		return fmt.Errorf("unknown git subcommand '%s' (available: commit, pr)", args[0])
+	}
+}
+
+func cmdGitCommit(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	jsonOutput := false
+	pasteOutput := false
+	apply := false
+	var workingDir, hint string
+	var words []string
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-h", "--help":
+			fmt.Fprintln(out, `Usage: cadence git commit [flags] [spoken-hint...]
+
+Generate a Conventional Commit message from staged Git changes and optional voice hints.
+
+Flags:
+  -m, --hint     Provide spoken voice hint / instruction for the commit message
+  -a, --apply    Immediately execute 'git commit' with the generated message
+  -p, --paste    Paste the commit message into the active application
+  -d, --dir      Specify repository working directory (default: current directory)
+  -j, --json     Output message as JSON
+  -h, --help     Show this help message
+
+Examples:
+  cadence git commit
+  cadence git commit "fix auth token expiration bug"
+  cadence git commit --hint "refactor storage layer" --apply
+  cadence git commit --json`)
+			return nil
+		case "-j", "--json":
+			jsonOutput = true
+		case "-p", "--paste":
+			pasteOutput = true
+		case "-a", "--apply":
+			apply = true
+		case "-m", "--hint":
+			if i+1 < len(args) {
+				hint = args[i+1]
+				i++
+			}
+		case "-d", "--dir", "--pwd":
+			if i+1 < len(args) {
+				workingDir = args[i+1]
+				i++
+			}
+		default:
+			words = append(words, args[i])
+		}
+	}
+
+	if hint == "" && len(words) > 0 {
+		hint = strings.TrimSpace(strings.Join(words, " "))
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	var msg developer.CommitMessage
+	ipcRes, err := client.Call(callCtx, "git_commit_generate", map[string]any{
+		"working_dir": workingDir,
+		"spoken_hint": hint,
+	})
+	if err == nil {
+		if raw, mErr := json.Marshal(ipcRes); mErr == nil {
+			_ = json.Unmarshal(raw, &msg)
+		}
+	} else {
+		assistant := developer.NewGitAssistant(nil)
+		msg, err = assistant.GenerateCommit(ctx, developer.CommitGenRequest{
+			WorkingDir: workingDir,
+			SpokenHint: hint,
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	if apply {
+		targetDir := workingDir
+		if targetDir == "" {
+			if wd, gErr := os.Getwd(); gErr == nil {
+				targetDir = wd
+			}
+		}
+		var commitCmd *exec.Cmd
+		if msg.Body != "" {
+			commitCmd = exec.CommandContext(ctx, "git", "commit", "-m", msg.Title, "-m", msg.Body)
+		} else {
+			commitCmd = exec.CommandContext(ctx, "git", "commit", "-m", msg.Title)
+		}
+		commitCmd.Dir = targetDir
+		outBytes, cErr := commitCmd.CombinedOutput()
+		if cErr != nil {
+			return fmt.Errorf("git commit failed: %w (output: %s)", cErr, string(outBytes))
+		}
+		fmt.Fprintf(out, "Committed successfully:\n%s\n", strings.TrimSpace(string(outBytes)))
+		return nil
+	}
+
+	if pasteOutput {
+		paster := paste.NewDefaultCascade()
+		if _, pErr := paster.Paste(msg.FullMessage); pErr != nil {
+			return fmt.Errorf("paste commit message: %w", pErr)
+		}
+	}
+
+	if jsonOutput {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(msg)
+	}
+
+	fmt.Fprintln(out, msg.FullMessage)
+	return nil
+}
+
+func cmdGitPR(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	jsonOutput := false
+	pasteOutput := false
+	var workingDir, baseBranch, notes string
+	var words []string
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-h", "--help":
+			fmt.Fprintln(out, `Usage: cadence git pr [flags] [notes...]
+
+Generate a Pull Request title and Markdown description from branch commit deltas and voice notes.
+
+Flags:
+  -b, --base     Base branch to compare against (default: origin/main or main)
+  -n, --notes    Voice notes / summary for the pull request description
+  -p, --paste    Paste the PR description into the active application
+  -d, --dir      Specify repository working directory (default: current directory)
+  -j, --json     Output PR description as JSON
+  -h, --help     Show this help message
+
+Examples:
+  cadence git pr
+  cadence git pr --notes "Implements JWT auth and token caching"
+  cadence git pr --base develop --json`)
+			return nil
+		case "-j", "--json":
+			jsonOutput = true
+		case "-p", "--paste":
+			pasteOutput = true
+		case "-b", "--base":
+			if i+1 < len(args) {
+				baseBranch = args[i+1]
+				i++
+			}
+		case "-n", "--notes":
+			if i+1 < len(args) {
+				notes = args[i+1]
+				i++
+			}
+		case "-d", "--dir", "--pwd":
+			if i+1 < len(args) {
+				workingDir = args[i+1]
+				i++
+			}
+		default:
+			words = append(words, args[i])
+		}
+	}
+
+	if notes == "" && len(words) > 0 {
+		notes = strings.TrimSpace(strings.Join(words, " "))
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	var pr developer.PRDescription
+	ipcRes, err := client.Call(callCtx, "git_pr_generate", map[string]any{
+		"working_dir":  workingDir,
+		"base_branch":  baseBranch,
+		"spoken_notes": notes,
+	})
+	if err == nil {
+		if raw, mErr := json.Marshal(ipcRes); mErr == nil {
+			_ = json.Unmarshal(raw, &pr)
+		}
+	} else {
+		assistant := developer.NewGitAssistant(nil)
+		pr, err = assistant.GeneratePR(ctx, developer.PRGenRequest{
+			WorkingDir:  workingDir,
+			BaseBranch:  baseBranch,
+			SpokenNotes: notes,
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	if pasteOutput {
+		paster := paste.NewDefaultCascade()
+		fullContent := fmt.Sprintf("# %s\n\n%s", pr.Title, pr.Body)
+		if _, pErr := paster.Paste(fullContent); pErr != nil {
+			return fmt.Errorf("paste PR description: %w", pErr)
+		}
+	}
+
+	if jsonOutput {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(pr)
+	}
+
+	fmt.Fprintf(out, "Title: %s\n\n%s\n", pr.Title, pr.Body)
 	return nil
 }
 
