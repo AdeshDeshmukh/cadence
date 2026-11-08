@@ -353,6 +353,20 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 			BaseBranch:  base,
 			SpokenNotes: notes,
 		})
+	case "dev_code_format":
+		params, _ := req.Params.(map[string]any)
+		text, _ := params["text"].(string)
+		style, _ := params["style"].(string)
+		lang, _ := params["language"].(string)
+		isDoc, _ := params["is_docstring"].(bool)
+		acr, _ := params["preserve_acronyms"].(bool)
+		return developer.FormatCode(developer.CodeFormatRequest{
+			Text:             text,
+			Style:            developer.CasingStyle(style),
+			Language:         lang,
+			IsDocstring:      isDoc,
+			PreserveAcronyms: acr,
+		}), nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -1664,5 +1678,82 @@ func TestCLI_Git(t *testing.T) {
 	}
 	if prMap["title"] == nil || prMap["body"] == nil {
 		t.Fatalf("expected title and body in json PR: %+v", prMap)
+	}
+}
+
+func TestCLI_Code(t *testing.T) {
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("cad_code_%d.sock", time.Now().UnixNano()))
+	cleanup := startMockDaemon(t, sockPath)
+	defer cleanup()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sockPath,
+	}
+	ctx := context.Background()
+
+	var out bytes.Buffer
+
+	// 1. Basic casing conversion via flag
+	if err := cmdCode(ctx, client, []string{"--case", "snake", "max", "retry", "limit"}, &out); err != nil {
+		t.Fatalf("cmdCode snake failed: %v", err)
+	}
+	if strings.TrimSpace(out.String()) != "max_retry_limit" {
+		t.Fatalf("expected max_retry_limit, got %s", out.String())
+	}
+
+	// 2. Voice trigger prefix auto-detection
+	out.Reset()
+	if err := cmdCode(ctx, client, []string{"camel", "case", "user", "profile", "account"}, &out); err != nil {
+		t.Fatalf("cmdCode camel failed: %v", err)
+	}
+	if strings.TrimSpace(out.String()) != "userProfileAccount" {
+		t.Fatalf("expected userProfileAccount, got %s", out.String())
+	}
+
+	// 3. Constant case
+	out.Reset()
+	if err := cmdCode(ctx, client, []string{"constant", "case", "default", "timeout", "seconds"}, &out); err != nil {
+		t.Fatalf("cmdCode constant failed: %v", err)
+	}
+	if strings.TrimSpace(out.String()) != "DEFAULT_TIMEOUT_SECONDS" {
+		t.Fatalf("expected DEFAULT_TIMEOUT_SECONDS, got %s", out.String())
+	}
+
+	// 4. Docstring formatting
+	out.Reset()
+	if err := cmdCode(ctx, client, []string{"--doc", "--lang", "go", "StartListener", "initializes", "the", "IPC", "socket."}, &out); err != nil {
+		t.Fatalf("cmdCode docstring failed: %v", err)
+	}
+	if !strings.HasPrefix(out.String(), "//") {
+		t.Fatalf("expected Go docstring comment prefix, got %s", out.String())
+	}
+
+	// 5. JSON output
+	out.Reset()
+	if err := cmdCode(ctx, client, []string{"--json", "--case", "kebab", "api", "route", "handler"}, &out); err != nil {
+		t.Fatalf("cmdCode json failed: %v", err)
+	}
+	var resMap map[string]any
+	if err := json.Unmarshal(out.Bytes(), &resMap); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if resMap["result"] != "api-route-handler" {
+		t.Fatalf("expected api-route-handler in json, got %v", resMap["result"])
+	}
+
+	// 6. Help flag
+	out.Reset()
+	if err := cmdCode(ctx, client, []string{"--help"}, &out); err != nil {
+		t.Fatalf("cmdCode help failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Usage: cadence code") {
+		t.Fatalf("unexpected help text: %s", out.String())
+	}
+
+	// 7. Missing text error
+	out.Reset()
+	if err := cmdCode(ctx, client, []string{}, &out); err == nil {
+		t.Fatal("expected error on empty text")
 	}
 }

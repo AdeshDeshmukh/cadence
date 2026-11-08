@@ -53,6 +53,7 @@ Commands:
   exec <command>     Safely execute shell command with dry-run preview and confirmation guard
   risk <command>     Audit and classify shell command risk level (Safe, Risky, Destructive)
   git <subcommand>   Git AI integration: commit message and PR description generation (commit, pr)
+  code [flags] <words> Format code identifiers (snake, camel, pascal, kebab) and docstrings
   context [show|set|clear] Show or manage developer/code editor context (file, language, selection)
   terminal [status|hook] Inspect terminal/shell context or generate shell integration hooks
   app                Show detected active foreground application and category
@@ -206,6 +207,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "git":
 		if err := cmdGit(ctx, client, args[1:], stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "code", "casing":
+		if err := cmdCode(ctx, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -2319,6 +2327,113 @@ Examples:
 	}
 
 	fmt.Fprintf(out, "Title: %s\n\n%s\n", pr.Title, pr.Body)
+	return nil
+}
+
+func cmdCode(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	jsonOutput := false
+	pasteOutput := false
+	isDoc := false
+	acr := false
+	var style, lang string
+	var words []string
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-h", "--help":
+			fmt.Fprintln(out, `Usage: cadence code [flags] <words...>
+
+Transform spoken words into formatted code identifiers, operators, or docstrings.
+
+Flags:
+  -c, --case     Target casing: snake, camel, pascal, kebab, constant, dot, or auto (default: auto)
+  -l, --lang     Programming language for docstrings (e.g. go, python, ts, rust)
+  -d, --doc      Format input as language-specific docstring comment block
+      --acr      Preserve developer acronyms (e.g. URL, HTTP, ID, JSON)
+  -p, --paste    Paste formatted result into the active application
+  -j, --json     Output result as JSON
+  -h, --help     Show this help message
+
+Voice Casing Triggers (auto-detected):
+  "snake case user id"           -> user_id
+  "camel case get account"       -> getAccount
+  "pascal case token provider"   -> TokenProvider
+  "kebab case api route"         -> api-route
+  "constant case max limit"      -> MAX_LIMIT
+
+Examples:
+  cadence code "snake case user account id"
+  cadence code --case camel "get auth token"
+  cadence code --case constant "max buffer size"
+  cadence code --doc --lang go "Run starts the background worker."`)
+			return nil
+		case "-j", "--json":
+			jsonOutput = true
+		case "-p", "--paste":
+			pasteOutput = true
+		case "-d", "--doc", "--docstring":
+			isDoc = true
+		case "--acr", "--acronyms":
+			acr = true
+		case "-c", "--case", "--style":
+			if i+1 < len(args) {
+				style = args[i+1]
+				i++
+			}
+		case "-l", "--lang", "--language":
+			if i+1 < len(args) {
+				lang = args[i+1]
+				i++
+			}
+		default:
+			words = append(words, args[i])
+		}
+	}
+
+	text := strings.TrimSpace(strings.Join(words, " "))
+	if text == "" {
+		return errors.New("missing text for code formatting (usage: cadence code [flags] <words...>)")
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+
+	var result developer.CodeFormatResult
+	ipcRes, err := client.Call(callCtx, "dev_code_format", map[string]any{
+		"text":              text,
+		"style":             style,
+		"language":          lang,
+		"is_docstring":      isDoc,
+		"preserve_acronyms": acr,
+	})
+	if err == nil {
+		if raw, mErr := json.Marshal(ipcRes); mErr == nil {
+			_ = json.Unmarshal(raw, &result)
+		}
+	} else {
+		result = developer.FormatCode(developer.CodeFormatRequest{
+			Text:             text,
+			Style:            developer.CasingStyle(style),
+			Language:         lang,
+			IsDocstring:      isDoc,
+			PreserveAcronyms: acr,
+		})
+	}
+
+	if pasteOutput {
+		paster := paste.NewDefaultCascade()
+		if _, pErr := paster.Paste(result.Result); pErr != nil {
+			return fmt.Errorf("paste code format result: %w", pErr)
+		}
+	}
+
+	if jsonOutput {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result)
+	}
+
+	fmt.Fprintln(out, result.Result)
 	return nil
 }
 
