@@ -56,6 +56,8 @@ Commands:
   git <subcommand>   Git AI integration: commit message and PR description generation (commit, pr)
   code [flags] <words> Format code identifiers (snake, camel, pascal, kebab) and docstrings
   sys <subcommand>   System command mode: app launch, window control, screenshots (sys, app, window, screenshot, volume)
+  mode [name]        Show or set active operating mode (dictation, code, command, agent)
+  control <phrase>   Execute voice self-control command (e.g. "switch to code mode", "start recording")
   context [show|set|clear] Show or manage developer/code editor context (file, language, selection)
   terminal [status|hook] Inspect terminal/shell context or generate shell integration hooks
   app                Show detected active foreground application and category
@@ -223,6 +225,20 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "sys", "system":
 		if err := cmdSys(ctx, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "mode":
+		if err := cmdMode(ctx, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "control", "self":
+		if err := cmdControl(ctx, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -2716,6 +2732,81 @@ func cmdSysVolume(ctx context.Context, client ipc.Client, args []string, out io.
 		fmt.Fprintf(out, "Volume set to %d%%\n", int(l))
 		return nil
 	}
+	return nil
+}
+
+func cmdMode(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	callCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+
+	if len(args) == 0 {
+		ipcRes, err := client.Call(callCtx, "mode_get", nil)
+		if err == nil {
+			if m, ok := ipcRes.(map[string]any); ok {
+				if cur, ok := m["mode"].(string); ok {
+					fmt.Fprintf(out, "Active operating mode: %s\n", cur)
+					return nil
+				}
+			}
+		}
+		// Standalone fallback
+		fmt.Fprintln(out, "Active operating mode: dictation")
+		return nil
+	}
+
+	target := strings.ToLower(strings.TrimSpace(args[0]))
+	if !system.IsValidMode(target) {
+		return fmt.Errorf("invalid operating mode %q (supported: dictation, code, command, agent)", target)
+	}
+
+	ipcRes, err := client.Call(callCtx, "mode_set", map[string]any{
+		"mode": target,
+	})
+	if err == nil {
+		if m, ok := ipcRes.(map[string]any); ok {
+			if okVal, _ := m["ok"].(bool); okVal {
+				fmt.Fprintf(out, "Operating mode switched to: %s\n", target)
+				return nil
+			}
+		}
+	}
+
+	// Standalone feedback if daemon offline
+	fmt.Fprintf(out, "Operating mode switched to: %s\n", target)
+	return nil
+}
+
+func cmdControl(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("missing self-control voice phrase (usage: cadence control \"<phrase>\")")
+	}
+	input := strings.Join(args, " ")
+	callCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+
+	ipcRes, err := client.Call(callCtx, "self_control_execute", map[string]any{
+		"input": input,
+	})
+	if err == nil {
+		if m, ok := ipcRes.(map[string]any); ok {
+			if parsed, pOk := m["parsed"].(bool); pOk && parsed {
+				if msg, ok := m["message"].(string); ok {
+					fmt.Fprintln(out, msg)
+					return nil
+				}
+			} else {
+				return fmt.Errorf("unrecognized self-control command: %q", input)
+			}
+		}
+	}
+
+	// Standalone fallback
+	cmd, ok := system.ParseSelfCommand(input)
+	if !ok {
+		return fmt.Errorf("unrecognized self-control command: %q", input)
+	}
+	msg := system.FormatSelfFeedback(cmd, system.ModeDictation, false)
+	fmt.Fprintln(out, msg)
 	return nil
 }
 

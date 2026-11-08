@@ -97,6 +97,7 @@ type App struct {
 	devPreviewEngine *developer.PreviewEngine
 	gitAssistant     *developer.GitAssistant
 	systemCtrl       system.Controller
+	mode             system.OperatingMode
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -227,6 +228,11 @@ func WithGitAssistant(g *developer.GitAssistant) Option {
 // WithSystemController sets a custom desktop system automation controller.
 func WithSystemController(c system.Controller) Option {
 	return func(a *App) { a.systemCtrl = c }
+}
+
+// WithOperatingMode sets the initial operating mode.
+func WithOperatingMode(m system.OperatingMode) Option {
+	return func(a *App) { a.mode = m }
 }
 
 // NewApp instantiates a fully configured Cadence daemon application.
@@ -411,6 +417,10 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 		a.systemCtrl = system.NewDefaultController()
 	}
 
+	if a.mode == "" {
+		a.mode = system.ModeDictation
+	}
+
 	if a.capture == nil {
 		a.capture = audio.NewEngine(
 			audio.WithSampleRate(cfg.Audio.SampleRate),
@@ -559,7 +569,11 @@ func (a *App) startDictation() {
 	sess := pipeline.NewSession(sessID)
 	a.activeSess = sess
 
-	sessCtx, cancel := context.WithCancel(a.ctx)
+	parentCtx := a.ctx
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	sessCtx, cancel := context.WithCancel(parentCtx)
 	a.activeCancel = cancel
 	a.mu.Unlock()
 
@@ -624,7 +638,7 @@ func (a *App) startDictation() {
 		}
 
 		pc := postprocess.Context{
-			Mode:       "dictation",
+			Mode:       string(a.Mode()),
 			Vocabulary: vocabMap,
 			Snippets:   snippetMap,
 		}
@@ -659,6 +673,22 @@ func (a *App) stopDictation() {
 	a.stopRequested = true
 	a.mu.Unlock()
 
+	_ = a.capture.Stop()
+}
+
+func (a *App) cancelDictation() {
+	a.mu.Lock()
+	if !a.isRecording {
+		a.mu.Unlock()
+		return
+	}
+	a.stopRequested = true
+	cancel := a.activeCancel
+	a.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
 	_ = a.capture.Stop()
 }
 
@@ -724,6 +754,23 @@ func (a *App) GitAssistant() *developer.GitAssistant {
 // SystemController returns the active system controller.
 func (a *App) SystemController() system.Controller {
 	return a.systemCtrl
+}
+
+// Mode returns the current active operating mode of Cadence.
+func (a *App) Mode() system.OperatingMode {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.mode == "" {
+		return system.ModeDictation
+	}
+	return a.mode
+}
+
+// SetMode transitions the active operating mode.
+func (a *App) SetMode(m system.OperatingMode) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.mode = m
 }
 
 // Router returns the active application context router.
@@ -931,6 +978,7 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			"shortcut":           a.cfg.Hotkey.Shortcut,
 			"undo_shortcut":      a.cfg.Hotkey.UndoShortcut,
 			"mode":               a.cfg.Hotkey.Mode,
+			"operating_mode":     string(a.Mode()),
 			"polish_enabled":     a.cfg.Polish.Enabled,
 			"polish_backend":     a.cfg.Polish.Backend,
 			"polish_model":       a.cfg.Polish.Model,
@@ -1493,6 +1541,75 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 		return map[string]any{
 			"success": true,
 			"message": msg,
+		}, nil
+
+	case "mode_get":
+		return map[string]any{
+			"mode":            string(a.Mode()),
+			"supported_modes": system.ValidModes(),
+		}, nil
+
+	case "mode_set":
+		var target string
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if m, ok := params["mode"].(string); ok {
+				target = m
+			}
+		}
+		if !system.IsValidMode(target) {
+			return nil, fmt.Errorf("invalid operating mode: %q (supported: dictation, code, command, agent)", target)
+		}
+		a.SetMode(system.OperatingMode(strings.ToLower(strings.TrimSpace(target))))
+		return map[string]any{
+			"ok":   true,
+			"mode": string(a.Mode()),
+		}, nil
+
+	case "self_control_execute":
+		var input string
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if in, ok := params["input"].(string); ok {
+				input = in
+			}
+		}
+		if strings.TrimSpace(input) == "" {
+			return nil, errors.New("missing 'input' parameter for self_control_execute")
+		}
+		cmd, ok := system.ParseSelfCommand(input)
+		if !ok {
+			return map[string]any{
+				"parsed":  false,
+				"message": fmt.Sprintf("unrecognized self-control command: %q", input),
+			}, nil
+		}
+
+		switch cmd.Action {
+		case system.ActionStartRecording:
+			a.startDictation()
+		case system.ActionStopRecording:
+			a.stopDictation()
+		case system.ActionCancelRecording:
+			a.cancelDictation()
+		case system.ActionSwitchMode:
+			a.SetMode(cmd.TargetMode)
+		case system.ActionQueryStatus:
+			// no-op, status reported in feedback
+		case system.ActionMute:
+			if a.systemCtrl != nil {
+				_ = a.systemCtrl.MuteVolume(ctx, true)
+			}
+		case system.ActionUnmute:
+			if a.systemCtrl != nil {
+				_ = a.systemCtrl.MuteVolume(ctx, false)
+			}
+		}
+
+		return map[string]any{
+			"parsed":       true,
+			"command":      cmd,
+			"current_mode": string(a.Mode()),
+			"is_recording": a.IsRecording(),
+			"message":      system.FormatSelfFeedback(cmd, a.Mode(), a.IsRecording()),
 		}, nil
 
 	case "selection_get":

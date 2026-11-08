@@ -2167,3 +2167,128 @@ func TestApp_SystemEndpoints(t *testing.T) {
 		t.Fatalf("volume mismatch: vol=%d muted=%v", mockCtrl.Volume, mockCtrl.Muted)
 	}
 }
+
+func TestApp_SelfControlIPC(t *testing.T) {
+	mockCtrl := system.NewMockController()
+	cfg := config.Default()
+	app := NewApp(cfg, WithSystemController(mockCtrl))
+	ctx := context.Background()
+
+	// 1. Initial mode
+	res, err := app.Handle(ctx, ipc.Request{Method: "mode_get"})
+	if err != nil {
+		t.Fatalf("mode_get failed: %v", err)
+	}
+	mMap := res.(map[string]any)
+	if mMap["mode"] != "dictation" {
+		t.Fatalf("expected initial mode dictation, got %v", mMap["mode"])
+	}
+
+	// 2. Explicit mode_set
+	res, err = app.Handle(ctx, ipc.Request{
+		Method: "mode_set",
+		Params: map[string]any{"mode": "code"},
+	})
+	if err != nil {
+		t.Fatalf("mode_set code failed: %v", err)
+	}
+	if app.Mode() != system.ModeCode {
+		t.Fatalf("expected app mode code, got %s", app.Mode())
+	}
+
+	// 3. mode_set invalid error
+	_, err = app.Handle(ctx, ipc.Request{
+		Method: "mode_set",
+		Params: map[string]any{"mode": "hyperdrive"},
+	})
+	if err == nil {
+		t.Fatalf("expected error on invalid mode")
+	}
+
+	// 4. self_control_execute switch mode
+	res, err = app.Handle(ctx, ipc.Request{
+		Method: "self_control_execute",
+		Params: map[string]any{"input": "cadence switch to command mode"},
+	})
+	if err != nil {
+		t.Fatalf("self_control_execute switch mode failed: %v", err)
+	}
+	sMap := res.(map[string]any)
+	if sMap["parsed"] != true || app.Mode() != system.ModeCommand {
+		t.Fatalf("expected mode command, got parsed=%v mode=%v", sMap["parsed"], app.Mode())
+	}
+	if !strings.Contains(sMap["message"].(string), "command mode") {
+		t.Fatalf("unexpected message: %v", sMap["message"])
+	}
+
+	// 5. self_control_execute query status
+	res, err = app.Handle(ctx, ipc.Request{
+		Method: "self_control_execute",
+		Params: map[string]any{"input": "what mode are you in?"},
+	})
+	if err != nil {
+		t.Fatalf("self_control_execute query status failed: %v", err)
+	}
+	qMap := res.(map[string]any)
+	if !strings.Contains(qMap["message"].(string), "command mode") {
+		t.Fatalf("expected status message with command mode, got %v", qMap["message"])
+	}
+
+	// 6. self_control_execute mute / unmute
+	_, err = app.Handle(ctx, ipc.Request{
+		Method: "self_control_execute",
+		Params: map[string]any{"input": "mute cadence"},
+	})
+	if err != nil {
+		t.Fatalf("self_control_execute mute failed: %v", err)
+	}
+	if !mockCtrl.Muted {
+		t.Fatalf("expected mock controller muted")
+	}
+
+	_, err = app.Handle(ctx, ipc.Request{
+		Method: "self_control_execute",
+		Params: map[string]any{"input": "unmute microphone"},
+	})
+	if err != nil {
+		t.Fatalf("self_control_execute unmute failed: %v", err)
+	}
+	if mockCtrl.Muted {
+		t.Fatalf("expected mock controller unmuted")
+	}
+
+	// 7. self_control_execute recording lifecycle
+	_, err = app.Handle(ctx, ipc.Request{
+		Method: "self_control_execute",
+		Params: map[string]any{"input": "start recording"},
+	})
+	if err != nil {
+		t.Fatalf("start recording failed: %v", err)
+	}
+
+	_, err = app.Handle(ctx, ipc.Request{
+		Method: "self_control_execute",
+		Params: map[string]any{"input": "cancel recording"},
+	})
+	if err != nil {
+		t.Fatalf("cancel recording failed: %v", err)
+	}
+
+	// 8. self_control_execute error handling
+	_, err = app.Handle(ctx, ipc.Request{Method: "self_control_execute"})
+	if err == nil {
+		t.Fatalf("expected error on missing input")
+	}
+
+	unrec, err := app.Handle(ctx, ipc.Request{
+		Method: "self_control_execute",
+		Params: map[string]any{"input": "unrelated rambling phrase"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error on unrecognized input: %v", err)
+	}
+	uMap := unrec.(map[string]any)
+	if uMap["parsed"] != false {
+		t.Fatalf("expected parsed false, got %v", uMap)
+	}
+}

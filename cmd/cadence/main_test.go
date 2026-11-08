@@ -410,6 +410,21 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 			return map[string]any{"success": true, "message": fmt.Sprintf("Volume set to %d%%", int(l))}, nil
 		}
 		return map[string]any{"success": true, "message": "Volume unchanged"}, nil
+	case "mode_get":
+		return map[string]any{"mode": "dictation", "supported_modes": system.ValidModes()}, nil
+	case "mode_set":
+		params, _ := req.Params.(map[string]any)
+		m, _ := params["mode"].(string)
+		return map[string]any{"ok": true, "mode": m}, nil
+	case "self_control_execute":
+		params, _ := req.Params.(map[string]any)
+		input, _ := params["input"].(string)
+		cmd, ok := system.ParseSelfCommand(input)
+		if !ok {
+			return map[string]any{"parsed": false, "message": "unrecognized self-control command"}, nil
+		}
+		msg := system.FormatSelfFeedback(cmd, system.ModeDictation, false)
+		return map[string]any{"parsed": true, "command": cmd, "message": msg}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -1806,13 +1821,13 @@ func TestCLI_Sys(t *testing.T) {
 	systemControllerOverride = mockCtrl
 	defer func() { systemControllerOverride = nil }()
 
-	socketPath := filepath.Join(t.TempDir(), "cadence_sys_test.sock")
-	cleanup := startMockDaemon(t, socketPath)
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("cad_sys_%d.sock", time.Now().UnixNano()))
+	cleanup := startMockDaemon(t, sockPath)
 	defer cleanup()
 
 	client := ipc.Client{
 		Network: "unix",
-		Address: socketPath,
+		Address: sockPath,
 	}
 	ctx := context.Background()
 	var out bytes.Buffer
@@ -1903,5 +1918,84 @@ func TestCLI_Sys(t *testing.T) {
 	code := run([]string{"sys", "take", "a", "screenshot"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run sys failed with code %d, stderr: %s", code, stderr.String())
+	}
+}
+
+func TestCLI_ModeAndControl(t *testing.T) {
+	mockCtrl := system.NewMockController()
+	systemControllerOverride = mockCtrl
+	defer func() { systemControllerOverride = nil }()
+
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("cad_mode_%d.sock", time.Now().UnixNano()))
+	cleanup := startMockDaemon(t, sockPath)
+	defer cleanup()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sockPath,
+	}
+	ctx := context.Background()
+	var out bytes.Buffer
+
+	// 1. Get current mode
+	out.Reset()
+	if err := cmdMode(ctx, client, []string{}, &out); err != nil {
+		t.Fatalf("cmdMode get failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "dictation") {
+		t.Fatalf("expected dictation in mode get output, got: %s", out.String())
+	}
+
+	// 2. Set mode to code
+	out.Reset()
+	if err := cmdMode(ctx, client, []string{"code"}, &out); err != nil {
+		t.Fatalf("cmdMode set code failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "code") {
+		t.Fatalf("expected code in mode set output, got: %s", out.String())
+	}
+
+	// 3. Set invalid mode
+	if err := cmdMode(ctx, client, []string{"nonexistent"}, &out); err == nil {
+		t.Fatal("expected error on invalid mode")
+	}
+
+	// 4. Voice control: switch mode
+	out.Reset()
+	if err := cmdControl(ctx, client, []string{"cadence", "switch", "to", "agent", "mode"}, &out); err != nil {
+		t.Fatalf("cmdControl switch to agent failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "agent mode") {
+		t.Fatalf("expected agent mode in control output, got: %s", out.String())
+	}
+
+	// 5. Voice control: query status
+	out.Reset()
+	if err := cmdControl(ctx, client, []string{"what", "mode", "are", "you", "in?"}, &out); err != nil {
+		t.Fatalf("cmdControl query status failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "mode") {
+		t.Fatalf("expected mode in query status output, got: %s", out.String())
+	}
+
+	// 6. Voice control error handling
+	if err := cmdControl(ctx, client, []string{}, &out); err == nil {
+		t.Fatal("expected error on empty control args")
+	}
+	if err := cmdControl(ctx, client, []string{"unrecognized", "gibberish"}, &out); err == nil {
+		t.Fatal("expected error on unrecognized voice control command")
+	}
+
+	// 7. Integration through run() entrypoint
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"mode", "command"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run mode command failed with code %d, stderr: %s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	code = run([]string{"control", "what", "is", "your", "mode"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run control failed with code %d, stderr: %s", code, stderr.String())
 	}
 }
