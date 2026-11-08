@@ -1843,3 +1843,85 @@ func TestApp_DevCommandRiskIPC(t *testing.T) {
 		t.Fatalf("expected destructive with confirmation, got %+v", destRisk)
 	}
 }
+
+func TestApp_DevCommandPreviewAndExecuteIPC(t *testing.T) {
+	cfg := config.Default()
+	app := NewApp(cfg)
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	// 1. Missing command error for preview
+	if _, err := app.Handle(ctx, ipc.Request{Method: "dev_command_preview"}); err == nil {
+		t.Fatal("expected error on missing command for preview")
+	}
+
+	// 2. Preview safe command
+	prevRes, err := app.Handle(ctx, ipc.Request{
+		Method: "dev_command_preview",
+		Params: map[string]any{
+			"command":     "echo 'ipc test'",
+			"working_dir": tmpDir,
+		},
+	})
+	if err != nil {
+		t.Fatalf("preview IPC failed: %v", err)
+	}
+	preview, ok := prevRes.(developer.DryRunPreview)
+	if !ok {
+		t.Fatalf("expected DryRunPreview, got %T", prevRes)
+	}
+	if preview.ID == "" || preview.Risk.Level != developer.RiskSafe {
+		t.Fatalf("unexpected preview: %+v", preview)
+	}
+
+	// 3. Execute safe command
+	execRes, err := app.Handle(ctx, ipc.Request{
+		Method: "dev_command_execute",
+		Params: map[string]any{
+			"command":     "echo 'ipc execute safe'",
+			"working_dir": tmpDir,
+		},
+	})
+	if err != nil {
+		t.Fatalf("execute safe failed: %v", err)
+	}
+	execResult, ok := execRes.(developer.ExecutionResult)
+	if !ok {
+		t.Fatalf("expected ExecutionResult, got %T", execRes)
+	}
+	if strings.TrimSpace(execResult.Stdout) != "ipc execute safe" {
+		t.Fatalf("unexpected stdout: %q", execResult.Stdout)
+	}
+
+	// 4. Execute destructive command without confirm should fail
+	_, err = app.Handle(ctx, ipc.Request{
+		Method: "dev_command_execute",
+		Params: map[string]any{
+			"command":     "rm -rf /tmp/some_fake_dir_123",
+			"working_dir": tmpDir,
+			"confirm":     false,
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error rejecting destructive command without confirm")
+	}
+
+	// 5. Execute destructive command with confirm should succeed
+	dummyFile := filepath.Join(tmpDir, "dummy.txt")
+	_ = os.WriteFile(dummyFile, []byte("xyz"), 0644)
+	confirmExec, err := app.Handle(ctx, ipc.Request{
+		Method: "dev_command_execute",
+		Params: map[string]any{
+			"command":     "rm -f " + dummyFile,
+			"working_dir": tmpDir,
+			"confirm":     true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("confirmed execution failed: %v", err)
+	}
+	confirmResult := confirmExec.(developer.ExecutionResult)
+	if confirmResult.ExitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", confirmResult.ExitCode)
+	}
+}

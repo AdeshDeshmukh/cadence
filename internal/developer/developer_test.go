@@ -328,3 +328,120 @@ func TestRisk_SudoElevations(t *testing.T) {
 		t.Fatalf("expected superuser execution reason, got %s", destRisk.Reason)
 	}
 }
+
+func TestPreview_SafeCommand(t *testing.T) {
+	engine := NewPreviewEngine()
+	ctx := context.Background()
+
+	preview, err := engine.Preview(ctx, "echo 'hello cadence'", t.TempDir())
+	if err != nil {
+		t.Fatalf("preview failed: %v", err)
+	}
+
+	if preview.Risk.Level != RiskSafe {
+		t.Fatalf("expected safe risk, got %s", preview.Risk.Level)
+	}
+	if preview.RequiresConfirmation {
+		t.Fatalf("expected no confirmation for safe command")
+	}
+	if !strings.Contains(preview.ProjectedImpact, "Read-only") {
+		t.Fatalf("expected read-only impact, got %s", preview.ProjectedImpact)
+	}
+	if preview.Status != PreviewStatusPending {
+		t.Fatalf("expected pending status, got %s", preview.Status)
+	}
+}
+
+func TestPreview_FilesystemSimulation(t *testing.T) {
+	engine := NewPreviewEngine()
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	targetFile := filepath.Join(tmpDir, "delete_me.txt")
+	_ = os.WriteFile(targetFile, []byte("data"), 0644)
+
+	preview, err := engine.Preview(ctx, "rm -rf "+targetFile, tmpDir)
+	if err != nil {
+		t.Fatalf("preview rm failed: %v", err)
+	}
+
+	if preview.Risk.Level != RiskDestructive {
+		t.Fatalf("expected destructive level, got %s", preview.Risk.Level)
+	}
+	if !preview.RequiresConfirmation {
+		t.Fatalf("expected confirmation required")
+	}
+	if !strings.Contains(preview.ProjectedImpact, "permanently delete") {
+		t.Fatalf("unexpected impact: %s", preview.ProjectedImpact)
+	}
+	if len(preview.AffectedTargets) == 0 {
+		t.Fatalf("expected affected targets to be populated")
+	}
+}
+
+func TestExecute_GuardedExecution(t *testing.T) {
+	engine := NewPreviewEngine()
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	// 1. Safe command executes without confirmation
+	safeRes, err := engine.Execute(ctx, "echo 'hello safe'", tmpDir, false)
+	if err != nil {
+		t.Fatalf("safe execution failed: %v", err)
+	}
+	if strings.TrimSpace(safeRes.Stdout) != "hello safe" {
+		t.Fatalf("unexpected stdout: %q", safeRes.Stdout)
+	}
+	if safeRes.ExitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", safeRes.ExitCode)
+	}
+
+	// 2. Risky / Destructive command is rejected without confirmation
+	destCmd := "rm -rf /nonexistent_path_test_123"
+	_, err = engine.Execute(ctx, destCmd, tmpDir, false)
+	if err == nil {
+		t.Fatal("expected error blocking destructive execution without confirmation")
+	}
+	if !strings.Contains(err.Error(), "requires explicit confirmation") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+
+	// 3. Risky / Destructive command succeeds when confirmed
+	testFile := filepath.Join(tmpDir, "test_confirm.txt")
+	_ = os.WriteFile(testFile, []byte("data"), 0644)
+	confirmRes, err := engine.Execute(ctx, "rm -f "+testFile, tmpDir, true)
+	if err != nil {
+		t.Fatalf("confirmed execution failed: %v", err)
+	}
+	if confirmRes.ExitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", confirmRes.ExitCode)
+	}
+	if _, statErr := os.Stat(testFile); !os.IsNotExist(statErr) {
+		t.Fatal("expected file to be deleted")
+	}
+}
+
+func TestExecute_PreviewByID(t *testing.T) {
+	engine := NewPreviewEngine()
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	preview, err := engine.Preview(ctx, "echo 'preview by id'", tmpDir)
+	if err != nil {
+		t.Fatalf("preview failed: %v", err)
+	}
+
+	res, err := engine.ExecutePreview(ctx, preview.ID, true)
+	if err != nil {
+		t.Fatalf("execute preview failed: %v", err)
+	}
+	if strings.TrimSpace(res.Stdout) != "preview by id" {
+		t.Fatalf("unexpected stdout: %q", res.Stdout)
+	}
+
+	// Check updated preview status
+	updated, ok := engine.GetPreview(preview.ID)
+	if !ok || updated.Status != PreviewStatusExecuted {
+		t.Fatalf("expected status executed, got %+v", updated)
+	}
+}

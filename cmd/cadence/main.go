@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -48,6 +49,7 @@ Commands:
   parse <text>       Parse voice edit instruction into intent and parameters
   edit <instruction> Execute voice edit on highlighted text or custom input
   cmd <instruction>  Generate shell/CLI command from voice instruction (e.g. "run tests", "git commit...")
+  exec <command>     Safely execute shell command with dry-run preview and confirmation guard
   risk <command>     Audit and classify shell command risk level (Safe, Risky, Destructive)
   context [show|set|clear] Show or manage developer/code editor context (file, language, selection)
   terminal [status|hook] Inspect terminal/shell context or generate shell integration hooks
@@ -181,6 +183,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "cmd", "dev", "command":
 		if err := cmdGenerate(ctx, cfg, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "exec", "execute", "run":
+		if err := cmdExec(ctx, client, args[1:], os.Stdin, stdout, stderr); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -1690,6 +1699,7 @@ func cmdGenerate(ctx context.Context, cfg config.Config, client ipc.Client, args
 	explain := false
 	pasteOutput := false
 	showRisk := false
+	dryRun := false
 	var workingDir string
 	var words []string
 
@@ -1704,6 +1714,7 @@ Flags:
   -j, --json     Output result as JSON
   -e, --explain  Print human-readable explanation, ecosystem, and risk metadata
   -r, --risk     Prefix command with risk classification badge ([SAFE], [RISKY], [DESTRUCTIVE])
+  -n, --dry-run  Simulate and preview projected impact without executing
   -p, --paste    Paste the generated command into the active application
   -d, --dir      Specify project working directory (default: active terminal or current dir)
   -h, --help     Show this help message
@@ -1712,6 +1723,7 @@ Examples:
   cadence cmd "run the tests"
   cadence cmd "git commit with message updated terminal context"
   cadence cmd --risk "reset hard head"
+  cadence cmd --dry-run "delete test directory"
   cadence cmd --explain "install dependencies"`)
 			return nil
 		case "-j", "--json":
@@ -1720,6 +1732,8 @@ Examples:
 			explain = true
 		case "-r", "--risk":
 			showRisk = true
+		case "-n", "--dry-run":
+			dryRun = true
 		case "-p", "--paste":
 			pasteOutput = true
 		case "-d", "--dir", "--pwd":
@@ -1802,6 +1816,26 @@ Examples:
 		return nil
 	}
 
+	if dryRun {
+		engine := developer.NewPreviewEngine()
+		preview, _ := engine.Preview(ctx, result.Command, workingDir)
+		if jsonOutput {
+			enc := json.NewEncoder(out)
+			enc.SetIndent("", "  ")
+			return enc.Encode(preview)
+		}
+		fmt.Fprintf(out, "Dry-Run Preview:\n")
+		fmt.Fprintf(out, "  Command:          %s\n", preview.Command)
+		fmt.Fprintf(out, "  Working Dir:      %s\n", preview.WorkingDir)
+		fmt.Fprintf(out, "  Risk Level:       %s\n", strings.ToUpper(string(preview.Risk.Level)))
+		fmt.Fprintf(out, "  Requires Confirm: %v\n", preview.RequiresConfirmation)
+		fmt.Fprintf(out, "  Projected Impact: %s\n", preview.ProjectedImpact)
+		if len(preview.AffectedTargets) > 0 {
+			fmt.Fprintf(out, "  Affected Targets: %s\n", strings.Join(preview.AffectedTargets, ", "))
+		}
+		return nil
+	}
+
 	if showRisk {
 		badge := fmt.Sprintf("[%s]", strings.ToUpper(string(result.Risk.Level)))
 		fmt.Fprintf(out, "%s %s\n", badge, result.Command)
@@ -1809,6 +1843,156 @@ Examples:
 	}
 
 	fmt.Fprintln(out, result.Command)
+	return nil
+}
+
+func cmdExec(ctx context.Context, client ipc.Client, args []string, in io.Reader, out, errOut io.Writer) error {
+	dryRun := false
+	confirm := false
+	jsonOutput := false
+	var workingDir string
+	var words []string
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-h", "--help":
+			fmt.Fprintln(out, `Usage: cadence exec [flags] <command...>
+
+Safely execute shell commands with dry-run preview and confirmation guards.
+
+Flags:
+  -n, --dry-run   Preview the command and projected impact without executing
+  -y, --confirm   Auto-confirm risky or destructive execution
+  -d, --dir       Specify working directory (default: active terminal or current dir)
+  -j, --json      Output preview or execution result as JSON
+  -h, --help      Show this help message
+
+Examples:
+  cadence exec "git status"
+  cadence exec --dry-run "git reset --hard HEAD~1"
+  cadence exec --confirm "git commit -m 'feat: ship milestone'"
+  cadence exec "rm -rf /tmp/test"`)
+			return nil
+		case "-n", "--dry-run":
+			dryRun = true
+		case "-y", "--confirm", "--yes":
+			confirm = true
+		case "-j", "--json":
+			jsonOutput = true
+		case "-d", "--dir", "--pwd":
+			if i+1 < len(args) {
+				workingDir = args[i+1]
+				i++
+			}
+		default:
+			words = append(words, args[i])
+		}
+	}
+
+	command := strings.TrimSpace(strings.Join(words, " "))
+	if command == "" {
+		return errors.New("missing command to execute (usage: cadence exec <command>)")
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	// 1. Preview step
+	var preview developer.DryRunPreview
+	prevRes, prevErr := client.Call(callCtx, "dev_command_preview", map[string]any{
+		"command":     command,
+		"working_dir": workingDir,
+	})
+	if prevErr == nil {
+		if raw, mErr := json.Marshal(prevRes); mErr == nil {
+			_ = json.Unmarshal(raw, &preview)
+		}
+	} else {
+		// Offline preview fallback
+		engine := developer.NewPreviewEngine()
+		preview, _ = engine.Preview(ctx, command, workingDir)
+	}
+
+	if dryRun {
+		if jsonOutput {
+			enc := json.NewEncoder(out)
+			enc.SetIndent("", "  ")
+			return enc.Encode(preview)
+		}
+
+		fmt.Fprintf(out, "Dry-Run Preview:\n")
+		fmt.Fprintf(out, "  Command:          %s\n", preview.Command)
+		fmt.Fprintf(out, "  Working Dir:      %s\n", preview.WorkingDir)
+		fmt.Fprintf(out, "  Risk Level:       %s\n", strings.ToUpper(string(preview.Risk.Level)))
+		fmt.Fprintf(out, "  Requires Confirm: %v\n", preview.RequiresConfirmation)
+		fmt.Fprintf(out, "  Projected Impact: %s\n", preview.ProjectedImpact)
+		if len(preview.AffectedTargets) > 0 {
+			fmt.Fprintf(out, "  Affected Targets: %s\n", strings.Join(preview.AffectedTargets, ", "))
+		}
+		return nil
+	}
+
+	// 2. Interactive prompt if requires confirmation and not confirmed
+	if preview.RequiresConfirmation && !confirm {
+		if jsonOutput {
+			return fmt.Errorf("command execution rejected: '%s' is %s and requires confirmation (pass -y/--confirm)", preview.Command, preview.Risk.Level)
+		}
+
+		fmt.Fprintf(out, "Dry-Run Preview:\n")
+		fmt.Fprintf(out, "  Command:          %s\n", preview.Command)
+		fmt.Fprintf(out, "  Risk Level:       %s\n", strings.ToUpper(string(preview.Risk.Level)))
+		fmt.Fprintf(out, "  Projected Impact: %s\n", preview.ProjectedImpact)
+		if len(preview.AffectedTargets) > 0 {
+			fmt.Fprintf(out, "  Affected Targets: %s\n", strings.Join(preview.AffectedTargets, ", "))
+		}
+		fmt.Fprintf(out, "\n⚠️  This command is %s. Are you sure you want to execute? [y/N]: ", strings.ToUpper(string(preview.Risk.Level)))
+
+		var response string
+		if in != nil {
+			scanner := bufio.NewScanner(in)
+			if scanner.Scan() {
+				response = strings.TrimSpace(scanner.Text())
+			}
+		}
+
+		if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
+			return errors.New("execution aborted by user")
+		}
+		confirm = true
+	}
+
+	// 3. Execution step
+	var result developer.ExecutionResult
+	execRes, execErr := client.Call(callCtx, "dev_command_execute", map[string]any{
+		"command":     command,
+		"working_dir": workingDir,
+		"confirm":     confirm,
+	})
+	if execErr == nil {
+		if raw, mErr := json.Marshal(execRes); mErr == nil {
+			_ = json.Unmarshal(raw, &result)
+		}
+	} else {
+		engine := developer.NewPreviewEngine()
+		result, execErr = engine.Execute(ctx, command, workingDir, confirm)
+	}
+
+	if jsonOutput {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result)
+	}
+
+	if result.Stdout != "" {
+		fmt.Fprint(out, result.Stdout)
+	}
+	if result.Stderr != "" {
+		fmt.Fprint(errOut, result.Stderr)
+	}
+
+	if execErr != nil {
+		return execErr
+	}
 	return nil
 }
 
