@@ -81,18 +81,19 @@ type App struct {
 	ipcSocket    string
 	ownsListener bool
 
-	mu              sync.Mutex
-	isRecording     bool
-	stopRequested   bool
-	activeCancel    context.CancelFunc
-	activeSess      *pipeline.Session
-	sessionSeq      uint64
-	lastUndo        *UndoRecord
-	undoStack       []*UndoRecord
-	previewMgr      *edit.PreviewManager
-	editorContext   *appcontext.EditorContextManager
-	terminalContext *appcontext.TerminalContextManager
-	devGenerator    *developer.Generator
+	mu               sync.Mutex
+	isRecording      bool
+	stopRequested    bool
+	activeCancel     context.CancelFunc
+	activeSess       *pipeline.Session
+	sessionSeq       uint64
+	lastUndo         *UndoRecord
+	undoStack        []*UndoRecord
+	previewMgr       *edit.PreviewManager
+	editorContext    *appcontext.EditorContextManager
+	terminalContext  *appcontext.TerminalContextManager
+	devGenerator     *developer.Generator
+	devPreviewEngine *developer.PreviewEngine
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -208,6 +209,11 @@ func WithTerminalContextManager(m *appcontext.TerminalContextManager) Option {
 // WithDevGenerator sets a custom developer command generator.
 func WithDevGenerator(g *developer.Generator) Option {
 	return func(a *App) { a.devGenerator = g }
+}
+
+// WithDevPreviewEngine sets a custom developer dry-run preview and execution engine.
+func WithDevPreviewEngine(e *developer.PreviewEngine) Option {
+	return func(a *App) { a.devPreviewEngine = e }
 }
 
 // NewApp instantiates a fully configured Cadence daemon application.
@@ -378,6 +384,10 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 
 	if a.devGenerator == nil {
 		a.devGenerator = developer.NewGenerator(a.polisher)
+	}
+
+	if a.devPreviewEngine == nil {
+		a.devPreviewEngine = developer.NewPreviewEngine()
 	}
 
 	if a.capture == nil {
@@ -678,6 +688,11 @@ func (a *App) TerminalContextManager() *appcontext.TerminalContextManager {
 // DevGenerator returns the active developer command generator.
 func (a *App) DevGenerator() *developer.Generator {
 	return a.devGenerator
+}
+
+// DevPreviewEngine returns the active developer preview and execution engine.
+func (a *App) DevPreviewEngine() *developer.PreviewEngine {
+	return a.devPreviewEngine
 }
 
 // Router returns the active application context router.
@@ -1096,6 +1111,84 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 		}
 		risk := developer.ClassifyCommand(command)
 		return risk, nil
+
+	case "dev_command_preview":
+		if a.devPreviewEngine == nil {
+			return nil, errors.New("dev preview engine is not configured")
+		}
+		var command, workingDir string
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if c, ok := params["command"].(string); ok {
+				command = c
+			}
+			if wd, ok := params["working_dir"].(string); ok {
+				workingDir = wd
+			}
+		}
+		if strings.TrimSpace(command) == "" {
+			return nil, errors.New("missing 'command' parameter for dev_command_preview")
+		}
+		if workingDir == "" && a.terminalContext != nil {
+			if tCtx, ok := a.terminalContext.Get(); ok && tCtx.WorkingDir != "" {
+				workingDir = tCtx.WorkingDir
+			}
+		}
+		if workingDir == "" && a.editorContext != nil {
+			if eCtx, ok := a.editorContext.Get(); ok && eCtx.WorkspaceRoot != "" {
+				workingDir = eCtx.WorkspaceRoot
+			}
+		}
+		prev, err := a.devPreviewEngine.Preview(ctx, command, workingDir)
+		if err != nil {
+			return nil, fmt.Errorf("preview command: %w", err)
+		}
+		return prev, nil
+
+	case "dev_command_execute":
+		if a.devPreviewEngine == nil {
+			return nil, errors.New("dev preview engine is not configured")
+		}
+		var command, workingDir, previewID string
+		var confirm bool
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if c, ok := params["command"].(string); ok {
+				command = c
+			}
+			if wd, ok := params["working_dir"].(string); ok {
+				workingDir = wd
+			}
+			if pid, ok := params["preview_id"].(string); ok {
+				previewID = pid
+			}
+			if conf, ok := params["confirm"].(bool); ok {
+				confirm = conf
+			}
+		}
+		if previewID != "" {
+			res, err := a.devPreviewEngine.ExecutePreview(ctx, previewID, confirm)
+			if err != nil {
+				return res, fmt.Errorf("execute preview: %w", err)
+			}
+			return res, nil
+		}
+		if strings.TrimSpace(command) == "" {
+			return nil, errors.New("missing 'command' or 'preview_id' parameter for dev_command_execute")
+		}
+		if workingDir == "" && a.terminalContext != nil {
+			if tCtx, ok := a.terminalContext.Get(); ok && tCtx.WorkingDir != "" {
+				workingDir = tCtx.WorkingDir
+			}
+		}
+		if workingDir == "" && a.editorContext != nil {
+			if eCtx, ok := a.editorContext.Get(); ok && eCtx.WorkspaceRoot != "" {
+				workingDir = eCtx.WorkspaceRoot
+			}
+		}
+		res, err := a.devPreviewEngine.Execute(ctx, command, workingDir, confirm)
+		if err != nil {
+			return res, fmt.Errorf("execute command: %w", err)
+		}
+		return res, nil
 
 	case "selection_get":
 		var res selection.Result

@@ -319,6 +319,19 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 		params, _ := req.Params.(map[string]any)
 		cmd, _ := params["command"].(string)
 		return developer.ClassifyCommand(cmd), nil
+	case "dev_command_preview":
+		params, _ := req.Params.(map[string]any)
+		cmd, _ := params["command"].(string)
+		wd, _ := params["working_dir"].(string)
+		engine := developer.NewPreviewEngine()
+		return engine.Preview(context.Background(), cmd, wd)
+	case "dev_command_execute":
+		params, _ := req.Params.(map[string]any)
+		cmd, _ := params["command"].(string)
+		wd, _ := params["working_dir"].(string)
+		confirm, _ := params["confirm"].(bool)
+		engine := developer.NewPreviewEngine()
+		return engine.Execute(context.Background(), cmd, wd, confirm)
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -1437,5 +1450,107 @@ func TestCLI_Risk(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "DESTRUCTIVE") {
 		t.Fatalf("expected offline destructive classification, got %s", out.String())
+	}
+}
+
+func TestCLI_Cmd_DryRun(t *testing.T) {
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("cad_dry_%d.sock", time.Now().UnixNano()))
+	cleanup := startMockDaemon(t, sockPath)
+	defer cleanup()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sockPath,
+	}
+	ctx := context.Background()
+	cfg := config.Default()
+
+	var out bytes.Buffer
+
+	// Test cadence cmd --dry-run
+	if err := cmdGenerate(ctx, cfg, client, []string{"--dry-run", "run", "the", "tests"}, &out); err != nil {
+		t.Fatalf("cmdGenerate --dry-run failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Dry-Run Preview:") || !strings.Contains(out.String(), "go test") {
+		t.Fatalf("unexpected dry-run output: %s", out.String())
+	}
+}
+
+func TestCLI_Exec(t *testing.T) {
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("cad_exec_%d.sock", time.Now().UnixNano()))
+	cleanup := startMockDaemon(t, sockPath)
+	defer cleanup()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sockPath,
+	}
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	var out, errOut bytes.Buffer
+
+	// 1. Safe command executes
+	if err := cmdExec(ctx, client, []string{"echo", "cadence exec safe"}, nil, &out, &errOut); err != nil {
+		t.Fatalf("cmdExec safe failed: %v", err)
+	}
+	if strings.TrimSpace(out.String()) != "cadence exec safe" {
+		t.Fatalf("unexpected output: %s", out.String())
+	}
+
+	// 2. Dry-run flag
+	out.Reset()
+	if err := cmdExec(ctx, client, []string{"--dry-run", "rm", "-rf", "/tmp/cadence"}, nil, &out, &errOut); err != nil {
+		t.Fatalf("cmdExec dry-run failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Dry-Run Preview:") || !strings.Contains(out.String(), "DESTRUCTIVE") {
+		t.Fatalf("unexpected dry-run output: %s", out.String())
+	}
+
+	// 3. Destructive command blocked without confirmation in non-interactive/json mode
+	out.Reset()
+	if err := cmdExec(ctx, client, []string{"--json", "rm", "-rf", "/tmp/cadence"}, nil, &out, &errOut); err == nil {
+		t.Fatal("expected error rejecting destructive command without confirm")
+	}
+
+	// 4. Destructive command with --confirm flag succeeds
+	dummyFile := filepath.Join(tmpDir, "to_delete.txt")
+	_ = os.WriteFile(dummyFile, []byte("test"), 0644)
+	out.Reset()
+	if err := cmdExec(ctx, client, []string{"--confirm", "rm", "-f", dummyFile}, nil, &out, &errOut); err != nil {
+		t.Fatalf("cmdExec confirmed failed: %v", err)
+	}
+
+	// 5. Interactive prompt with 'y' succeeds
+	dummyInteractive := filepath.Join(tmpDir, "interactive.txt")
+	_ = os.WriteFile(dummyInteractive, []byte("test"), 0644)
+	inBuf := bytes.NewBufferString("y\n")
+	out.Reset()
+	if err := cmdExec(ctx, client, []string{"rm", "-f", dummyInteractive}, inBuf, &out, &errOut); err != nil {
+		t.Fatalf("cmdExec interactive yes failed: %v", err)
+	}
+
+	// 6. Interactive prompt with 'n' aborts
+	dummyAbort := filepath.Join(tmpDir, "abort.txt")
+	_ = os.WriteFile(dummyAbort, []byte("test"), 0644)
+	inAbort := bytes.NewBufferString("n\n")
+	out.Reset()
+	if err := cmdExec(ctx, client, []string{"rm", "-f", dummyAbort}, inAbort, &out, &errOut); err == nil {
+		t.Fatal("expected error on interactive abort")
+	}
+
+	// 7. Missing command error
+	out.Reset()
+	if err := cmdExec(ctx, client, []string{}, nil, &out, &errOut); err == nil {
+		t.Fatal("expected error on missing command")
+	}
+
+	// 8. Help flag
+	out.Reset()
+	if err := cmdExec(ctx, client, []string{"--help"}, nil, &out, &errOut); err != nil {
+		t.Fatalf("cmdExec --help failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Usage: cadence exec") {
+		t.Fatalf("unexpected help text: %s", out.String())
 	}
 }
