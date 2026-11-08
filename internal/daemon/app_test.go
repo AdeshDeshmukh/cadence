@@ -1991,3 +1991,64 @@ func TestApp_GitAssistantIPC(t *testing.T) {
 		t.Fatalf("expected Overview in PR body, got %s", prDesc.Body)
 	}
 }
+
+func TestApp_DevCodeFormatIPC(t *testing.T) {
+	cfg := config.Default()
+	app := NewApp(cfg)
+	ctx := context.Background()
+
+	// 1. Missing text error
+	if _, err := app.Handle(ctx, ipc.Request{Method: "dev_code_format"}); err == nil {
+		t.Fatal("expected error on missing text")
+	}
+
+	// 2. Snake case format
+	res, err := app.Handle(ctx, ipc.Request{
+		Method: "dev_code_format",
+		Params: map[string]any{
+			"text":  "max retry limit",
+			"style": "snake",
+		},
+	})
+	if err != nil {
+		t.Fatalf("dev_code_format snake failed: %v", err)
+	}
+	formatRes := res.(developer.CodeFormatResult)
+	if formatRes.Result != "max_retry_limit" {
+		t.Fatalf("expected max_retry_limit, got %s", formatRes.Result)
+	}
+
+	// 3. Spoken voice prefix format
+	resPrefix, err := app.Handle(ctx, ipc.Request{
+		Method: "dev_code_format",
+		Params: map[string]any{
+			"text": "camel case user profile service",
+		},
+	})
+	if err != nil {
+		t.Fatalf("dev_code_format voice prefix failed: %v", err)
+	}
+	prefixRes := resPrefix.(developer.CodeFormatResult)
+	if prefixRes.Result != "userProfileService" {
+		t.Fatalf("expected userProfileService, got %s", prefixRes.Result)
+	}
+
+	// 4. Docstring format with editor context language fallback
+	app.EditorContextManager().Set(appcontext.EditorContext{
+		LanguageID: "python",
+	})
+	resDoc, err := app.Handle(ctx, ipc.Request{
+		Method: "dev_code_format",
+		Params: map[string]any{
+			"text":         "Calculate user balance.",
+			"is_docstring": true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("dev_code_format docstring failed: %v", err)
+	}
+	docRes := resDoc.(developer.CodeFormatResult)
+	if docRes.Result != `"""Calculate user balance."""` {
+		t.Fatalf("expected python docstring, got %s", docRes.Result)
+	}
+}

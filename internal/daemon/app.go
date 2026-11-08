@@ -1273,6 +1273,43 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 		}
 		return prRes, nil
 
+	case "dev_code_format":
+		var text, style, lang string
+		var isDoc, acr bool
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if t, ok := params["text"].(string); ok {
+				text = t
+			}
+			if s, ok := params["style"].(string); ok {
+				style = s
+			}
+			if l, ok := params["language"].(string); ok {
+				lang = l
+			}
+			if d, ok := params["is_docstring"].(bool); ok {
+				isDoc = d
+			}
+			if a, ok := params["preserve_acronyms"].(bool); ok {
+				acr = a
+			}
+		}
+		if strings.TrimSpace(text) == "" {
+			return nil, errors.New("missing 'text' parameter for dev_code_format")
+		}
+		if lang == "" && a.editorContext != nil {
+			if eCtx, ok := a.editorContext.Get(); ok && eCtx.LanguageID != "" {
+				lang = eCtx.LanguageID
+			}
+		}
+		formatRes := developer.FormatCode(developer.CodeFormatRequest{
+			Text:             text,
+			Style:            developer.CasingStyle(style),
+			Language:         lang,
+			IsDocstring:      isDoc,
+			PreserveAcronyms: acr,
+		})
+		return formatRes, nil
+
 	case "selection_get":
 		var res selection.Result
 		var err error
