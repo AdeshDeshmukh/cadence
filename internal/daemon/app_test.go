@@ -25,6 +25,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/postprocess"
 	"github.com/AdeshDeshmukh/cadence/internal/selection"
 	"github.com/AdeshDeshmukh/cadence/internal/storage"
+	"github.com/AdeshDeshmukh/cadence/internal/system"
 	"github.com/AdeshDeshmukh/cadence/internal/vad"
 )
 
@@ -2050,5 +2051,119 @@ func TestApp_DevCodeFormatIPC(t *testing.T) {
 	docRes := resDoc.(developer.CodeFormatResult)
 	if docRes.Result != `"""Calculate user balance."""` {
 		t.Fatalf("expected python docstring, got %s", docRes.Result)
+	}
+}
+
+func TestApp_SystemEndpoints(t *testing.T) {
+	mockCtrl := system.NewMockController()
+	cfg := config.Default()
+	app := NewApp(cfg, WithSystemController(mockCtrl))
+	ctx := context.Background()
+
+	// 1. system_command_execute error on empty input
+	if _, err := app.Handle(ctx, ipc.Request{Method: "system_command_execute"}); err == nil {
+		t.Fatalf("expected error on missing input")
+	}
+
+	// 2. system_command_execute with voice instruction
+	res, err := app.Handle(ctx, ipc.Request{
+		Method: "system_command_execute",
+		Params: map[string]any{"input": "open Visual Studio Code"},
+	})
+	if err != nil {
+		t.Fatalf("system_command_execute failed: %v", err)
+	}
+	mRes, ok := res.(map[string]any)
+	if !ok || mRes["parsed"] != true {
+		t.Fatalf("expected parsed true, got %v", res)
+	}
+	if len(mockCtrl.LaunchedApps) != 1 || mockCtrl.LaunchedApps[0] != "visual studio code" {
+		t.Fatalf("expected visual studio code launched, got %v", mockCtrl.LaunchedApps)
+	}
+
+	// 3. system_command_execute unrecognized
+	unrec, err := app.Handle(ctx, ipc.Request{
+		Method: "system_command_execute",
+		Params: map[string]any{"input": "random gibberish that does not match"},
+	})
+	if err != nil {
+		t.Fatalf("system_command_execute failed: %v", err)
+	}
+	uRes := unrec.(map[string]any)
+	if uRes["parsed"] != false {
+		t.Fatalf("expected parsed false, got %v", unrec)
+	}
+
+	// 4. system_app_action (launch, focus, quit)
+	_, err = app.Handle(ctx, ipc.Request{
+		Method: "system_app_action",
+		Params: map[string]any{"action": "focus", "app": "Chrome"},
+	})
+	if err != nil {
+		t.Fatalf("system_app_action focus failed: %v", err)
+	}
+	if len(mockCtrl.FocusedApps) != 1 || mockCtrl.FocusedApps[0] != "Chrome" {
+		t.Fatalf("expected Chrome focused, got %v", mockCtrl.FocusedApps)
+	}
+
+	_, err = app.Handle(ctx, ipc.Request{
+		Method: "system_app_action",
+		Params: map[string]any{"action": "quit", "app": "Slack"},
+	})
+	if err != nil {
+		t.Fatalf("system_app_action quit failed: %v", err)
+	}
+	if len(mockCtrl.QuitApps) != 1 || mockCtrl.QuitApps[0] != "Slack" {
+		t.Fatalf("expected Slack quit, got %v", mockCtrl.QuitApps)
+	}
+
+	// 5. system_window_action
+	_, err = app.Handle(ctx, ipc.Request{
+		Method: "system_window_action",
+		Params: map[string]any{"action": "minimize"},
+	})
+	if err != nil {
+		t.Fatalf("system_window_action failed: %v", err)
+	}
+	if len(mockCtrl.Windows) != 1 || mockCtrl.Windows[0] != system.WindowActionMinimize {
+		t.Fatalf("expected minimize, got %v", mockCtrl.Windows)
+	}
+
+	// 6. system_screenshot
+	sRes, err := app.Handle(ctx, ipc.Request{
+		Method: "system_screenshot",
+		Params: map[string]any{
+			"active_window_only": true,
+			"copy_to_clipboard":  true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("system_screenshot failed: %v", err)
+	}
+	shotMap := sRes.(map[string]any)
+	if shotMap["success"] != true {
+		t.Fatalf("expected success true, got %v", sRes)
+	}
+	if len(mockCtrl.Screenshots) != 1 || !mockCtrl.Screenshots[0].ActiveWindowOnly || !mockCtrl.Screenshots[0].CopyToClipboard {
+		t.Fatalf("mock screenshots mismatch: %v", mockCtrl.Screenshots)
+	}
+
+	// 7. system_volume
+	vRes, err := app.Handle(ctx, ipc.Request{
+		Method: "system_volume",
+		Params: map[string]any{
+			"level": 85.0,
+			"mute":  true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("system_volume failed: %v", err)
+	}
+	volMap := vRes.(map[string]any)
+	if volMap["success"] != true {
+		t.Fatalf("expected success true, got %v", vRes)
+	}
+	if mockCtrl.Volume != 85 || !mockCtrl.Muted {
+		t.Fatalf("volume mismatch: vol=%d muted=%v", mockCtrl.Volume, mockCtrl.Muted)
 	}
 }

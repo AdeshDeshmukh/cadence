@@ -29,6 +29,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/postprocess"
 	"github.com/AdeshDeshmukh/cadence/internal/selection"
 	"github.com/AdeshDeshmukh/cadence/internal/storage"
+	"github.com/AdeshDeshmukh/cadence/internal/system"
 	"github.com/AdeshDeshmukh/cadence/internal/vad"
 	"github.com/AdeshDeshmukh/cadence/internal/worker"
 	"github.com/AdeshDeshmukh/cadence/pkg/version"
@@ -95,6 +96,7 @@ type App struct {
 	devGenerator     *developer.Generator
 	devPreviewEngine *developer.PreviewEngine
 	gitAssistant     *developer.GitAssistant
+	systemCtrl       system.Controller
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -220,6 +222,11 @@ func WithDevPreviewEngine(e *developer.PreviewEngine) Option {
 // WithGitAssistant sets a custom Git assistant.
 func WithGitAssistant(g *developer.GitAssistant) Option {
 	return func(a *App) { a.gitAssistant = g }
+}
+
+// WithSystemController sets a custom desktop system automation controller.
+func WithSystemController(c system.Controller) Option {
+	return func(a *App) { a.systemCtrl = c }
 }
 
 // NewApp instantiates a fully configured Cadence daemon application.
@@ -398,6 +405,10 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 
 	if a.gitAssistant == nil {
 		a.gitAssistant = developer.NewGitAssistant(a.polisher)
+	}
+
+	if a.systemCtrl == nil {
+		a.systemCtrl = system.NewDefaultController()
 	}
 
 	if a.capture == nil {
@@ -708,6 +719,11 @@ func (a *App) DevPreviewEngine() *developer.PreviewEngine {
 // GitAssistant returns the active Git assistant.
 func (a *App) GitAssistant() *developer.GitAssistant {
 	return a.gitAssistant
+}
+
+// SystemController returns the active system controller.
+func (a *App) SystemController() system.Controller {
+	return a.systemCtrl
 }
 
 // Router returns the active application context router.
@@ -1309,6 +1325,175 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			PreserveAcronyms: acr,
 		})
 		return formatRes, nil
+
+	case "system_command_execute":
+		if a.systemCtrl == nil {
+			return nil, errors.New("system controller is not configured")
+		}
+		var input string
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if in, ok := params["input"].(string); ok {
+				input = in
+			}
+		}
+		if strings.TrimSpace(input) == "" {
+			return nil, errors.New("missing 'input' parameter for system_command_execute")
+		}
+		cmd, ok := system.ParseSystemCommand(input)
+		if !ok {
+			return map[string]any{
+				"parsed":  false,
+				"message": fmt.Sprintf("unrecognized system command: %q", input),
+			}, nil
+		}
+		msg, err := system.ExecuteSystemCommand(ctx, a.systemCtrl, cmd)
+		if err != nil {
+			return nil, fmt.Errorf("execute system command: %w", err)
+		}
+		return map[string]any{
+			"parsed":  true,
+			"command": cmd,
+			"message": msg,
+		}, nil
+
+	case "system_app_action":
+		if a.systemCtrl == nil {
+			return nil, errors.New("system controller is not configured")
+		}
+		var action, appName string
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if act, ok := params["action"].(string); ok {
+				action = act
+			}
+			if app, ok := params["app"].(string); ok {
+				appName = app
+			}
+		}
+		if strings.TrimSpace(appName) == "" {
+			return nil, errors.New("missing 'app' parameter for system_app_action")
+		}
+		var msg string
+		var err error
+		switch strings.ToLower(strings.TrimSpace(action)) {
+		case "launch", "open", "start":
+			err = a.systemCtrl.LaunchApp(ctx, appName)
+			msg = fmt.Sprintf("Launched %s", appName)
+		case "focus", "switch":
+			err = a.systemCtrl.FocusApp(ctx, appName)
+			msg = fmt.Sprintf("Switched to %s", appName)
+		case "quit", "close", "exit":
+			err = a.systemCtrl.QuitApp(ctx, appName)
+			msg = fmt.Sprintf("Quit %s", appName)
+		default:
+			return nil, fmt.Errorf("unsupported app action: %q", action)
+		}
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"success": true,
+			"action":  action,
+			"app":     appName,
+			"message": msg,
+		}, nil
+
+	case "system_window_action":
+		if a.systemCtrl == nil {
+			return nil, errors.New("system controller is not configured")
+		}
+		var action string
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if act, ok := params["action"].(string); ok {
+				action = act
+			}
+		}
+		if strings.TrimSpace(action) == "" {
+			return nil, errors.New("missing 'action' parameter for system_window_action")
+		}
+		wAct := system.WindowAction(strings.ToLower(strings.TrimSpace(action)))
+		if err := a.systemCtrl.ControlWindow(ctx, wAct); err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"success": true,
+			"action":  action,
+			"message": fmt.Sprintf("Window action executed: %s", action),
+		}, nil
+
+	case "system_screenshot":
+		if a.systemCtrl == nil {
+			return nil, errors.New("system controller is not configured")
+		}
+		var opts system.ScreenshotOptions
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if w, ok := params["active_window_only"].(bool); ok {
+				opts.ActiveWindowOnly = w
+			}
+			if c, ok := params["copy_to_clipboard"].(bool); ok {
+				opts.CopyToClipboard = c
+			}
+			if p, ok := params["save_path"].(string); ok {
+				opts.SavePath = p
+			}
+		}
+		res, err := a.systemCtrl.CaptureScreenshot(ctx, opts)
+		if err != nil {
+			return nil, fmt.Errorf("capture screenshot: %w", err)
+		}
+		msg := fmt.Sprintf("Screenshot saved to %s", res.Path)
+		if res.CopiedToClipboard {
+			msg = "Screenshot copied to clipboard"
+		}
+		return map[string]any{
+			"success": true,
+			"result":  res,
+			"message": msg,
+		}, nil
+
+	case "system_volume":
+		if a.systemCtrl == nil {
+			return nil, errors.New("system controller is not configured")
+		}
+		var lvl *int
+		var mute *bool
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if l, ok := params["level"].(float64); ok {
+				intLvl := int(l)
+				lvl = &intLvl
+			}
+			if m, ok := params["mute"].(bool); ok {
+				mVal := m
+				mute = &mVal
+			}
+			if u, ok := params["unmute"].(bool); ok && u {
+				fVal := false
+				mute = &fVal
+			}
+		}
+		var msg string
+		if mute != nil {
+			if err := a.systemCtrl.MuteVolume(ctx, *mute); err != nil {
+				return nil, err
+			}
+			if *mute {
+				msg = "Volume muted"
+			} else {
+				msg = "Volume unmuted"
+			}
+		}
+		if lvl != nil {
+			if err := a.systemCtrl.SetVolume(ctx, *lvl); err != nil {
+				return nil, err
+			}
+			msg = fmt.Sprintf("Volume set to %d%%", *lvl)
+		}
+		if msg == "" {
+			msg = "Volume unchanged"
+		}
+		return map[string]any{
+			"success": true,
+			"message": msg,
+		}, nil
 
 	case "selection_get":
 		var res selection.Result
