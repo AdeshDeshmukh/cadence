@@ -1940,6 +1940,7 @@ func TestApp_GitAssistantIPC(t *testing.T) {
 		_ = cmd.Run()
 	}
 	runCmd("init")
+	runCmd("checkout", "-B", "main")
 	runCmd("config", "user.name", "Tester")
 	runCmd("config", "user.email", "tester@test.local")
 	_ = os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("# Test Repo\n"), 0644)

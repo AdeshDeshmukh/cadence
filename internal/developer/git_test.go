@@ -23,6 +23,7 @@ func setupTestGitRepo(t *testing.T) string {
 	}
 
 	runGit("init")
+	runGit("checkout", "-B", "main")
 	runGit("config", "user.name", "Cadence Test")
 	runGit("config", "user.email", "test@cadence.local")
 

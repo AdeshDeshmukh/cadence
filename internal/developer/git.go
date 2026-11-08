@@ -137,7 +137,7 @@ func (g *GitAssistant) GetBranchSummary(ctx context.Context, workingDir, baseBra
 	}
 
 	currentBranch := getGitBranch(ctx, cleanDir)
-	if baseBranch == "" {
+	if baseBranch == "" || !branchExists(ctx, cleanDir, baseBranch) {
 		baseBranch = detectBaseBranch(ctx, cleanDir)
 	}
 
@@ -564,14 +564,21 @@ func getGitBranch(ctx context.Context, dir string) string {
 	return "main"
 }
 
+func branchExists(ctx context.Context, dir, branch string) bool {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--verify", branch)
+	cmd.Dir = dir
+	return cmd.Run() == nil
+}
+
 func detectBaseBranch(ctx context.Context, dir string) string {
 	candidates := []string{"origin/main", "origin/master", "main", "master"}
 	for _, c := range candidates {
-		cmd := exec.CommandContext(ctx, "git", "rev-parse", "--verify", c)
-		cmd.Dir = dir
-		if err := cmd.Run(); err == nil {
+		if branchExists(ctx, dir, c) {
 			return c
 		}
+	}
+	if branchExists(ctx, dir, "HEAD~1") {
+		return "HEAD~1"
 	}
 	return "main"
 }
