@@ -18,6 +18,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/edit"
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
 	"github.com/AdeshDeshmukh/cadence/internal/storage"
+	"github.com/AdeshDeshmukh/cadence/internal/system"
 	"github.com/AdeshDeshmukh/cadence/pkg/version"
 )
 
@@ -367,6 +368,48 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 			IsDocstring:      isDoc,
 			PreserveAcronyms: acr,
 		}), nil
+	case "system_command_execute":
+		params, _ := req.Params.(map[string]any)
+		input, _ := params["input"].(string)
+		ctrl := system.NewMockController()
+		cmd, ok := system.ParseSystemCommand(input)
+		if !ok {
+			return map[string]any{"parsed": false, "message": "unrecognized system command"}, nil
+		}
+		msg, err := system.ExecuteSystemCommand(context.Background(), ctrl, cmd)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"parsed": true, "command": cmd, "message": msg}, nil
+	case "system_app_action":
+		params, _ := req.Params.(map[string]any)
+		action, _ := params["action"].(string)
+		app, _ := params["app"].(string)
+		return map[string]any{"success": true, "action": action, "app": app, "message": fmt.Sprintf("App action executed: %s %s", action, app)}, nil
+	case "system_window_action":
+		params, _ := req.Params.(map[string]any)
+		action, _ := params["action"].(string)
+		return map[string]any{"success": true, "action": action, "message": fmt.Sprintf("Window action executed: %s", action)}, nil
+	case "system_screenshot":
+		params, _ := req.Params.(map[string]any)
+		clip, _ := params["copy_to_clipboard"].(bool)
+		msg := "Screenshot saved to /tmp/screenshot.png"
+		if clip {
+			msg = "Screenshot copied to clipboard"
+		}
+		return map[string]any{"success": true, "message": msg}, nil
+	case "system_volume":
+		params, _ := req.Params.(map[string]any)
+		if m, ok := params["mute"].(bool); ok && m {
+			return map[string]any{"success": true, "message": "Volume muted"}, nil
+		}
+		if u, ok := params["unmute"].(bool); ok && u {
+			return map[string]any{"success": true, "message": "Volume unmuted"}, nil
+		}
+		if l, ok := params["level"].(float64); ok {
+			return map[string]any{"success": true, "message": fmt.Sprintf("Volume set to %d%%", int(l))}, nil
+		}
+		return map[string]any{"success": true, "message": "Volume unchanged"}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -1755,5 +1798,110 @@ func TestCLI_Code(t *testing.T) {
 	out.Reset()
 	if err := cmdCode(ctx, client, []string{}, &out); err == nil {
 		t.Fatal("expected error on empty text")
+	}
+}
+
+func TestCLI_Sys(t *testing.T) {
+	mockCtrl := system.NewMockController()
+	systemControllerOverride = mockCtrl
+	defer func() { systemControllerOverride = nil }()
+
+	socketPath := filepath.Join(t.TempDir(), "cadence_sys_test.sock")
+	cleanup := startMockDaemon(t, socketPath)
+	defer cleanup()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: socketPath,
+	}
+	ctx := context.Background()
+	var out bytes.Buffer
+
+	// 1. Sys usage when no args
+	out.Reset()
+	if err := cmdSys(ctx, client, []string{}, &out); err != nil {
+		t.Fatalf("cmdSys no args failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "System command automation:") {
+		t.Fatalf("expected usage text, got: %s", out.String())
+	}
+
+	// 2. Natural speech command: open app
+	out.Reset()
+	if err := cmdSys(ctx, client, []string{"open", "Visual", "Studio", "Code"}, &out); err != nil {
+		t.Fatalf("cmdSys voice open failed: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(out.String()), "visual studio code") {
+		t.Fatalf("expected visual studio code in output, got: %s", out.String())
+	}
+
+	// 3. Sys app explicit action
+	out.Reset()
+	if err := cmdSys(ctx, client, []string{"app", "launch", "Chrome"}, &out); err != nil {
+		t.Fatalf("cmdSys app launch failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Chrome") {
+		t.Fatalf("expected Chrome in output, got: %s", out.String())
+	}
+
+	out.Reset()
+	if err := cmdSys(ctx, client, []string{"app", "quit", "Slack"}, &out); err != nil {
+		t.Fatalf("cmdSys app quit failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Slack") {
+		t.Fatalf("expected Slack in output, got: %s", out.String())
+	}
+
+	// 4. Sys window action
+	out.Reset()
+	if err := cmdSys(ctx, client, []string{"window", "minimize"}, &out); err != nil {
+		t.Fatalf("cmdSys window minimize failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "minimize") {
+		t.Fatalf("expected minimize in output, got: %s", out.String())
+	}
+
+	// 5. Sys screenshot
+	out.Reset()
+	if err := cmdSys(ctx, client, []string{"screenshot", "--clipboard"}, &out); err != nil {
+		t.Fatalf("cmdSys screenshot failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "clipboard") {
+		t.Fatalf("expected clipboard in output, got: %s", out.String())
+	}
+
+	// 6. Sys volume
+	out.Reset()
+	if err := cmdSys(ctx, client, []string{"volume", "65"}, &out); err != nil {
+		t.Fatalf("cmdSys volume failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "65%") {
+		t.Fatalf("expected 65%% in output, got: %s", out.String())
+	}
+
+	out.Reset()
+	if err := cmdSys(ctx, client, []string{"volume", "mute"}, &out); err != nil {
+		t.Fatalf("cmdSys volume mute failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "muted") {
+		t.Fatalf("expected muted in output, got: %s", out.String())
+	}
+
+	// 7. Error handling
+	if err := cmdSys(ctx, client, []string{"app"}, &out); err == nil {
+		t.Fatal("expected error on empty app args")
+	}
+	if err := cmdSys(ctx, client, []string{"volume"}, &out); err == nil {
+		t.Fatal("expected error on empty volume args")
+	}
+	if err := cmdSys(ctx, client, []string{"volume", "not-a-number"}, &out); err == nil {
+		t.Fatal("expected error on invalid volume")
+	}
+
+	// 8. Integration through run() entrypoint
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sys", "take", "a", "screenshot"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run sys failed with code %d, stderr: %s", code, stderr.String())
 	}
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/postprocess"
 	"github.com/AdeshDeshmukh/cadence/internal/selection"
 	"github.com/AdeshDeshmukh/cadence/internal/storage"
+	"github.com/AdeshDeshmukh/cadence/internal/system"
 	"github.com/AdeshDeshmukh/cadence/pkg/version"
 )
 
@@ -54,6 +55,7 @@ Commands:
   risk <command>     Audit and classify shell command risk level (Safe, Risky, Destructive)
   git <subcommand>   Git AI integration: commit message and PR description generation (commit, pr)
   code [flags] <words> Format code identifiers (snake, camel, pascal, kebab) and docstrings
+  sys <subcommand>   System command mode: app launch, window control, screenshots (sys, app, window, screenshot, volume)
   context [show|set|clear] Show or manage developer/code editor context (file, language, selection)
   terminal [status|hook] Inspect terminal/shell context or generate shell integration hooks
   app                Show detected active foreground application and category
@@ -214,6 +216,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "code", "casing":
 		if err := cmdCode(ctx, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "sys", "system":
+		if err := cmdSys(ctx, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -2434,6 +2443,279 @@ Examples:
 	}
 
 	fmt.Fprintln(out, result.Result)
+	return nil
+}
+
+var systemControllerOverride system.Controller
+
+func getSystemController() system.Controller {
+	if systemControllerOverride != nil {
+		return systemControllerOverride
+	}
+	return system.NewDefaultController()
+}
+
+func cmdSys(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		fmt.Fprintf(out, `System command automation:
+Usage:
+  cadence sys "<voice instruction>"
+  cadence sys app [launch|focus|quit] <app-name>
+  cadence sys window [minimize|maximize|close|hide]
+  cadence sys screenshot [--window] [--clipboard] [--file <path>]
+  cadence sys volume <0-100|mute|unmute>
+`)
+		return nil
+	}
+
+	sub := strings.ToLower(args[0])
+	switch sub {
+	case "app":
+		return cmdSysApp(ctx, client, args[1:], out)
+	case "window", "win":
+		return cmdSysWindow(ctx, client, args[1:], out)
+	case "screenshot", "screen", "shot":
+		return cmdSysScreenshot(ctx, client, args[1:], out)
+	case "volume", "vol":
+		return cmdSysVolume(ctx, client, args[1:], out)
+	default:
+		// Natural speech command
+		input := strings.Join(args, " ")
+		callCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+		defer cancel()
+
+		ipcRes, err := client.Call(callCtx, "system_command_execute", map[string]any{
+			"input": input,
+		})
+		if err == nil {
+			if m, ok := ipcRes.(map[string]any); ok {
+				if parsed, pOk := m["parsed"].(bool); pOk && parsed {
+					if msg, ok := m["message"].(string); ok {
+						fmt.Fprintln(out, msg)
+						return nil
+					}
+				}
+			}
+		}
+
+		// Fallback to standalone execution
+		parsedCmd, ok := system.ParseSystemCommand(input)
+		if !ok {
+			return fmt.Errorf("unrecognized system command: %q", input)
+		}
+		ctrl := getSystemController()
+		msg, err := system.ExecuteSystemCommand(ctx, ctrl, parsedCmd)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(out, msg)
+		return nil
+	}
+}
+
+func cmdSysApp(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: cadence sys app [launch|focus|quit] <name>")
+	}
+	action := "launch"
+	appName := ""
+	first := strings.ToLower(args[0])
+	if first == "launch" || first == "focus" || first == "quit" || first == "open" || first == "close" {
+		action = first
+		if len(args) < 2 {
+			return fmt.Errorf("missing app name for action %q", action)
+		}
+		appName = strings.Join(args[1:], " ")
+	} else {
+		appName = strings.Join(args, " ")
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+
+	ipcRes, err := client.Call(callCtx, "system_app_action", map[string]any{
+		"action": action,
+		"app":    appName,
+	})
+	if err == nil {
+		if m, ok := ipcRes.(map[string]any); ok {
+			if msg, ok := m["message"].(string); ok {
+				fmt.Fprintln(out, msg)
+				return nil
+			}
+		}
+	}
+
+	// Standalone fallback
+	ctrl := getSystemController()
+	var runErr error
+	var msg string
+	switch action {
+	case "focus":
+		runErr = ctrl.FocusApp(ctx, appName)
+		msg = fmt.Sprintf("Switched to %s", appName)
+	case "quit", "close":
+		runErr = ctrl.QuitApp(ctx, appName)
+		msg = fmt.Sprintf("Quit %s", appName)
+	default:
+		runErr = ctrl.LaunchApp(ctx, appName)
+		msg = fmt.Sprintf("Launched %s", appName)
+	}
+	if runErr != nil {
+		return runErr
+	}
+	fmt.Fprintln(out, msg)
+	return nil
+}
+
+func cmdSysWindow(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	action := "minimize"
+	if len(args) > 0 {
+		action = strings.ToLower(args[0])
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+
+	ipcRes, err := client.Call(callCtx, "system_window_action", map[string]any{
+		"action": action,
+	})
+	if err == nil {
+		if m, ok := ipcRes.(map[string]any); ok {
+			if msg, ok := m["message"].(string); ok {
+				fmt.Fprintln(out, msg)
+				return nil
+			}
+		}
+	}
+
+	// Standalone fallback
+	ctrl := getSystemController()
+	if err := ctrl.ControlWindow(ctx, system.WindowAction(action)); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "Window action executed: %s\n", action)
+	return nil
+}
+
+func cmdSysScreenshot(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	var opts system.ScreenshotOptions
+	var jsonOutput bool
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-w" || arg == "--window":
+			opts.ActiveWindowOnly = true
+		case arg == "-c" || arg == "--clipboard":
+			opts.CopyToClipboard = true
+		case arg == "--json":
+			jsonOutput = true
+		case arg == "-f" || arg == "--file":
+			if i+1 < len(args) {
+				opts.SavePath = args[i+1]
+				i++
+			}
+		}
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	ipcRes, err := client.Call(callCtx, "system_screenshot", map[string]any{
+		"active_window_only": opts.ActiveWindowOnly,
+		"copy_to_clipboard":  opts.CopyToClipboard,
+		"save_path":          opts.SavePath,
+	})
+	if err == nil {
+		if jsonOutput {
+			enc := json.NewEncoder(out)
+			enc.SetIndent("", "  ")
+			return enc.Encode(ipcRes)
+		}
+		if m, ok := ipcRes.(map[string]any); ok {
+			if msg, ok := m["message"].(string); ok {
+				fmt.Fprintln(out, msg)
+				return nil
+			}
+		}
+	}
+
+	// Standalone fallback
+	ctrl := getSystemController()
+	res, err := ctrl.CaptureScreenshot(ctx, opts)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(res)
+	}
+	if res.CopiedToClipboard {
+		fmt.Fprintln(out, "Screenshot copied to clipboard")
+	} else {
+		fmt.Fprintf(out, "Screenshot saved to %s\n", res.Path)
+	}
+	return nil
+}
+
+func cmdSysVolume(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: cadence sys volume <0-100|mute|unmute>")
+	}
+	arg := strings.ToLower(args[0])
+	params := map[string]any{}
+
+	if arg == "mute" {
+		params["mute"] = true
+	} else if arg == "unmute" {
+		params["unmute"] = true
+	} else {
+		cleanLvl := strings.TrimSuffix(arg, "%")
+		lvl, err := strconv.Atoi(cleanLvl)
+		if err != nil {
+			return fmt.Errorf("invalid volume value %q (must be 0-100, mute, or unmute)", arg)
+		}
+		params["level"] = float64(lvl)
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+
+	ipcRes, err := client.Call(callCtx, "system_volume", params)
+	if err == nil {
+		if m, ok := ipcRes.(map[string]any); ok {
+			if msg, ok := m["message"].(string); ok {
+				fmt.Fprintln(out, msg)
+				return nil
+			}
+		}
+	}
+
+	// Standalone fallback
+	ctrl := getSystemController()
+	if m, ok := params["mute"].(bool); ok && m {
+		if err := ctrl.MuteVolume(ctx, true); err != nil {
+			return err
+		}
+		fmt.Fprintln(out, "Volume muted")
+		return nil
+	}
+	if u, ok := params["unmute"].(bool); ok && u {
+		if err := ctrl.MuteVolume(ctx, false); err != nil {
+			return err
+		}
+		fmt.Fprintln(out, "Volume unmuted")
+		return nil
+	}
+	if l, ok := params["level"].(float64); ok {
+		if err := ctrl.SetVolume(ctx, int(l)); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "Volume set to %d%%\n", int(l))
+		return nil
+	}
 	return nil
 }
 
