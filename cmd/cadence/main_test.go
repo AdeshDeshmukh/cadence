@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AdeshDeshmukh/cadence/internal/agent"
 	"github.com/AdeshDeshmukh/cadence/internal/config"
 	"github.com/AdeshDeshmukh/cadence/internal/developer"
 	"github.com/AdeshDeshmukh/cadence/internal/edit"
@@ -425,6 +426,24 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 		}
 		msg := system.FormatSelfFeedback(cmd, system.ModeDictation, false)
 		return map[string]any{"parsed": true, "command": cmd, "message": msg}, nil
+	case "agent_run":
+		params, _ := req.Params.(map[string]any)
+		goal, _ := params["goal"].(string)
+		planOnly, _ := params["plan_only"].(bool)
+		maxSteps, _ := params["max_steps"].(float64)
+		eng := agent.NewEngine(agent.WithSystemController(system.NewMockController()))
+		return eng.Run(context.Background(), goal, agent.RunOptions{
+			PlanOnly: planOnly,
+			MaxSteps: int(maxSteps),
+		})
+	case "agent_history":
+		return []map[string]any{
+			{
+				"id":     "traj-test-1",
+				"goal":   "open chrome and take screenshot",
+				"status": "success",
+			},
+		}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -1997,5 +2016,86 @@ func TestCLI_ModeAndControl(t *testing.T) {
 	code = run([]string{"control", "what", "is", "your", "mode"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run control failed with code %d, stderr: %s", code, stderr.String())
+	}
+}
+
+func TestCLI_Agent(t *testing.T) {
+	mockCtrl := system.NewMockController()
+	systemControllerOverride = mockCtrl
+	defer func() { systemControllerOverride = nil }()
+
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("cad_agent_%d.sock", time.Now().UnixNano()))
+	cleanup := startMockDaemon(t, sockPath)
+	defer cleanup()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sockPath,
+	}
+	ctx := context.Background()
+	var out bytes.Buffer
+
+	// 1. Agent usage when no args
+	out.Reset()
+	if err := cmdAgent(ctx, client, []string{}, &out); err != nil {
+		t.Fatalf("cmdAgent no args failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Autonomous Agent mode:") {
+		t.Fatalf("expected usage text, got: %s", out.String())
+	}
+
+	// 2. Agent history
+	out.Reset()
+	if err := cmdAgent(ctx, client, []string{"history"}, &out); err != nil {
+		t.Fatalf("cmdAgent history failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "open chrome and take screenshot") {
+		t.Fatalf("expected history item, got: %s", out.String())
+	}
+
+	// 3. Plan-only agent run
+	out.Reset()
+	if err := cmdAgent(ctx, client, []string{"--plan-only", "open", "Chrome", "and", "then", "take", "a", "screenshot"}, &out); err != nil {
+		t.Fatalf("cmdAgent plan-only failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Plan-only mode") {
+		t.Fatalf("expected plan-only mode in output, got: %s", out.String())
+	}
+
+	// 4. Full agent run
+	out.Reset()
+	if err := cmdAgent(ctx, client, []string{"open", "Slack", "and", "then", "minimize", "window"}, &out); err != nil {
+		t.Fatalf("cmdAgent run failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Goal: open Slack and then minimize window") {
+		t.Fatalf("expected goal in output, got: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "Status: success") {
+		t.Fatalf("expected success status, got: %s", out.String())
+	}
+
+	// 5. JSON output
+	out.Reset()
+	if err := cmdAgent(ctx, client, []string{"--json", "open", "VS", "Code"}, &out); err != nil {
+		t.Fatalf("cmdAgent json failed: %v", err)
+	}
+	var resMap map[string]any
+	if err := json.Unmarshal(out.Bytes(), &resMap); err != nil {
+		t.Fatalf("invalid json output: %v", err)
+	}
+	if resMap["status"] != "success" {
+		t.Fatalf("expected status success in json, got: %v", resMap["status"])
+	}
+
+	// 6. Missing goal error
+	if err := cmdAgent(ctx, client, []string{"--plan-only"}, &out); err == nil {
+		t.Fatal("expected error on missing goal")
+	}
+
+	// 7. Integration through run() entrypoint
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"agent", "--plan-only", "open", "Chrome"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run agent failed with code %d, stderr: %s", code, stderr.String())
 	}
 }

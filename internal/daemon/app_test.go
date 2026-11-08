@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AdeshDeshmukh/cadence/internal/agent"
 	"github.com/AdeshDeshmukh/cadence/internal/asr"
 	"github.com/AdeshDeshmukh/cadence/internal/audio"
 	"github.com/AdeshDeshmukh/cadence/internal/config"
@@ -2290,5 +2291,81 @@ func TestApp_SelfControlIPC(t *testing.T) {
 	uMap := unrec.(map[string]any)
 	if uMap["parsed"] != false {
 		t.Fatalf("expected parsed false, got %v", uMap)
+	}
+}
+
+func TestApp_AgentIPC(t *testing.T) {
+	mockCtrl := system.NewMockController()
+	agentEng := agent.NewEngine(agent.WithSystemController(mockCtrl))
+	cfg := config.Default()
+	app := NewApp(cfg, WithSystemController(mockCtrl), WithAgentEngine(agentEng))
+	ctx := context.Background()
+
+	// 1. agent_plan error on empty goal
+	if _, err := app.Handle(ctx, ipc.Request{Method: "agent_plan"}); err == nil {
+		t.Fatalf("expected error on empty goal for agent_plan")
+	}
+
+	// 2. agent_plan valid
+	planRes, err := app.Handle(ctx, ipc.Request{
+		Method: "agent_plan",
+		Params: map[string]any{"goal": "open Chrome and then take a screenshot"},
+	})
+	if err != nil {
+		t.Fatalf("agent_plan failed: %v", err)
+	}
+	plan, ok := planRes.(agent.Plan)
+	if !ok || len(plan.Steps) != 2 {
+		t.Fatalf("expected 2 plan steps, got %+v", planRes)
+	}
+
+	// 3. agent_run plan_only
+	runPlanOnly, err := app.Handle(ctx, ipc.Request{
+		Method: "agent_run",
+		Params: map[string]any{
+			"goal":      "open Slack and then minimize window",
+			"plan_only": true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent_run plan_only failed: %v", err)
+	}
+	trajPlan, ok := runPlanOnly.(*agent.ExecutionTrajectory)
+	if !ok || trajPlan.Status != agent.StatusSuccess || len(trajPlan.Steps) != 0 {
+		t.Fatalf("unexpected plan-only trajectory: %+v", runPlanOnly)
+	}
+
+	// 4. agent_run full autonomous execution
+	runFull, err := app.Handle(ctx, ipc.Request{
+		Method: "agent_run",
+		Params: map[string]any{
+			"goal": "open Slack and then minimize window",
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent_run full failed: %v", err)
+	}
+	trajFull, ok := runFull.(*agent.ExecutionTrajectory)
+	if !ok || trajFull.Status != agent.StatusSuccess || len(trajFull.Steps) != 2 {
+		t.Fatalf("unexpected full trajectory: %+v", runFull)
+	}
+	if len(mockCtrl.LaunchedApps) != 1 || mockCtrl.LaunchedApps[0] != "slack" {
+		t.Fatalf("mock launched apps = %v", mockCtrl.LaunchedApps)
+	}
+	if len(mockCtrl.Windows) != 1 || mockCtrl.Windows[0] != system.WindowActionMinimize {
+		t.Fatalf("mock windows = %v", mockCtrl.Windows)
+	}
+
+	// 5. agent_history
+	histRes, err := app.Handle(ctx, ipc.Request{
+		Method: "agent_history",
+		Params: map[string]any{"limit": 5.0},
+	})
+	if err != nil {
+		t.Fatalf("agent_history failed: %v", err)
+	}
+	history, ok := histRes.([]*agent.ExecutionTrajectory)
+	if !ok || len(history) < 2 {
+		t.Fatalf("expected at least 2 history items, got %+v", histRes)
 	}
 }

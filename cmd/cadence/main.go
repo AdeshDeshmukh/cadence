@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AdeshDeshmukh/cadence/internal/agent"
 	"github.com/AdeshDeshmukh/cadence/internal/config"
 	appcontext "github.com/AdeshDeshmukh/cadence/internal/context"
 	"github.com/AdeshDeshmukh/cadence/internal/developer"
@@ -58,6 +59,7 @@ Commands:
   sys <subcommand>   System command mode: app launch, window control, screenshots (sys, app, window, screenshot, volume)
   mode [name]        Show or set active operating mode (dictation, code, command, agent)
   control <phrase>   Execute voice self-control command (e.g. "switch to code mode", "start recording")
+  agent [flags] <goal> Autonomous agent loop: plan, tool call, observe, report
   context [show|set|clear] Show or manage developer/code editor context (file, language, selection)
   terminal [status|hook] Inspect terminal/shell context or generate shell integration hooks
   app                Show detected active foreground application and category
@@ -239,6 +241,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "control", "self":
 		if err := cmdControl(ctx, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "agent":
+		if err := cmdAgent(ctx, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -2807,6 +2816,146 @@ func cmdControl(ctx context.Context, client ipc.Client, args []string, out io.Wr
 	}
 	msg := system.FormatSelfFeedback(cmd, system.ModeDictation, false)
 	fmt.Fprintln(out, msg)
+	return nil
+}
+
+func cmdAgent(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		fmt.Fprintf(out, `Autonomous Agent mode:
+Usage:
+  cadence agent [flags] "<goal>"
+  cadence agent history [limit]
+
+Flags:
+  -p, --plan-only    Generate execution plan without running tools
+  -s, --max-steps    Maximum step execution limit (default 10)
+      --json         Output complete execution trajectory in JSON format
+`)
+		return nil
+	}
+
+	if args[0] == "history" {
+		limit := 10
+		if len(args) > 1 {
+			if l, err := strconv.Atoi(args[1]); err == nil && l > 0 {
+				limit = l
+			}
+		}
+		callCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+		defer cancel()
+
+		ipcRes, err := client.Call(callCtx, "agent_history", map[string]any{
+			"limit": float64(limit),
+		})
+		if err == nil {
+			if list, ok := ipcRes.([]any); ok {
+				if len(list) == 0 {
+					fmt.Fprintln(out, "No agent executions recorded.")
+					return nil
+				}
+				for _, item := range list {
+					if m, ok := item.(map[string]any); ok {
+						fmt.Fprintf(out, "[%s] Goal: %s (Status: %s)\n", m["id"], m["goal"], m["status"])
+					}
+				}
+				return nil
+			}
+		}
+		fmt.Fprintln(out, "No agent executions recorded (daemon offline).")
+		return nil
+	}
+
+	var planOnly bool
+	var jsonOutput bool
+	maxSteps := 10
+	var goalWords []string
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-p" || arg == "--plan-only":
+			planOnly = true
+		case arg == "--json":
+			jsonOutput = true
+		case arg == "-s" || arg == "--max-steps":
+			if i+1 < len(args) {
+				if s, err := strconv.Atoi(args[i+1]); err == nil && s > 0 {
+					maxSteps = s
+					i++
+				}
+			}
+		default:
+			goalWords = append(goalWords, arg)
+		}
+	}
+
+	if len(goalWords) == 0 {
+		return errors.New("missing goal for agent execution (usage: cadence agent [flags] \"<goal>\")")
+	}
+
+	goal := strings.Join(goalWords, " ")
+	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	var traj *agent.ExecutionTrajectory
+	ipcRes, err := client.Call(callCtx, "agent_run", map[string]any{
+		"goal":      goal,
+		"plan_only": planOnly,
+		"max_steps": float64(maxSteps),
+	})
+	if err == nil {
+		if raw, mErr := json.Marshal(ipcRes); mErr == nil {
+			var t agent.ExecutionTrajectory
+			if uErr := json.Unmarshal(raw, &t); uErr == nil {
+				traj = &t
+			}
+		}
+	}
+
+	// Standalone fallback
+	if traj == nil {
+		engine := agent.NewEngine(agent.WithSystemController(getSystemController()))
+		var runErr error
+		traj, runErr = engine.Run(ctx, goal, agent.RunOptions{
+			PlanOnly: planOnly,
+			MaxSteps: maxSteps,
+		})
+		if runErr != nil {
+			return runErr
+		}
+	}
+
+	if jsonOutput {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(traj)
+	}
+
+	// Formatted human-readable output
+	fmt.Fprintf(out, "🎯 Goal: %s\n", traj.Goal)
+	fmt.Fprintf(out, "📋 Plan (%d step(s)):\n", len(traj.Plan.Steps))
+	for _, step := range traj.Plan.Steps {
+		fmt.Fprintf(out, "  %d. %s [%s]\n", step.Index, step.Description, step.Tool)
+	}
+
+	if planOnly {
+		fmt.Fprintln(out, "\n(Plan-only mode: tools were not invoked)")
+		return nil
+	}
+
+	if len(traj.Steps) > 0 {
+		fmt.Fprintln(out, "\n⚡ Execution Steps:")
+		for _, step := range traj.Steps {
+			symbol := "✓"
+			if !step.Observation.Success {
+				symbol = "✗"
+			}
+			fmt.Fprintf(out, "  %s Step %d: %s -> %s\n", symbol, step.Index, step.Thought, step.Observation.Summary)
+		}
+	}
+
+	fmt.Fprintf(out, "\n🏁 Final Report: %s\n", traj.FinalReport)
+	fmt.Fprintf(out, "📊 Status: %s\n", traj.Status)
 	return nil
 }
 

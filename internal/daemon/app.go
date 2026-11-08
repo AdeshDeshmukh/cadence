@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/AdeshDeshmukh/cadence/internal/agent"
 	"github.com/AdeshDeshmukh/cadence/internal/asr"
 	"github.com/AdeshDeshmukh/cadence/internal/audio"
 	"github.com/AdeshDeshmukh/cadence/internal/config"
@@ -98,6 +99,7 @@ type App struct {
 	gitAssistant     *developer.GitAssistant
 	systemCtrl       system.Controller
 	mode             system.OperatingMode
+	agentEngine      *agent.Engine
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -233,6 +235,11 @@ func WithSystemController(c system.Controller) Option {
 // WithOperatingMode sets the initial operating mode.
 func WithOperatingMode(m system.OperatingMode) Option {
 	return func(a *App) { a.mode = m }
+}
+
+// WithAgentEngine sets a custom autonomous agent execution engine.
+func WithAgentEngine(e *agent.Engine) Option {
+	return func(a *App) { a.agentEngine = e }
 }
 
 // NewApp instantiates a fully configured Cadence daemon application.
@@ -419,6 +426,10 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 
 	if a.mode == "" {
 		a.mode = system.ModeDictation
+	}
+
+	if a.agentEngine == nil {
+		a.agentEngine = agent.NewEngine(agent.WithSystemController(a.systemCtrl))
 	}
 
 	if a.capture == nil {
@@ -771,6 +782,11 @@ func (a *App) SetMode(m system.OperatingMode) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.mode = m
+}
+
+// AgentEngine returns the active autonomous agent engine.
+func (a *App) AgentEngine() *agent.Engine {
+	return a.agentEngine
 }
 
 // Router returns the active application context router.
@@ -1611,6 +1627,67 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			"is_recording": a.IsRecording(),
 			"message":      system.FormatSelfFeedback(cmd, a.Mode(), a.IsRecording()),
 		}, nil
+
+	case "agent_plan":
+		if a.agentEngine == nil {
+			return nil, errors.New("agent engine is not configured")
+		}
+		var goal string
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if g, ok := params["goal"].(string); ok {
+				goal = g
+			}
+		}
+		if strings.TrimSpace(goal) == "" {
+			return nil, errors.New("missing 'goal' parameter for agent_plan")
+		}
+		plan, err := a.agentEngine.Plan(ctx, goal)
+		if err != nil {
+			return nil, fmt.Errorf("agent plan: %w", err)
+		}
+		return plan, nil
+
+	case "agent_run":
+		if a.agentEngine == nil {
+			return nil, errors.New("agent engine is not configured")
+		}
+		var goal string
+		var planOnly bool
+		var maxSteps int
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if g, ok := params["goal"].(string); ok {
+				goal = g
+			}
+			if p, ok := params["plan_only"].(bool); ok {
+				planOnly = p
+			}
+			if m, ok := params["max_steps"].(float64); ok && m > 0 {
+				maxSteps = int(m)
+			}
+		}
+		if strings.TrimSpace(goal) == "" {
+			return nil, errors.New("missing 'goal' parameter for agent_run")
+		}
+		traj, err := a.agentEngine.Run(ctx, goal, agent.RunOptions{
+			PlanOnly: planOnly,
+			MaxSteps: maxSteps,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("agent run: %w", err)
+		}
+		return traj, nil
+
+	case "agent_history":
+		if a.agentEngine == nil {
+			return nil, errors.New("agent engine is not configured")
+		}
+		limit := 10
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if l, ok := params["limit"].(float64); ok && l > 0 {
+				limit = int(l)
+			}
+		}
+		return a.agentEngine.History(limit), nil
 
 	case "selection_get":
 		var res selection.Result
