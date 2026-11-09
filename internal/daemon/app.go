@@ -1728,6 +1728,133 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			"result": res,
 		}, nil
 
+	case "permission_list":
+		if a.agentEngine == nil || a.agentEngine.Permissions() == nil {
+			return nil, errors.New("agent engine or permission engine is not configured")
+		}
+		perms := a.agentEngine.Permissions()
+		rules := perms.Rules()
+		return map[string]any{
+			"default_level": string(perms.DefaultLevel()),
+			"rules":         rules,
+			"count":         len(rules),
+		}, nil
+
+	case "permission_grant":
+		if a.agentEngine == nil || a.agentEngine.Permissions() == nil {
+			return nil, errors.New("agent engine or permission engine is not configured")
+		}
+		var tool string
+		action := "*"
+		level := "allow"
+		var scope []string
+		var desc string
+
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if t, ok := params["tool"].(string); ok {
+				tool = t
+			}
+			if act, ok := params["action"].(string); ok && strings.TrimSpace(act) != "" {
+				action = act
+			}
+			if lvl, ok := params["level"].(string); ok && strings.TrimSpace(lvl) != "" {
+				level = lvl
+			}
+			if s, ok := params["scope"].([]any); ok {
+				for _, item := range s {
+					if str, ok := item.(string); ok && strings.TrimSpace(str) != "" {
+						scope = append(scope, strings.TrimSpace(str))
+					}
+				}
+			} else if sStr, ok := params["scope"].(string); ok && strings.TrimSpace(sStr) != "" {
+				for _, part := range strings.Split(sStr, ",") {
+					if trimmed := strings.TrimSpace(part); trimmed != "" {
+						scope = append(scope, trimmed)
+					}
+				}
+			}
+			if d, ok := params["description"].(string); ok {
+				desc = d
+			}
+		}
+
+		if strings.TrimSpace(tool) == "" {
+			return nil, errors.New("missing 'tool' parameter for permission_grant")
+		}
+		if !agent.IsValidPermissionLevel(level) {
+			return nil, fmt.Errorf("invalid permission level %q (valid: allow, deny, ask)", level)
+		}
+
+		rule := agent.PermissionRule{
+			Tool:        tool,
+			Action:      action,
+			Level:       agent.PermissionLevel(strings.ToLower(level)),
+			Scope:       scope,
+			Description: desc,
+		}
+		if err := a.agentEngine.Permissions().Grant(rule); err != nil {
+			return nil, fmt.Errorf("permission grant: %w", err)
+		}
+		return map[string]any{
+			"ok":   true,
+			"rule": rule,
+		}, nil
+
+	case "permission_revoke":
+		if a.agentEngine == nil || a.agentEngine.Permissions() == nil {
+			return nil, errors.New("agent engine or permission engine is not configured")
+		}
+		var tool string
+		action := "*"
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if t, ok := params["tool"].(string); ok {
+				tool = t
+			}
+			if act, ok := params["action"].(string); ok && strings.TrimSpace(act) != "" {
+				action = act
+			}
+		}
+		if strings.TrimSpace(tool) == "" {
+			return nil, errors.New("missing 'tool' parameter for permission_revoke")
+		}
+		revoked := a.agentEngine.Permissions().Revoke(tool, action)
+		return map[string]any{
+			"ok":      true,
+			"revoked": revoked,
+			"tool":    tool,
+			"action":  action,
+		}, nil
+
+	case "permission_check":
+		if a.agentEngine == nil || a.agentEngine.Permissions() == nil {
+			return nil, errors.New("agent engine or permission engine is not configured")
+		}
+		var tool string
+		var action string
+		var pMap map[string]any
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if t, ok := params["tool"].(string); ok {
+				tool = t
+			}
+			if act, ok := params["action"].(string); ok {
+				action = act
+			}
+			if p, ok := params["params"].(map[string]any); ok {
+				pMap = p
+			}
+		}
+		if strings.TrimSpace(tool) == "" {
+			return nil, errors.New("missing 'tool' parameter for permission_check")
+		}
+		decision := a.agentEngine.Permissions().Check(tool, action, pMap)
+		return map[string]any{
+			"granted":       decision.Granted,
+			"level":         string(decision.Level),
+			"reason":        decision.Reason,
+			"requires_user": decision.RequiresUser,
+			"matched_rule":  decision.MatchedRule,
+		}, nil
+
 	case "selection_get":
 		var res selection.Result
 		var err error

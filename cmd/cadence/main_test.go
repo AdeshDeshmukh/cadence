@@ -464,6 +464,45 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 			"name":   name,
 			"result": res,
 		}, nil
+	case "permission_list":
+		pe := agent.NewDefaultPermissionEngine()
+		return map[string]any{
+			"default_level": string(pe.DefaultLevel()),
+			"rules":         pe.Rules(),
+			"count":         len(pe.Rules()),
+		}, nil
+	case "permission_grant":
+		params, _ := req.Params.(map[string]any)
+		tool, _ := params["tool"].(string)
+		action, _ := params["action"].(string)
+		level, _ := params["level"].(string)
+		return map[string]any{
+			"ok": true,
+			"rule": map[string]any{
+				"tool":   tool,
+				"action": action,
+				"level":  level,
+			},
+		}, nil
+	case "permission_revoke":
+		return map[string]any{
+			"ok":      true,
+			"revoked": true,
+		}, nil
+	case "permission_check":
+		params, _ := req.Params.(map[string]any)
+		tool, _ := params["tool"].(string)
+		action, _ := params["action"].(string)
+		pMap, _ := params["params"].(map[string]any)
+		pe := agent.NewDefaultPermissionEngine()
+		dec := pe.Check(tool, action, pMap)
+		return map[string]any{
+			"granted":       dec.Granted,
+			"level":         string(dec.Level),
+			"reason":        dec.Reason,
+			"requires_user": dec.RequiresUser,
+			"matched_rule":  dec.MatchedRule,
+		}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -2189,5 +2228,83 @@ func TestCLI_Tools(t *testing.T) {
 	code = run([]string{"tool", "echo", "message=run-integration"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run tool echo failed with code %d, stderr: %s", code, stderr.String())
+	}
+}
+
+func TestCLI_Permissions(t *testing.T) {
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("cad_perm_%d.sock", time.Now().UnixNano()))
+	cleanup := startMockDaemon(t, sockPath)
+	defer cleanup()
+
+	client := ipc.Client{Network: "unix", Address: sockPath}
+	ctx := context.Background()
+	var out bytes.Buffer
+
+	// 1. permissions list
+	if err := cmdPermissions(ctx, client, []string{"list"}, &out); err != nil {
+		t.Fatalf("cmdPermissions list failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Permission Policies") || !strings.Contains(out.String(), "fs") {
+		t.Fatalf("unexpected permissions list output: %s", out.String())
+	}
+
+	// 2. permissions grant
+	out.Reset()
+	if err := cmdPermissions(ctx, client, []string{"grant", "fs", "write", "--deny"}, &out); err != nil {
+		t.Fatalf("cmdPermissions grant failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "tool=fs action=write level=deny") {
+		t.Fatalf("unexpected grant output: %s", out.String())
+	}
+
+	// 3. permissions revoke
+	out.Reset()
+	if err := cmdPermissions(ctx, client, []string{"revoke", "fs", "write"}, &out); err != nil {
+		t.Fatalf("cmdPermissions revoke failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Revoked permission rule") {
+		t.Fatalf("unexpected revoke output: %s", out.String())
+	}
+
+	// 4. permissions check (allowed)
+	out.Reset()
+	if err := cmdPermissions(ctx, client, []string{"check", "fs", "read", "path=main.go"}, &out); err != nil {
+		t.Fatalf("cmdPermissions check failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Permission Check: ALLOWED") {
+		t.Fatalf("expected allowed check output, got: %s", out.String())
+	}
+
+	// 5. permissions check (denied on sensitive path)
+	out.Reset()
+	if err := cmdPermissions(ctx, client, []string{"check", "fs", "read", "path=/etc/shadow"}, &out); err != nil {
+		t.Fatalf("cmdPermissions check failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Permission Check: DENIED") {
+		t.Fatalf("expected denied check output for /etc/shadow, got: %s", out.String())
+	}
+
+	// 6. Error handling
+	if err := cmdPermissions(ctx, client, []string{"grant"}, &out); err == nil {
+		t.Fatal("expected error on empty grant args")
+	}
+	if err := cmdPermissions(ctx, client, []string{"revoke"}, &out); err == nil {
+		t.Fatal("expected error on empty revoke args")
+	}
+	if err := cmdPermissions(ctx, client, []string{"check"}, &out); err == nil {
+		t.Fatal("expected error on empty check args")
+	}
+
+	// 7. run() CLI entrypoint integration
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"permissions", "list"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run permissions list failed with code %d, stderr: %s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	code = run([]string{"perms", "check", "echo", "message=test"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run perms check failed with code %d, stderr: %s", code, stderr.String())
 	}
 }

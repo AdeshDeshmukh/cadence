@@ -49,6 +49,7 @@ type Registry struct {
 	tools          map[string]ToolDefinition
 	systemCtrl     system.Controller
 	searchProvider SearchProvider
+	permissions    *PermissionEngine
 }
 
 // NewRegistry initializes a ToolRegistry pre-populated with standard Cadence agent tools.
@@ -60,10 +61,25 @@ func NewRegistry(ctrl system.Controller, searchProvider SearchProvider) *Registr
 		tools:          make(map[string]ToolDefinition),
 		systemCtrl:     ctrl,
 		searchProvider: searchProvider,
+		permissions:    NewDefaultPermissionEngine(),
 	}
 
 	r.registerBuiltinTools()
 	return r
+}
+
+// SetPermissions configures the active permission engine.
+func (r *Registry) SetPermissions(pe *PermissionEngine) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.permissions = pe
+}
+
+// Permissions returns the active permission engine.
+func (r *Registry) Permissions() *PermissionEngine {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.permissions
 }
 
 // Register registers a tool definition in the registry.
@@ -77,6 +93,14 @@ func (r *Registry) Register(tool ToolDefinition) error {
 		return fmt.Errorf("tool %q must have an executable handler", tool.Name)
 	}
 	r.tools[tool.Name] = tool
+	if r.permissions != nil {
+		_ = r.permissions.Grant(PermissionRule{
+			Tool:        tool.Name,
+			Action:      "*",
+			Level:       PermissionAllow,
+			Description: fmt.Sprintf("Automatically allowed registered tool %s", tool.Name),
+		})
+	}
 	return nil
 }
 
@@ -137,6 +161,27 @@ func (r *Registry) Call(ctx context.Context, name string, params map[string]any)
 					Error:   fmt.Sprintf("missing required parameter %q for tool %q", p.Name, name),
 				}, nil
 			}
+		}
+	}
+
+	// Permission enforcement check
+	r.mu.RLock()
+	perms := r.permissions
+	r.mu.RUnlock()
+
+	if perms != nil {
+		action := ""
+		if params != nil {
+			if a, ok := params["action"].(string); ok {
+				action = a
+			}
+		}
+		decision := perms.Check(name, action, params)
+		if !decision.Granted {
+			return ToolResult{
+				Success: false,
+				Error:   fmt.Sprintf("permission denied: %s", decision.Reason),
+			}, nil
 		}
 	}
 

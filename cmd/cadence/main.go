@@ -62,6 +62,7 @@ Commands:
   agent [flags] <goal> Autonomous agent loop: plan, tool call, observe, report
   tools [list|schema] Inspect registered agent tools and function schemas
   tool <name> [k=v...] Invoke a specific agent tool directly (e.g. "tool fs action=list path=.")
+  permissions [list|grant|revoke|check] Manage per-tool permission policies (allow, deny, ask)
   context [show|set|clear] Show or manage developer/code editor context (file, language, selection)
   terminal [status|hook] Inspect terminal/shell context or generate shell integration hooks
   app                Show detected active foreground application and category
@@ -264,6 +265,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "tool":
 		if err := cmdTool(ctx, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "permissions", "permission", "perms":
+		if err := cmdPermissions(ctx, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -3088,6 +3096,242 @@ func cmdTool(ctx context.Context, client ipc.Client, args []string, out io.Write
 		fmt.Fprintln(out, result.Output)
 	} else {
 		fmt.Fprintln(out, "Tool executed successfully.")
+	}
+	return nil
+}
+
+func cmdPermissions(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	sub := "list"
+	var rest []string
+	if len(args) > 0 {
+		sub = strings.ToLower(args[0])
+		rest = args[1:]
+	}
+
+	switch sub {
+	case "list", "show", "ls":
+		return cmdPermissionsList(ctx, client, out)
+	case "grant", "set", "allow", "deny", "ask":
+		return cmdPermissionsGrant(ctx, client, sub, rest, out)
+	case "revoke", "rm", "delete":
+		return cmdPermissionsRevoke(ctx, client, rest, out)
+	case "check", "test":
+		return cmdPermissionsCheck(ctx, client, rest, out)
+	default:
+		// If first argument is a tool name (e.g. "cadence permissions fs ..."), treat as check or list
+		if len(args) >= 1 && !strings.HasPrefix(args[0], "-") {
+			return cmdPermissionsCheck(ctx, client, args, out)
+		}
+		return fmt.Errorf("unknown permissions subcommand: %s (supported: list, grant, revoke, check)", sub)
+	}
+}
+
+func cmdPermissionsList(ctx context.Context, client ipc.Client, out io.Writer) error {
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	var defaultLvl string
+	var rules []agent.PermissionRule
+
+	res, err := client.Call(callCtx, "permission_list", nil)
+	if err == nil {
+		if m, ok := res.(map[string]any); ok {
+			if dl, ok := m["default_level"].(string); ok {
+				defaultLvl = dl
+			}
+			if raw, mErr := json.Marshal(m["rules"]); mErr == nil {
+				_ = json.Unmarshal(raw, &rules)
+			}
+		}
+	} else {
+		// Standalone fallback
+		pe := agent.NewDefaultPermissionEngine()
+		defaultLvl = string(pe.DefaultLevel())
+		rules = pe.Rules()
+	}
+
+	fmt.Fprintf(out, "Permission Policies (Default: %s):\n", defaultLvl)
+	fmt.Fprintf(out, "  %-15s %-12s %-10s %s\n", "TOOL", "ACTION", "LEVEL", "SCOPE")
+	fmt.Fprintf(out, "  %-15s %-12s %-10s %s\n", "---------------", "------------", "----------", "------------------------------")
+
+	for _, r := range rules {
+		scopeStr := "-"
+		if len(r.Scope) > 0 {
+			scopeStr = strings.Join(r.Scope, ", ")
+		}
+		fmt.Fprintf(out, "  %-15s %-12s %-10s %s\n", r.Tool, r.Action, string(r.Level), scopeStr)
+	}
+	return nil
+}
+
+func cmdPermissionsGrant(ctx context.Context, client ipc.Client, subcmd string, args []string, out io.Writer) error {
+	var tool string
+	action := "*"
+	level := "allow"
+	var scope []string
+	var desc string
+
+	if subcmd == "allow" || subcmd == "deny" || subcmd == "ask" {
+		level = subcmd
+	}
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--allow" {
+			level = "allow"
+		} else if arg == "--deny" {
+			level = "deny"
+		} else if arg == "--ask" {
+			level = "ask"
+		} else if strings.HasPrefix(arg, "--level=") {
+			level = strings.TrimPrefix(arg, "--level=")
+		} else if arg == "--level" && i+1 < len(args) {
+			level = args[i+1]
+			i++
+		} else if strings.HasPrefix(arg, "--scope=") {
+			for _, p := range strings.Split(strings.TrimPrefix(arg, "--scope="), ",") {
+				if t := strings.TrimSpace(p); t != "" {
+					scope = append(scope, t)
+				}
+			}
+		} else if arg == "--scope" && i+1 < len(args) {
+			for _, p := range strings.Split(args[i+1], ",") {
+				if t := strings.TrimSpace(p); t != "" {
+					scope = append(scope, t)
+				}
+			}
+			i++
+		} else if strings.HasPrefix(arg, "--desc=") {
+			desc = strings.TrimPrefix(arg, "--desc=")
+		} else if arg == "--desc" && i+1 < len(args) {
+			desc = args[i+1]
+			i++
+		} else if !strings.HasPrefix(arg, "-") {
+			if tool == "" {
+				tool = arg
+			} else if action == "*" {
+				action = arg
+			}
+		}
+	}
+
+	if tool == "" {
+		return errors.New("usage: cadence permissions grant <tool> [action] [--allow|--deny|--ask] [--scope <paths/cmds>]")
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	_, err := client.Call(callCtx, "permission_grant", map[string]any{
+		"tool":        tool,
+		"action":      action,
+		"level":       level,
+		"scope":       scope,
+		"description": desc,
+	})
+	if err != nil {
+		fmt.Fprintf(out, "Warning: daemon offline or grant failed (%v). Rule valid locally.\n", err)
+	}
+
+	fmt.Fprintf(out, "Permission rule granted: tool=%s action=%s level=%s", tool, action, level)
+	if len(scope) > 0 {
+		fmt.Fprintf(out, " scope=[%s]", strings.Join(scope, ", "))
+	}
+	fmt.Fprintln(out, "")
+	return nil
+}
+
+func cmdPermissionsRevoke(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: cadence permissions revoke <tool> [action]")
+	}
+	tool := args[0]
+	action := "*"
+	if len(args) > 1 && !strings.HasPrefix(args[1], "-") {
+		action = args[1]
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	res, err := client.Call(callCtx, "permission_revoke", map[string]any{
+		"tool":   tool,
+		"action": action,
+	})
+	if err != nil {
+		return fmt.Errorf("permission revoke failed: %w", err)
+	}
+
+	revoked := true
+	if m, ok := res.(map[string]any); ok {
+		if r, ok := m["revoked"].(bool); ok {
+			revoked = r
+		}
+	}
+
+	if revoked {
+		fmt.Fprintf(out, "Revoked permission rule for tool=%s action=%s\n", tool, action)
+	} else {
+		fmt.Fprintf(out, "No matching explicit rule found for tool=%s action=%s (using default policy)\n", tool, action)
+	}
+	return nil
+}
+
+func cmdPermissionsCheck(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: cadence permissions check <tool> [action] [param=value...]")
+	}
+	tool := args[0]
+	action := "*"
+	params := make(map[string]any)
+
+	idx := 1
+	if idx < len(args) && !strings.Contains(args[idx], "=") && !strings.HasPrefix(args[idx], "-") {
+		action = args[idx]
+		idx++
+	}
+
+	for ; idx < len(args); idx++ {
+		arg := args[idx]
+		if strings.Contains(arg, "=") {
+			parts := strings.SplitN(arg, "=", 2)
+			params[parts[0]] = parts[1]
+		}
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	var decision agent.PermissionDecision
+	res, err := client.Call(callCtx, "permission_check", map[string]any{
+		"tool":   tool,
+		"action": action,
+		"params": params,
+	})
+	if err == nil {
+		if raw, mErr := json.Marshal(res); mErr == nil {
+			_ = json.Unmarshal(raw, &decision)
+		}
+	} else {
+		// Standalone fallback
+		pe := agent.NewDefaultPermissionEngine()
+		decision = pe.Check(tool, action, params)
+	}
+
+	status := "DENIED"
+	if decision.Granted {
+		status = "ALLOWED"
+	} else if decision.RequiresUser {
+		status = "CONFIRMATION_REQUIRED"
+	}
+
+	fmt.Fprintf(out, "Permission Check: %s\n", status)
+	fmt.Fprintf(out, "  Tool:         %s\n", tool)
+	fmt.Fprintf(out, "  Action:       %s\n", action)
+	fmt.Fprintf(out, "  Level:        %s\n", string(decision.Level))
+	fmt.Fprintf(out, "  Reason:       %s\n", decision.Reason)
+	if decision.MatchedRule != nil {
+		fmt.Fprintf(out, "  Matched Rule: %s.%s (%s)\n", decision.MatchedRule.Tool, decision.MatchedRule.Action, decision.MatchedRule.Level)
 	}
 	return nil
 }

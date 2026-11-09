@@ -43,6 +43,15 @@ func WithMaxSteps(n int) Option {
 	}
 }
 
+// WithPermissionEngine sets a custom permission engine for the agent loop.
+func WithPermissionEngine(pe *PermissionEngine) Option {
+	return func(e *Engine) {
+		if pe != nil && e.registry != nil {
+			e.registry.SetPermissions(pe)
+		}
+	}
+}
+
 // NewEngine creates a new Agent loop engine with default built-in tools.
 func NewEngine(opts ...Option) *Engine {
 	e := &Engine{
@@ -57,7 +66,14 @@ func NewEngine(opts ...Option) *Engine {
 		e.systemCtrl = system.NewDefaultController()
 	}
 
-	e.registry = NewRegistry(e.systemCtrl, e.searchProvider)
+	if e.registry == nil {
+		e.registry = NewRegistry(e.systemCtrl, e.searchProvider)
+	}
+
+	// Re-run options in case WithPermissionEngine was supplied before registry was created
+	for _, opt := range opts {
+		opt(e)
+	}
 
 	return e
 }
@@ -65,6 +81,14 @@ func NewEngine(opts ...Option) *Engine {
 // Registry returns the active tool registry.
 func (e *Engine) Registry() *Registry {
 	return e.registry
+}
+
+// Permissions returns the active permission engine.
+func (e *Engine) Permissions() *PermissionEngine {
+	if e.registry == nil {
+		return nil
+	}
+	return e.registry.Permissions()
 }
 
 // RegisterTool adds or overrides a named tool handler in the registry.
