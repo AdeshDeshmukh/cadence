@@ -2274,6 +2274,7 @@ func TestApp_SelfControlIPC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cancel recording failed: %v", err)
 	}
+	time.Sleep(50 * time.Millisecond)
 
 	// 8. self_control_execute error handling
 	_, err = app.Handle(ctx, ipc.Request{Method: "self_control_execute"})

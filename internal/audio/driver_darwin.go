@@ -46,6 +46,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 )
@@ -63,7 +64,7 @@ type DarwinAudioDriver struct {
 	buffers    [3]C.AudioQueueBufferRef
 	outChan    chan<- []float32
 	ctx        context.Context
-	isRunning  bool
+	isRunning  atomic.Bool
 	sampleRate int
 }
 
@@ -73,7 +74,7 @@ func cadenceAudioInputCallback(audioData unsafe.Pointer, byteSize C.UInt32) {
 	driver := activeAQ
 	registryMu.RUnlock()
 
-	if driver == nil || !driver.isRunning || audioData == nil {
+	if driver == nil || !driver.isRunning.Load() || audioData == nil {
 		return
 	}
 
@@ -104,7 +105,7 @@ func (d *DarwinAudioDriver) StartStream(ctx context.Context, sampleRate int, out
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if d.isRunning {
+	if d.isRunning.Load() {
 		return errors.New("audio: darwin audio driver already running")
 	}
 
@@ -142,8 +143,10 @@ func (d *DarwinAudioDriver) StartStream(ctx context.Context, sampleRate int, out
 	activeAQ = d
 	registryMu.Unlock()
 
+	d.isRunning.Store(true)
 	startStatus := C.AudioQueueStart(d.queue, nil)
 	if startStatus != 0 {
+		d.isRunning.Store(false)
 		C.AudioQueueDispose(d.queue, C.Boolean(1))
 		registryMu.Lock()
 		activeAQ = nil
@@ -151,7 +154,6 @@ func (d *DarwinAudioDriver) StartStream(ctx context.Context, sampleRate int, out
 		return errors.New("audio: failed to start AudioQueue capture")
 	}
 
-	d.isRunning = true
 	return nil
 }
 
@@ -160,11 +162,11 @@ func (d *DarwinAudioDriver) StopStream() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if !d.isRunning {
+	if !d.isRunning.Load() {
 		return nil
 	}
 
-	d.isRunning = false
+	d.isRunning.Store(false)
 	registryMu.Lock()
 	activeAQ = nil
 	registryMu.Unlock()
