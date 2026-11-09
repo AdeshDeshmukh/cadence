@@ -538,6 +538,80 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 			"reason":                dec.Reason,
 			"prompt":                dec.Prompt,
 		}, nil
+	case "meeting_start":
+		params, _ := req.Params.(map[string]any)
+		title, _ := params["title"].(string)
+		if title == "" {
+			title = "Mock Meeting"
+		}
+		return map[string]any{
+			"id":         "mtg-mock-1",
+			"title":      title,
+			"state":      "recording",
+			"audio_path": "/tmp/mock-meeting.wav",
+		}, nil
+	case "meeting_stop":
+		return map[string]any{
+			"id":          "mtg-mock-1",
+			"title":       "Mock Meeting",
+			"state":       "stopped",
+			"audio_path":  "/tmp/mock-meeting.wav",
+			"duration_ms": float64(125000),
+			"segments": []any{
+				map[string]any{"id": "seg-1", "text": "Segment one"},
+			},
+		}, nil
+	case "meeting_pause":
+		return map[string]any{"ok": true, "status": map[string]any{"is_paused": true}}, nil
+	case "meeting_resume":
+		return map[string]any{"ok": true, "status": map[string]any{"is_paused": false}}, nil
+	case "meeting_status":
+		return map[string]any{
+			"is_recording":  true,
+			"is_paused":     false,
+			"elapsed_ms":    float64(45000),
+			"segment_count": float64(3),
+			"active_session": map[string]any{
+				"id":         "mtg-mock-1",
+				"title":      "Mock Sync",
+				"audio_path": "/tmp/mock-meeting.wav",
+			},
+		}, nil
+	case "meeting_list":
+		return []any{
+			map[string]any{
+				"id":          "mtg-mock-1",
+				"title":       "Architecture Sync",
+				"state":       "stopped",
+				"duration_ms": float64(3600000),
+				"created_at":  time.Now().UTC().Format(time.RFC3339Nano),
+			},
+		}, nil
+	case "meeting_get":
+		return map[string]any{
+			"meeting": map[string]any{
+				"id":          "mtg-mock-1",
+				"title":       "Architecture Sync",
+				"state":       "stopped",
+				"audio_path":  "/tmp/mock-meeting.wav",
+				"duration_ms": float64(3600000),
+				"created_at":  time.Now().UTC().Format(time.RFC3339Nano),
+			},
+			"segments": []any{
+				map[string]any{
+					"start_ms": float64(0),
+					"end_ms":   float64(15000),
+					"text":     "Welcome team to the architecture review.",
+				},
+				map[string]any{
+					"start_ms": float64(15000),
+					"end_ms":   float64(30000),
+					"text":     "Today we are discussing continuous recording mode.",
+				},
+			},
+		}, nil
+	case "meeting_delete":
+		return map[string]any{"ok": true, "id": "mtg-mock-1"}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -2410,5 +2484,109 @@ func TestCLI_Policy(t *testing.T) {
 	code = run([]string{"policy", "eval", "echo", "run", "message=ping"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run policy eval failed with code %d, stderr: %s", code, stderr.String())
+	}
+}
+
+func TestCLI_Meeting(t *testing.T) {
+	sock := filepath.Join(os.TempDir(), fmt.Sprintf("cad_mtg_%d.sock", time.Now().UnixNano()))
+	stop := startMockDaemon(t, sock)
+	defer stop()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sock,
+	}
+	ctx := context.Background()
+
+	// 1. meeting status
+	var out bytes.Buffer
+	if err := cmdMeeting(ctx, client, []string{"status"}, &out); err != nil {
+		t.Fatalf("cmdMeeting status failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Meeting Session:") || !strings.Contains(out.String(), "Mock Sync") {
+		t.Fatalf("unexpected status output: %s", out.String())
+	}
+
+	// 2. meeting start
+	out.Reset()
+	if err := cmdMeeting(ctx, client, []string{"start", "Product", "Review"}, &out); err != nil {
+		t.Fatalf("cmdMeeting start failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Continuous meeting recording started.") || !strings.Contains(out.String(), "Product Review") {
+		t.Fatalf("unexpected start output: %s", out.String())
+	}
+
+	// 3. meeting pause
+	out.Reset()
+	if err := cmdMeeting(ctx, client, []string{"pause"}, &out); err != nil {
+		t.Fatalf("cmdMeeting pause failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Meeting recording paused.") {
+		t.Fatalf("unexpected pause output: %s", out.String())
+	}
+
+	// 4. meeting resume
+	out.Reset()
+	if err := cmdMeeting(ctx, client, []string{"resume"}, &out); err != nil {
+		t.Fatalf("cmdMeeting resume failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Meeting recording resumed.") {
+		t.Fatalf("unexpected resume output: %s", out.String())
+	}
+
+	// 5. meeting stop
+	out.Reset()
+	if err := cmdMeeting(ctx, client, []string{"stop"}, &out); err != nil {
+		t.Fatalf("cmdMeeting stop failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Meeting recording stopped.") || !strings.Contains(out.String(), "02:05") {
+		t.Fatalf("unexpected stop output: %s", out.String())
+	}
+
+	// 6. meeting list
+	out.Reset()
+	if err := cmdMeeting(ctx, client, []string{"list", "10"}, &out); err != nil {
+		t.Fatalf("cmdMeeting list failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Architecture Sync") || !strings.Contains(out.String(), "60:00") {
+		t.Fatalf("unexpected list output: %s", out.String())
+	}
+
+	// 7. meeting show
+	out.Reset()
+	if err := cmdMeeting(ctx, client, []string{"show", "mtg-mock-1"}, &out); err != nil {
+		t.Fatalf("cmdMeeting show failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Meeting:    Architecture Sync (mtg-mock-1)") || !strings.Contains(out.String(), "Welcome team to the architecture review.") {
+		t.Fatalf("unexpected show output: %s", out.String())
+	}
+
+	// 8. meeting delete
+	out.Reset()
+	if err := cmdMeeting(ctx, client, []string{"delete", "mtg-mock-1"}, &out); err != nil {
+		t.Fatalf("cmdMeeting delete failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Meeting mtg-mock-1 deleted.") {
+		t.Fatalf("unexpected delete output: %s", out.String())
+	}
+
+	// 9. meeting help
+	out.Reset()
+	if err := cmdMeeting(ctx, client, []string{"help"}, &out); err != nil {
+		t.Fatalf("cmdMeeting help failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Usage: cadence meeting <subcommand>") {
+		t.Fatalf("unexpected help output: %s", out.String())
+	}
+
+	// 10. Error validation
+	if err := cmdMeeting(ctx, client, []string{"show"}, &out); err == nil {
+		t.Fatal("expected error showing meeting without id")
+	}
+	if err := cmdMeeting(ctx, client, []string{"delete"}, &out); err == nil {
+		t.Fatal("expected error deleting meeting without id")
+	}
+	if err := cmdMeeting(ctx, client, []string{"unknown_action"}, &out); err == nil {
+		t.Fatal("expected error for unknown meeting subcommand")
 	}
 }
