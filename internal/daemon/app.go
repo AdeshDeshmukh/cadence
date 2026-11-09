@@ -2709,6 +2709,79 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			"speaker_count": len(speakers),
 		}, nil
 
+	case "meeting_speaker_rename":
+		if a.meetingMgr == nil {
+			return nil, errors.New("meeting manager not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		id, _ := params["meeting_id"].(string)
+		if id == "" {
+			id, _ = params["id"].(string)
+		}
+		if strings.TrimSpace(id) == "" {
+			return nil, errors.New("missing meeting_id parameter")
+		}
+		from, _ := params["from"].(string)
+		to, _ := params["to"].(string)
+		if strings.TrimSpace(from) == "" || strings.TrimSpace(to) == "" {
+			return nil, errors.New("from and to parameters are required")
+		}
+		if err := a.meetingMgr.RenameSpeaker(ctx, id, from, to); err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok":         true,
+			"meeting_id": id,
+			"from":       from,
+			"to":         to,
+		}, nil
+
+	case "meeting_speaker_list":
+		if a.meetingMgr == nil {
+			return nil, errors.New("meeting manager not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		id, _ := params["meeting_id"].(string)
+		if id == "" {
+			id, _ = params["id"].(string)
+		}
+		if strings.TrimSpace(id) == "" {
+			return nil, errors.New("missing meeting_id parameter")
+		}
+		speakers, err := a.meetingMgr.ListSpeakers(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok":         true,
+			"meeting_id": id,
+			"speakers":   speakers,
+			"count":      len(speakers),
+		}, nil
+
+	case "meeting_turns":
+		if a.meetingMgr == nil {
+			return nil, errors.New("meeting manager not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		id, _ := params["meeting_id"].(string)
+		if id == "" {
+			id, _ = params["id"].(string)
+		}
+		if strings.TrimSpace(id) == "" {
+			return nil, errors.New("missing meeting_id parameter")
+		}
+		turns, err := a.meetingMgr.GetTranscriptTurns(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok":         true,
+			"meeting_id": id,
+			"turns":      turns,
+			"count":      len(turns),
+		}, nil
+
 	default:
 		return nil, errors.New("unknown method: " + req.Method)
 	}

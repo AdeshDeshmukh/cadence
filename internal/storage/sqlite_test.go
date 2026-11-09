@@ -633,3 +633,97 @@ func TestSQLite_Meetings(t *testing.T) {
 		t.Fatalf("expected 0 segments after meeting deletion, got: %d", len(delSegs))
 	}
 }
+
+func TestSQLite_MeetingSpeakers(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer s.Close()
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	// 1. Create meeting
+	m := Meeting{
+		ID:        "mtg-speakers-test",
+		Title:     "Daily Standup",
+		State:     "stopped",
+		CreatedAt: now,
+	}
+	if err := s.SaveMeeting(m); err != nil {
+		t.Fatalf("SaveMeeting: %v", err)
+	}
+
+	// 2. Add segments with SPEAKER_00 and SPEAKER_01
+	seg1 := MeetingSegment{
+		ID:           "seg-spk-1",
+		MeetingID:    m.ID,
+		SegmentIndex: 0,
+		StartMs:      0,
+		EndMs:        5000,
+		Text:         "Good morning everyone.",
+		Speaker:      "SPEAKER_00",
+		CreatedAt:    now,
+	}
+	seg2 := MeetingSegment{
+		ID:           "seg-spk-2",
+		MeetingID:    m.ID,
+		SegmentIndex: 1,
+		StartMs:      5000,
+		EndMs:        10000,
+		Text:         "Good morning! I have updates on backend.",
+		Speaker:      "SPEAKER_01",
+		CreatedAt:    now.Add(5 * time.Second),
+	}
+	_ = s.SaveMeetingSegment(seg1)
+	_ = s.SaveMeetingSegment(seg2)
+
+	// 3. SetMeetingSpeaker
+	spk := MeetingSpeaker{
+		MeetingID: m.ID,
+		SpeakerID: "SPEAKER_00",
+		Name:      "Alice",
+		UpdatedAt: now,
+	}
+	if err := s.SetMeetingSpeaker(spk); err != nil {
+		t.Fatalf("SetMeetingSpeaker failed: %v", err)
+	}
+
+	// 4. ListMeetingSpeakers
+	speakers, err := s.ListMeetingSpeakers(m.ID)
+	if err != nil {
+		t.Fatalf("ListMeetingSpeakers failed: %v", err)
+	}
+	if len(speakers) != 1 || speakers[0].Name != "Alice" {
+		t.Fatalf("unexpected speakers list: %+v", speakers)
+	}
+
+	// 5. RenameMeetingSpeaker (SPEAKER_00 -> "Alice Smith")
+	if err := s.RenameMeetingSpeaker(m.ID, "SPEAKER_00", "Alice Smith"); err != nil {
+		t.Fatalf("RenameMeetingSpeaker failed: %v", err)
+	}
+
+	// Verify segment 1 speaker was renamed to "Alice Smith"
+	segs, err := s.ListMeetingSegments(m.ID)
+	if err != nil {
+		t.Fatalf("ListMeetingSegments: %v", err)
+	}
+	if segs[0].Speaker != "Alice Smith" {
+		t.Fatalf("expected seg1 speaker to be 'Alice Smith', got %q", segs[0].Speaker)
+	}
+	if segs[1].Speaker != "SPEAKER_01" {
+		t.Fatalf("expected seg2 speaker to remain 'SPEAKER_01', got %q", segs[1].Speaker)
+	}
+
+	// 6. Cascading deletion when meeting is deleted
+	if err := s.DeleteMeeting(m.ID); err != nil {
+		t.Fatalf("DeleteMeeting failed: %v", err)
+	}
+	speakersAfterDel, err := s.ListMeetingSpeakers(m.ID)
+	if err != nil {
+		t.Fatalf("ListMeetingSpeakers after delete: %v", err)
+	}
+	if len(speakersAfterDel) != 0 {
+		t.Fatalf("expected 0 speakers after meeting delete, got %d", len(speakersAfterDel))
+	}
+}

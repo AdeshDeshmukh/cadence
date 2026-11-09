@@ -84,6 +84,14 @@ type MeetingSegment struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
+// MeetingSpeaker records an assigned human label for a speaker in a meeting.
+type MeetingSpeaker struct {
+	MeetingID string    `json:"meeting_id"`
+	SpeakerID string    `json:"speaker_id"` // e.g. "SPEAKER_00"
+	Name      string    `json:"name"`       // e.g. "Adesh Deshmukh"
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 type Store interface {
 	SaveTranscript(Transcript) error
 	ListTranscripts(int) ([]Transcript, error)
@@ -109,4 +117,7 @@ type Store interface {
 	DeleteMeeting(string) error
 	SaveMeetingSegment(MeetingSegment) error
 	ListMeetingSegments(string) ([]MeetingSegment, error)
+	SetMeetingSpeaker(MeetingSpeaker) error
+	ListMeetingSpeakers(string) ([]MeetingSpeaker, error)
+	RenameMeetingSpeaker(meetingID string, fromSpeaker string, toName string) error
 }
