@@ -52,6 +52,15 @@ func WithPermissionEngine(pe *PermissionEngine) Option {
 	}
 }
 
+// WithConfirmationPolicy sets a custom action confirmation policy for the agent loop.
+func WithConfirmationPolicy(cp *ConfirmationPolicy) Option {
+	return func(e *Engine) {
+		if cp != nil && e.registry != nil {
+			e.registry.SetConfirmationPolicy(cp)
+		}
+	}
+}
+
 // NewEngine creates a new Agent loop engine with default built-in tools.
 func NewEngine(opts ...Option) *Engine {
 	e := &Engine{
@@ -70,7 +79,7 @@ func NewEngine(opts ...Option) *Engine {
 		e.registry = NewRegistry(e.systemCtrl, e.searchProvider)
 	}
 
-	// Re-run options in case WithPermissionEngine was supplied before registry was created
+	// Re-run options in case WithPermissionEngine/WithConfirmationPolicy was supplied before registry was created
 	for _, opt := range opts {
 		opt(e)
 	}
@@ -89,6 +98,14 @@ func (e *Engine) Permissions() *PermissionEngine {
 		return nil
 	}
 	return e.registry.Permissions()
+}
+
+// ConfirmationPolicy returns the active confirmation policy engine.
+func (e *Engine) ConfirmationPolicy() *ConfirmationPolicy {
+	if e.registry == nil {
+		return nil
+	}
+	return e.registry.ConfirmationPolicy()
 }
 
 // RegisterTool adds or overrides a named tool handler in the registry.
@@ -410,8 +427,16 @@ func (e *Engine) Run(ctx context.Context, goal string, opts RunOptions) (*Execut
 		stepStart := time.Now()
 		thought := fmt.Sprintf("Executing step %d/%d: %s", planStep.Index, len(plan.Steps), planStep.Description)
 
+		callParams := make(map[string]any)
+		for k, v := range planStep.Params {
+			callParams[k] = v
+		}
+		if opts.AutoApprove {
+			callParams["approved"] = true
+		}
+
 		// Dispatch via registry
-		tRes, callErr := e.registry.Call(ctx, planStep.Tool, planStep.Params)
+		tRes, callErr := e.registry.Call(ctx, planStep.Tool, callParams)
 		if callErr != nil {
 			tRes = ToolResult{Success: false, Error: callErr.Error()}
 		}

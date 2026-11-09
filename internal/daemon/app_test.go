@@ -2340,7 +2340,8 @@ func TestApp_AgentIPC(t *testing.T) {
 	runFull, err := app.Handle(ctx, ipc.Request{
 		Method: "agent_run",
 		Params: map[string]any{
-			"goal": "open Slack and then minimize window",
+			"goal":         "open Slack and then minimize window",
+			"auto_approve": true,
 		},
 	})
 	if err != nil {
@@ -2535,5 +2536,76 @@ func TestApp_PermissionsIPC(t *testing.T) {
 	}
 	if _, err := app.Handle(ctx, ipc.Request{Method: "permission_check"}); err == nil {
 		t.Fatal("expected error on missing tool in check")
+	}
+}
+
+func TestApp_PolicyIPC(t *testing.T) {
+	mockCtrl := system.NewMockController()
+	agentEng := agent.NewEngine(agent.WithSystemController(mockCtrl))
+	cfg := config.Default()
+	app := NewApp(cfg, WithSystemController(mockCtrl), WithAgentEngine(agentEng))
+	ctx := context.Background()
+
+	// 1. policy_get (default is auto_approve_safe)
+	getRes, err := app.Handle(ctx, ipc.Request{Method: "policy_get"})
+	if err != nil {
+		t.Fatalf("policy_get failed: %v", err)
+	}
+	gMap := getRes.(map[string]any)
+	if gMap["mode"] != "auto_approve_safe" {
+		t.Fatalf("expected default mode auto_approve_safe, got %v", gMap["mode"])
+	}
+
+	// 2. policy_set
+	setRes, err := app.Handle(ctx, ipc.Request{
+		Method: "policy_set",
+		Params: map[string]any{"mode": "always_ask"},
+	})
+	if err != nil {
+		t.Fatalf("policy_set failed: %v", err)
+	}
+	sMap := setRes.(map[string]any)
+	if sMap["mode"] != "always_ask" {
+		t.Fatalf("expected mode always_ask, got %v", sMap["mode"])
+	}
+
+	// Verify get reflects new mode
+	getRes2, err := app.Handle(ctx, ipc.Request{Method: "policy_get"})
+	if err != nil {
+		t.Fatalf("policy_get after set failed: %v", err)
+	}
+	if getRes2.(map[string]any)["mode"] != "always_ask" {
+		t.Fatalf("expected mode always_ask, got %v", getRes2)
+	}
+
+	// 3. policy_evaluate
+	evalRes, err := app.Handle(ctx, ipc.Request{
+		Method: "policy_evaluate",
+		Params: map[string]any{
+			"tool":   "fs",
+			"action": "write",
+			"params": map[string]any{"path": "file.txt"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("policy_evaluate failed: %v", err)
+	}
+	eMap := evalRes.(map[string]any)
+	if eMap["requires_confirmation"] != true || eMap["risk_level"] != "risky" {
+		t.Fatalf("expected risky action requiring confirmation, got %+v", evalRes)
+	}
+
+	// 4. Error validations
+	if _, err := app.Handle(ctx, ipc.Request{Method: "policy_set"}); err == nil {
+		t.Fatal("expected error on missing mode parameter")
+	}
+	if _, err := app.Handle(ctx, ipc.Request{
+		Method: "policy_set",
+		Params: map[string]any{"mode": "non_existent_mode"},
+	}); err == nil {
+		t.Fatal("expected error on invalid mode")
+	}
+	if _, err := app.Handle(ctx, ipc.Request{Method: "policy_evaluate"}); err == nil {
+		t.Fatal("expected error on missing tool parameter in evaluate")
 	}
 }

@@ -100,6 +100,7 @@ type App struct {
 	systemCtrl       system.Controller
 	mode             system.OperatingMode
 	agentEngine      *agent.Engine
+	actionPolicy     *agent.ConfirmationPolicy
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -240,6 +241,11 @@ func WithOperatingMode(m system.OperatingMode) Option {
 // WithAgentEngine sets a custom autonomous agent execution engine.
 func WithAgentEngine(e *agent.Engine) Option {
 	return func(a *App) { a.agentEngine = e }
+}
+
+// WithActionPolicy sets a custom action confirmation policy.
+func WithActionPolicy(cp *agent.ConfirmationPolicy) Option {
+	return func(a *App) { a.actionPolicy = cp }
 }
 
 // NewApp instantiates a fully configured Cadence daemon application.
@@ -430,6 +436,13 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 
 	if a.agentEngine == nil {
 		a.agentEngine = agent.NewEngine(agent.WithSystemController(a.systemCtrl))
+	}
+
+	if a.actionPolicy == nil {
+		a.actionPolicy = agent.DefaultConfirmationPolicy()
+	}
+	if a.agentEngine != nil && a.agentEngine.Registry() != nil {
+		a.agentEngine.Registry().SetConfirmationPolicy(a.actionPolicy)
 	}
 
 	if a.capture == nil {
@@ -787,6 +800,11 @@ func (a *App) SetMode(m system.OperatingMode) {
 // AgentEngine returns the active autonomous agent engine.
 func (a *App) AgentEngine() *agent.Engine {
 	return a.agentEngine
+}
+
+// ActionPolicy returns the active confirmation policy engine.
+func (a *App) ActionPolicy() *agent.ConfirmationPolicy {
+	return a.actionPolicy
 }
 
 // Router returns the active application context router.
@@ -1653,6 +1671,7 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 		}
 		var goal string
 		var planOnly bool
+		var autoApprove bool
 		var maxSteps int
 		if params, ok := req.Params.(map[string]any); ok && params != nil {
 			if g, ok := params["goal"].(string); ok {
@@ -1660,6 +1679,9 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			}
 			if p, ok := params["plan_only"].(bool); ok {
 				planOnly = p
+			}
+			if app, ok := params["auto_approve"].(bool); ok {
+				autoApprove = app
 			}
 			if m, ok := params["max_steps"].(float64); ok && m > 0 {
 				maxSteps = int(m)
@@ -1669,8 +1691,9 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			return nil, errors.New("missing 'goal' parameter for agent_run")
 		}
 		traj, err := a.agentEngine.Run(ctx, goal, agent.RunOptions{
-			PlanOnly: planOnly,
-			MaxSteps: maxSteps,
+			PlanOnly:    planOnly,
+			MaxSteps:    maxSteps,
+			AutoApprove: autoApprove,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("agent run: %w", err)
@@ -1853,6 +1876,79 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			"reason":        decision.Reason,
 			"requires_user": decision.RequiresUser,
 			"matched_rule":  decision.MatchedRule,
+		}, nil
+
+	case "policy_get":
+		if a.actionPolicy == nil {
+			a.actionPolicy = agent.DefaultConfirmationPolicy()
+		}
+		mode := a.actionPolicy.Mode()
+		return map[string]any{
+			"mode":        string(mode),
+			"description": agent.ModeDescription(mode),
+			"supported_modes": []string{
+				string(agent.ModeAlwaysAsk),
+				string(agent.ModeAutoApproveSafe),
+				string(agent.ModeAutoApproveRisky),
+				string(agent.ModeAutoApproveAll),
+				string(agent.ModeReadOnly),
+			},
+		}, nil
+
+	case "policy_set":
+		if a.actionPolicy == nil {
+			a.actionPolicy = agent.DefaultConfirmationPolicy()
+		}
+		var mode string
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if m, ok := params["mode"].(string); ok {
+				mode = m
+			}
+		}
+		if strings.TrimSpace(mode) == "" {
+			return nil, errors.New("missing 'mode' parameter for policy_set")
+		}
+		if !agent.IsValidConfirmationMode(mode) {
+			return nil, fmt.Errorf("invalid confirmation mode %q (supported: always_ask, auto_approve_safe, auto_approve_risky, auto_approve_all, read_only)", mode)
+		}
+		norm := agent.ConfirmationMode(strings.ToLower(strings.TrimSpace(mode)))
+		if err := a.actionPolicy.SetMode(norm); err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok":          true,
+			"mode":        string(norm),
+			"description": agent.ModeDescription(norm),
+		}, nil
+
+	case "policy_evaluate":
+		if a.actionPolicy == nil {
+			a.actionPolicy = agent.DefaultConfirmationPolicy()
+		}
+		var tool string
+		var action string
+		var pMap map[string]any
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if t, ok := params["tool"].(string); ok {
+				tool = t
+			}
+			if act, ok := params["action"].(string); ok {
+				action = act
+			}
+			if p, ok := params["params"].(map[string]any); ok {
+				pMap = p
+			}
+		}
+		if strings.TrimSpace(tool) == "" {
+			return nil, errors.New("missing 'tool' parameter for policy_evaluate")
+		}
+		dec := a.actionPolicy.Evaluate(tool, action, pMap)
+		return map[string]any{
+			"allowed":               dec.Allowed,
+			"requires_confirmation": dec.RequiresConfirmation,
+			"risk_level":            string(dec.RiskLevel),
+			"reason":                dec.Reason,
+			"prompt":                dec.Prompt,
 		}, nil
 
 	case "selection_get":

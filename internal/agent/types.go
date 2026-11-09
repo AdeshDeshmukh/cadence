@@ -89,6 +89,7 @@ type ExecutionTrajectory struct {
 
 // RunOptions configures an agent loop execution run.
 type RunOptions struct {
-	MaxSteps int  `json:"max_steps,omitempty"`
-	PlanOnly bool `json:"plan_only,omitempty"`
+	MaxSteps    int  `json:"max_steps,omitempty"`
+	PlanOnly    bool `json:"plan_only,omitempty"`
+	AutoApprove bool `json:"auto_approve,omitempty"`
 }

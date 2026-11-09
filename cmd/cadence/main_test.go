@@ -503,6 +503,41 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 			"requires_user": dec.RequiresUser,
 			"matched_rule":  dec.MatchedRule,
 		}, nil
+	case "policy_get":
+		cp := agent.DefaultConfirmationPolicy()
+		return map[string]any{
+			"mode":        string(cp.Mode()),
+			"description": agent.ModeDescription(cp.Mode()),
+			"supported_modes": []string{
+				string(agent.ModeAlwaysAsk),
+				string(agent.ModeAutoApproveSafe),
+				string(agent.ModeAutoApproveRisky),
+				string(agent.ModeAutoApproveAll),
+				string(agent.ModeReadOnly),
+			},
+		}, nil
+	case "policy_set":
+		params, _ := req.Params.(map[string]any)
+		mode, _ := params["mode"].(string)
+		return map[string]any{
+			"ok":          true,
+			"mode":        mode,
+			"description": agent.ModeDescription(agent.ConfirmationMode(mode)),
+		}, nil
+	case "policy_evaluate":
+		params, _ := req.Params.(map[string]any)
+		tool, _ := params["tool"].(string)
+		action, _ := params["action"].(string)
+		pMap, _ := params["params"].(map[string]any)
+		cp := agent.DefaultConfirmationPolicy()
+		dec := cp.Evaluate(tool, action, pMap)
+		return map[string]any{
+			"allowed":               dec.Allowed,
+			"requires_confirmation": dec.RequiresConfirmation,
+			"risk_level":            string(dec.RiskLevel),
+			"reason":                dec.Reason,
+			"prompt":                dec.Prompt,
+		}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -2306,5 +2341,74 @@ func TestCLI_Permissions(t *testing.T) {
 	code = run([]string{"perms", "check", "echo", "message=test"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run perms check failed with code %d, stderr: %s", code, stderr.String())
+	}
+}
+
+func TestCLI_Policy(t *testing.T) {
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("cad_pol_%d.sock", time.Now().UnixNano()))
+	cleanup := startMockDaemon(t, sockPath)
+	defer cleanup()
+
+	client := ipc.Client{Network: "unix", Address: sockPath}
+	ctx := context.Background()
+	var out bytes.Buffer
+
+	// 1. policy show
+	if err := cmdPolicy(ctx, client, []string{"show"}, &out); err != nil {
+		t.Fatalf("cmdPolicy show failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Action Confirmation Policy") || !strings.Contains(out.String(), "auto_approve_safe") {
+		t.Fatalf("unexpected policy show output: %s", out.String())
+	}
+
+	// 2. policy set
+	out.Reset()
+	if err := cmdPolicy(ctx, client, []string{"set", "always_ask"}, &out); err != nil {
+		t.Fatalf("cmdPolicy set failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Action confirmation policy updated to: always_ask") {
+		t.Fatalf("unexpected policy set output: %s", out.String())
+	}
+
+	// 3. policy direct mode setting (e.g. cadence policy auto_approve_all)
+	out.Reset()
+	if err := cmdPolicy(ctx, client, []string{"auto_approve_all"}, &out); err != nil {
+		t.Fatalf("cmdPolicy direct mode set failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Action confirmation policy updated to: auto_approve_all") {
+		t.Fatalf("unexpected direct mode output: %s", out.String())
+	}
+
+	// 4. policy evaluate
+	out.Reset()
+	if err := cmdPolicy(ctx, client, []string{"evaluate", "fs", "write", "path=test.go"}, &out); err != nil {
+		t.Fatalf("cmdPolicy evaluate failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Action Policy Decision:") || !strings.Contains(out.String(), "risky") {
+		t.Fatalf("unexpected evaluate output: %s", out.String())
+	}
+
+	// 5. Error handling
+	if err := cmdPolicy(ctx, client, []string{"set"}, &out); err == nil {
+		t.Fatal("expected error on empty set args")
+	}
+	if err := cmdPolicy(ctx, client, []string{"set", "invalid_mode"}, &out); err == nil {
+		t.Fatal("expected error on invalid set mode")
+	}
+	if err := cmdPolicy(ctx, client, []string{"evaluate"}, &out); err == nil {
+		t.Fatal("expected error on empty evaluate args")
+	}
+
+	// 6. run() CLI integration
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"policy"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run policy failed with code %d, stderr: %s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	code = run([]string{"policy", "eval", "echo", "run", "message=ping"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run policy eval failed with code %d, stderr: %s", code, stderr.String())
 	}
 }
