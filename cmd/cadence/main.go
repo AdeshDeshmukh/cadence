@@ -64,7 +64,7 @@ Commands:
   tool <name> [k=v...] Invoke a specific agent tool directly (e.g. "tool fs action=list path=.")
   permissions [list|grant|revoke|check] Manage per-tool permission policies (allow, deny, ask)
   policy [show|set|evaluate] Manage action confirmation policies (always_ask, auto_approve_safe, etc.)
-  meeting [subcommand] Continuous meeting recording and capture (start, stop, pause, resume, status, list, show, diarize, delete)
+  meeting [subcommand] Continuous meeting recording and capture (start, stop, pause, resume, status, list, show, diarize, speaker, turns, delete)
   context [show|set|clear] Show or manage developer/code editor context (file, language, selection)
   terminal [status|hook] Inspect terminal/shell context or generate shell integration hooks
   app                Show detected active foreground application and category
@@ -4236,13 +4236,17 @@ func cmdMeeting(ctx context.Context, client ipc.Client, args []string, out io.Wr
 		return cmdMeetingShow(ctx, client, rest, out)
 	case "diarize":
 		return cmdMeetingDiarize(ctx, client, rest, out)
+	case "speaker", "speakers":
+		return cmdMeetingSpeaker(ctx, client, rest, out)
+	case "turns", "transcript":
+		return cmdMeetingTurns(ctx, client, rest, out)
 	case "delete", "rm":
 		return cmdMeetingDelete(ctx, client, rest, out)
 	case "help", "-h", "--help":
 		cmdMeetingUsage(out)
 		return nil
 	default:
-		return fmt.Errorf("unknown meeting subcommand: %s (supported: start, stop, pause, resume, status, list, show, diarize, delete)", action)
+		return fmt.Errorf("unknown meeting subcommand: %s (supported: start, stop, pause, resume, status, list, show, diarize, speaker, turns, delete)", action)
 	}
 }
 
@@ -4654,6 +4658,128 @@ func cmdMeetingDelete(ctx context.Context, client ipc.Client, args []string, out
 	return nil
 }
 
+func cmdMeetingSpeaker(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: cadence meeting speaker <list|rename> <meeting-id> [from] [to]")
+	}
+
+	subaction := strings.ToLower(args[0])
+	rest := args[1:]
+
+	switch subaction {
+	case "list", "ls", "show":
+		if len(rest) == 0 {
+			return errors.New("missing meeting id (usage: cadence meeting speaker list <meeting-id>)")
+		}
+		meetingID := rest[0]
+		callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+
+		resp, err := client.Call(callCtx, "meeting_speaker_list", map[string]any{"meeting_id": meetingID})
+		if err != nil {
+			return fmt.Errorf("failed to list speakers: %w", err)
+		}
+		resMap, ok := resp.(map[string]any)
+		if !ok {
+			return fmt.Errorf("unexpected meeting_speaker_list response: %v", resp)
+		}
+		speakers, _ := resMap["speakers"].([]any)
+		if len(speakers) == 0 {
+			fmt.Fprintf(out, "No custom speaker names mapped for meeting %s.\n", meetingID)
+			return nil
+		}
+		fmt.Fprintf(out, "%-16s  %s\n", "SPEAKER ID", "NAME")
+		fmt.Fprintf(out, "%-16s  %s\n", "----------------", "-------------------------")
+		for _, spk := range speakers {
+			sMap, ok := spk.(map[string]any)
+			if !ok {
+				continue
+			}
+			spkID, _ := sMap["speaker_id"].(string)
+			name, _ := sMap["name"].(string)
+			fmt.Fprintf(out, "%-16s  %s\n", spkID, name)
+		}
+		return nil
+
+	case "rename", "set":
+		if len(rest) < 3 {
+			return errors.New("usage: cadence meeting speaker rename <meeting-id> <from-speaker> <to-name>")
+		}
+		meetingID := rest[0]
+		from := rest[1]
+		to := strings.Join(rest[2:], " ")
+
+		callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+
+		_, err := client.Call(callCtx, "meeting_speaker_rename", map[string]any{
+			"meeting_id": meetingID,
+			"from":       from,
+			"to":         to,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to rename speaker: %w", err)
+		}
+		fmt.Fprintf(out, "Speaker %q renamed to %q across meeting %s.\n", from, to, meetingID)
+		return nil
+
+	default:
+		// Default to listing speakers for this meeting ID
+		meetingID := subaction
+		return cmdMeetingSpeaker(ctx, client, []string{"list", meetingID}, out)
+	}
+}
+
+func cmdMeetingTurns(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("missing meeting id (usage: cadence meeting turns <meeting-id>)")
+	}
+	meetingID := args[0]
+
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	resp, err := client.Call(callCtx, "meeting_turns", map[string]any{"meeting_id": meetingID})
+	if err != nil {
+		return fmt.Errorf("failed to get meeting turns: %w", err)
+	}
+
+	resMap, ok := resp.(map[string]any)
+	if !ok {
+		return fmt.Errorf("unexpected meeting_turns response: %v", resp)
+	}
+
+	turns, _ := resMap["turns"].([]any)
+	if len(turns) == 0 {
+		fmt.Fprintf(out, "No dialogue turns found for meeting %s.\n", meetingID)
+		return nil
+	}
+
+	fmt.Fprintf(out, "Dialogue Turns for Meeting %s (%d turns):\n\n", meetingID, len(turns))
+	for _, t := range turns {
+		tMap, ok := t.(map[string]any)
+		if !ok {
+			continue
+		}
+		startMs := int64(0)
+		if s, ok := tMap["start_ms"].(float64); ok {
+			startMs = int64(s)
+		}
+		endMs := int64(0)
+		if e, ok := tMap["end_ms"].(float64); ok {
+			endMs = int64(e)
+		}
+		speaker, _ := tMap["speaker"].(string)
+		if speaker == "" {
+			speaker = "SPEAKER_??"
+		}
+		text, _ := tMap["text"].(string)
+		fmt.Fprintf(out, "[%s - %s] %s: %s\n", formatMeetingDuration(startMs), formatMeetingDuration(endMs), speaker, text)
+	}
+
+	return nil
+}
+
 func cmdMeetingUsage(out io.Writer) {
 	fmt.Fprintln(out, "Usage: cadence meeting <subcommand> [arguments]")
 	fmt.Fprintln(out, "")
@@ -4666,5 +4792,7 @@ func cmdMeetingUsage(out io.Writer) {
 	fmt.Fprintln(out, "  list [limit]         List past meeting recordings")
 	fmt.Fprintln(out, "  show <id>            Show details and transcribed segments for a meeting")
 	fmt.Fprintln(out, "  diarize <id> [flags] Partition meeting audio by speaker (--speakers N)")
+	fmt.Fprintln(out, "  speaker <subcmd>     Manage speaker labels (list, rename <id> <from> <to>)")
+	fmt.Fprintln(out, "  turns <id>           Show consolidated conversational dialogue turns")
 	fmt.Fprintln(out, "  delete <id>          Delete a meeting record and its audio segments")
 }

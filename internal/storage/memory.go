@@ -17,6 +17,7 @@ type Memory struct {
 	profiles    map[string]PolishProfile
 	meetings    map[string]Meeting
 	segments    map[string][]MeetingSegment
+	speakers    map[string]map[string]MeetingSpeaker
 }
 
 func NewMemory() *Memory {
@@ -27,6 +28,7 @@ func NewMemory() *Memory {
 		profiles:   map[string]PolishProfile{},
 		meetings:   map[string]Meeting{},
 		segments:   map[string][]MeetingSegment{},
+		speakers:   map[string]map[string]MeetingSpeaker{},
 	}
 }
 
@@ -285,6 +287,7 @@ func (m *Memory) DeleteMeeting(id string) error {
 	defer m.mu.Unlock()
 	delete(m.meetings, id)
 	delete(m.segments, id)
+	delete(m.speakers, id)
 	return nil
 }
 
@@ -313,4 +316,61 @@ func (m *Memory) ListMeetingSegments(meetingID string) ([]MeetingSegment, error)
 		return out[i].SegmentIndex < out[j].SegmentIndex
 	})
 	return out, nil
+}
+
+func (m *Memory) SetMeetingSpeaker(spk MeetingSpeaker) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if spk.MeetingID == "" || spk.SpeakerID == "" {
+		return errors.New("meeting_id and speaker_id are required")
+	}
+	if spk.UpdatedAt.IsZero() {
+		spk.UpdatedAt = time.Now()
+	}
+	if m.speakers[spk.MeetingID] == nil {
+		m.speakers[spk.MeetingID] = make(map[string]MeetingSpeaker)
+	}
+	m.speakers[spk.MeetingID][spk.SpeakerID] = spk
+	return nil
+}
+
+func (m *Memory) ListMeetingSpeakers(meetingID string) ([]MeetingSpeaker, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	spkMap := m.speakers[meetingID]
+	out := make([]MeetingSpeaker, 0, len(spkMap))
+	for _, spk := range spkMap {
+		out = append(out, spk)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].SpeakerID < out[j].SpeakerID
+	})
+	return out, nil
+}
+
+func (m *Memory) RenameMeetingSpeaker(meetingID string, fromSpeaker string, toName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if meetingID == "" || fromSpeaker == "" || toName == "" {
+		return errors.New("meeting_id, fromSpeaker, and toName are required")
+	}
+
+	if m.speakers[meetingID] == nil {
+		m.speakers[meetingID] = make(map[string]MeetingSpeaker)
+	}
+	m.speakers[meetingID][fromSpeaker] = MeetingSpeaker{
+		MeetingID: meetingID,
+		SpeakerID: fromSpeaker,
+		Name:      toName,
+		UpdatedAt: time.Now(),
+	}
+
+	list := m.segments[meetingID]
+	for i := range list {
+		if list[i].Speaker == fromSpeaker {
+			list[i].Speaker = toName
+		}
+	}
+	m.segments[meetingID] = list
+	return nil
 }

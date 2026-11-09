@@ -2893,3 +2893,121 @@ func TestApp_MeetingDiarizeIPC(t *testing.T) {
 		t.Fatal("expected error for non-existent meeting")
 	}
 }
+
+func TestApp_MeetingSpeakersAndTurnsIPC(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := storage.NewMemory()
+	capture := &testLiveCapture{chunk: audio.Chunk{
+		Samples:    []float32{0.1, 0.2, -0.1},
+		SampleRate: 16000,
+		Timestamp:  time.Now(),
+	}}
+	engine := asr.MockEngine{Text: "Meeting text"}
+
+	mgr := meeting.NewManager(
+		store,
+		capture,
+		meeting.WithAudioDirectory(tmpDir),
+		meeting.WithASREngine(engine),
+	)
+
+	cfg := config.Default()
+	app := NewApp(
+		cfg,
+		WithStore(store),
+		WithCapture(capture),
+		WithASR(engine),
+		WithMeetingManager(mgr),
+	)
+	ctx := context.Background()
+
+	mtgID := "mtg-turns-ipc"
+	_ = store.SaveMeeting(storage.Meeting{
+		ID:        mtgID,
+		Title:     "Sprint Planning",
+		State:     "stopped",
+		CreatedAt: time.Now(),
+	})
+	_ = store.SaveMeetingSegment(storage.MeetingSegment{
+		ID:           "seg-1",
+		MeetingID:    mtgID,
+		SegmentIndex: 0,
+		StartMs:      0,
+		EndMs:        10000,
+		Text:         "Hello team.",
+		Speaker:      "SPEAKER_00",
+		CreatedAt:    time.Now(),
+	})
+	_ = store.SaveMeetingSegment(storage.MeetingSegment{
+		ID:           "seg-2",
+		MeetingID:    mtgID,
+		SegmentIndex: 1,
+		StartMs:      10000,
+		EndMs:        20000,
+		Text:         "Let's review the sprint.",
+		Speaker:      "SPEAKER_00",
+		CreatedAt:    time.Now(),
+	})
+
+	// 1. meeting_speaker_rename
+	renRes, err := app.Handle(ctx, ipc.Request{
+		Method: "meeting_speaker_rename",
+		Params: map[string]any{
+			"meeting_id": mtgID,
+			"from":       "SPEAKER_00",
+			"to":         "Adesh Deshmukh",
+		},
+	})
+	if err != nil {
+		t.Fatalf("meeting_speaker_rename failed: %v", err)
+	}
+	rMap := renRes.(map[string]any)
+	if rMap["ok"] != true || rMap["to"] != "Adesh Deshmukh" {
+		t.Fatalf("unexpected rename response: %+v", renRes)
+	}
+
+	// 2. meeting_speaker_list
+	listRes, err := app.Handle(ctx, ipc.Request{
+		Method: "meeting_speaker_list",
+		Params: map[string]any{"meeting_id": mtgID},
+	})
+	if err != nil {
+		t.Fatalf("meeting_speaker_list failed: %v", err)
+	}
+	lMap := listRes.(map[string]any)
+	speakers := lMap["speakers"].([]storage.MeetingSpeaker)
+	if len(speakers) != 1 || speakers[0].Name != "Adesh Deshmukh" {
+		t.Fatalf("unexpected speakers list: %+v", lMap)
+	}
+
+	// 3. meeting_turns
+	turnsRes, err := app.Handle(ctx, ipc.Request{
+		Method: "meeting_turns",
+		Params: map[string]any{"meeting_id": mtgID},
+	})
+	if err != nil {
+		t.Fatalf("meeting_turns failed: %v", err)
+	}
+	tMap := turnsRes.(map[string]any)
+	turns := tMap["turns"].([]meeting.Turn)
+	if len(turns) != 1 {
+		t.Fatalf("expected 1 consolidated turn, got %d", len(turns))
+	}
+	if turns[0].Speaker != "Adesh Deshmukh" || turns[0].StartMs != 0 || turns[0].EndMs != 20000 {
+		t.Fatalf("unexpected turn data: %+v", turns[0])
+	}
+	if turns[0].Text != "Hello team. Let's review the sprint." {
+		t.Fatalf("unexpected turn text: %q", turns[0].Text)
+	}
+
+	// 4. Error validations
+	if _, err := app.Handle(ctx, ipc.Request{Method: "meeting_speaker_rename"}); err == nil {
+		t.Fatal("expected error on meeting_speaker_rename without params")
+	}
+	if _, err := app.Handle(ctx, ipc.Request{Method: "meeting_speaker_list"}); err == nil {
+		t.Fatal("expected error on meeting_speaker_list without id")
+	}
+	if _, err := app.Handle(ctx, ipc.Request{Method: "meeting_turns"}); err == nil {
+		t.Fatal("expected error on meeting_turns without id")
+	}
+}

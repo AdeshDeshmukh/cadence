@@ -125,6 +125,22 @@ CREATE TABLE IF NOT EXISTS meeting_segments (
 CREATE INDEX IF NOT EXISTS idx_meeting_segments_meeting_id ON meeting_segments (meeting_id, segment_index ASC);
 `,
 	},
+	{
+		version: 6,
+		name:    "create_meeting_speakers",
+		up: `
+CREATE TABLE IF NOT EXISTS meeting_speakers (
+	meeting_id TEXT NOT NULL,
+	speaker_id TEXT NOT NULL,
+	name TEXT NOT NULL,
+	updated_at TIMESTAMP NOT NULL,
+	PRIMARY KEY (meeting_id, speaker_id),
+	FOREIGN KEY(meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_meeting_speakers_meeting_id ON meeting_speakers (meeting_id);
+`,
+	},
 }
 
 // SQLite implements persistent Store backed by an SQLite database.
@@ -808,6 +824,86 @@ ORDER BY segment_index ASC;
 		out = append(out, seg)
 	}
 	return out, rows.Err()
+}
+
+// SetMeetingSpeaker inserts or updates a speaker assignment for a meeting.
+func (s *SQLite) SetMeetingSpeaker(spk MeetingSpeaker) error {
+	if spk.MeetingID == "" || spk.SpeakerID == "" {
+		return errors.New("meeting_id and speaker_id are required")
+	}
+	if spk.UpdatedAt.IsZero() {
+		spk.UpdatedAt = time.Now().UTC()
+	}
+
+	const query = `
+INSERT INTO meeting_speakers (meeting_id, speaker_id, name, updated_at)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(meeting_id, speaker_id) DO UPDATE SET
+	name = excluded.name,
+	updated_at = excluded.updated_at;
+`
+	_, err := s.db.Exec(query, spk.MeetingID, spk.SpeakerID, spk.Name, spk.UpdatedAt)
+	return err
+}
+
+// ListMeetingSpeakers returns all known speaker mappings for a meeting.
+func (s *SQLite) ListMeetingSpeakers(meetingID string) ([]MeetingSpeaker, error) {
+	const query = `
+SELECT meeting_id, speaker_id, name, updated_at
+FROM meeting_speakers
+WHERE meeting_id = ?
+ORDER BY speaker_id ASC;
+`
+	rows, err := s.db.Query(query, meetingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []MeetingSpeaker
+	for rows.Next() {
+		var spk MeetingSpeaker
+		if err := rows.Scan(&spk.MeetingID, &spk.SpeakerID, &spk.Name, &spk.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, spk)
+	}
+	return out, rows.Err()
+}
+
+// RenameMeetingSpeaker renames a speaker for a meeting and updates all corresponding segments in a single transaction.
+func (s *SQLite) RenameMeetingSpeaker(meetingID string, fromSpeaker string, toName string) error {
+	if meetingID == "" || fromSpeaker == "" || toName == "" {
+		return errors.New("meeting_id, fromSpeaker, and toName are required")
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	const spkQuery = `
+INSERT INTO meeting_speakers (meeting_id, speaker_id, name, updated_at)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(meeting_id, speaker_id) DO UPDATE SET
+	name = excluded.name,
+	updated_at = excluded.updated_at;
+`
+	if _, err := tx.Exec(spkQuery, meetingID, fromSpeaker, toName, time.Now().UTC()); err != nil {
+		return err
+	}
+
+	const segQuery = `
+UPDATE meeting_segments
+SET speaker = ?
+WHERE meeting_id = ? AND speaker = ?;
+`
+	if _, err := tx.Exec(segQuery, toName, meetingID, fromSpeaker); err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 // Close releases the underlying SQLite database handle.

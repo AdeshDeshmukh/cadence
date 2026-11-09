@@ -639,6 +639,50 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 				},
 			},
 		}, nil
+	case "meeting_speaker_rename":
+		params, _ := req.Params.(map[string]any)
+		return map[string]any{
+			"ok":         true,
+			"meeting_id": params["meeting_id"],
+			"from":       params["from"],
+			"to":         params["to"],
+		}, nil
+	case "meeting_speaker_list":
+		params, _ := req.Params.(map[string]any)
+		id, _ := params["meeting_id"].(string)
+		return map[string]any{
+			"ok":         true,
+			"meeting_id": id,
+			"speakers": []any{
+				map[string]any{
+					"meeting_id": id,
+					"speaker_id": "SPEAKER_00",
+					"name":       "Adesh Deshmukh",
+				},
+			},
+		}, nil
+	case "meeting_turns":
+		params, _ := req.Params.(map[string]any)
+		id, _ := params["meeting_id"].(string)
+		return map[string]any{
+			"ok":         true,
+			"meeting_id": id,
+			"count":      float64(2),
+			"turns": []any{
+				map[string]any{
+					"speaker":  "Adesh Deshmukh",
+					"start_ms": float64(0),
+					"end_ms":   float64(20000),
+					"text":     "Welcome team to the architecture review.",
+				},
+				map[string]any{
+					"speaker":  "SPEAKER_01",
+					"start_ms": float64(20000),
+					"end_ms":   float64(30000),
+					"text":     "Today we are discussing continuous recording mode.",
+				},
+			},
+		}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -2597,7 +2641,35 @@ func TestCLI_Meeting(t *testing.T) {
 		t.Fatalf("unexpected diarize output: %s", out.String())
 	}
 
-	// 9. meeting delete
+	// 9. meeting speaker rename
+	out.Reset()
+	if err := cmdMeeting(ctx, client, []string{"speaker", "rename", "mtg-mock-1", "SPEAKER_00", "Adesh", "Deshmukh"}, &out); err != nil {
+		t.Fatalf("cmdMeeting speaker rename failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Speaker \"SPEAKER_00\" renamed to \"Adesh Deshmukh\"") {
+		t.Fatalf("unexpected rename output: %s", out.String())
+	}
+
+	// 10. meeting speaker list
+	out.Reset()
+	if err := cmdMeeting(ctx, client, []string{"speaker", "list", "mtg-mock-1"}, &out); err != nil {
+		t.Fatalf("cmdMeeting speaker list failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "SPEAKER_00") || !strings.Contains(out.String(), "Adesh Deshmukh") {
+		t.Fatalf("unexpected speaker list output: %s", out.String())
+	}
+
+	// 11. meeting turns
+	out.Reset()
+	if err := cmdMeeting(ctx, client, []string{"turns", "mtg-mock-1"}, &out); err != nil {
+		t.Fatalf("cmdMeeting turns failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Adesh Deshmukh: Welcome team to the architecture review.") ||
+		!strings.Contains(out.String(), "SPEAKER_01: Today we are discussing continuous recording mode.") {
+		t.Fatalf("unexpected turns output: %s", out.String())
+	}
+
+	// 12. meeting delete
 	out.Reset()
 	if err := cmdMeeting(ctx, client, []string{"delete", "mtg-mock-1"}, &out); err != nil {
 		t.Fatalf("cmdMeeting delete failed: %v", err)
@@ -2606,7 +2678,7 @@ func TestCLI_Meeting(t *testing.T) {
 		t.Fatalf("unexpected delete output: %s", out.String())
 	}
 
-	// 10. meeting help
+	// 13. meeting help
 	out.Reset()
 	if err := cmdMeeting(ctx, client, []string{"help"}, &out); err != nil {
 		t.Fatalf("cmdMeeting help failed: %v", err)
@@ -2615,12 +2687,21 @@ func TestCLI_Meeting(t *testing.T) {
 		t.Fatalf("unexpected help output: %s", out.String())
 	}
 
-	// 11. Error validation
+	// 14. Error validation
 	if err := cmdMeeting(ctx, client, []string{"show"}, &out); err == nil {
 		t.Fatal("expected error showing meeting without id")
 	}
 	if err := cmdMeeting(ctx, client, []string{"diarize"}, &out); err == nil {
 		t.Fatal("expected error diarizing meeting without id")
+	}
+	if err := cmdMeeting(ctx, client, []string{"speaker"}, &out); err == nil {
+		t.Fatal("expected error on empty speaker command")
+	}
+	if err := cmdMeeting(ctx, client, []string{"speaker", "rename", "mtg-1"}, &out); err == nil {
+		t.Fatal("expected error on speaker rename with insufficient args")
+	}
+	if err := cmdMeeting(ctx, client, []string{"turns"}, &out); err == nil {
+		t.Fatal("expected error on turns without meeting id")
 	}
 	if err := cmdMeeting(ctx, client, []string{"delete"}, &out); err == nil {
 		t.Fatal("expected error deleting meeting without id")

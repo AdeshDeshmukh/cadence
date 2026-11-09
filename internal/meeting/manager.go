@@ -468,6 +468,59 @@ func (m *Manager) DiarizeMeeting(ctx context.Context, meetingID string, opts dia
 	return aligned, nil
 }
 
+// RenameSpeaker assigns a custom human-readable name to a speaker across all segments of a meeting.
+func (m *Manager) RenameSpeaker(ctx context.Context, meetingID, fromSpeaker, toName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.store == nil {
+		return errors.New("storage engine is not configured")
+	}
+	if strings.TrimSpace(meetingID) == "" {
+		return errors.New("missing meeting id")
+	}
+	if strings.TrimSpace(fromSpeaker) == "" || strings.TrimSpace(toName) == "" {
+		return errors.New("fromSpeaker and toName cannot be empty")
+	}
+
+	return m.store.RenameMeetingSpeaker(meetingID, fromSpeaker, toName)
+}
+
+// ListSpeakers returns known speaker aliases and names associated with a meeting.
+func (m *Manager) ListSpeakers(ctx context.Context, meetingID string) ([]storage.MeetingSpeaker, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.store == nil {
+		return nil, errors.New("storage engine is not configured")
+	}
+	if strings.TrimSpace(meetingID) == "" {
+		return nil, errors.New("missing meeting id")
+	}
+
+	return m.store.ListMeetingSpeakers(meetingID)
+}
+
+// GetTranscriptTurns returns the meeting's conversation consolidated into dialogue turns.
+func (m *Manager) GetTranscriptTurns(ctx context.Context, meetingID string) ([]Turn, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.store == nil {
+		return nil, errors.New("storage engine is not configured")
+	}
+	if strings.TrimSpace(meetingID) == "" {
+		return nil, errors.New("missing meeting id")
+	}
+
+	segs, err := m.store.ListMeetingSegments(meetingID)
+	if err != nil {
+		return nil, err
+	}
+
+	return AggregateTurns(segs), nil
+}
+
 // onSegmentProduced handles newly partitioned segments, invokes ASR if configured, and saves to database.
 func (m *Manager) onSegmentProduced(seg Segment, samples []float32) {
 	// Live transcription if ASR engine is present
