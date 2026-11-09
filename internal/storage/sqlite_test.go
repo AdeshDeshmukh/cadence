@@ -528,3 +528,108 @@ func TestSQLite_PolishProfiles(t *testing.T) {
 		t.Fatalf("expected nil after delete, got: %+v", delCheck)
 	}
 }
+
+func TestSQLite_Meetings(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer s.Close()
+
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// 1. Initial list empty
+	list, err := s.ListMeetings(10)
+	if err != nil {
+		t.Fatalf("ListMeetings: %v", err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("expected 0 meetings initially, got %d", len(list))
+	}
+
+	// 2. Save meeting
+	m1 := Meeting{
+		ID:         "mtg-1",
+		Title:      "Q4 Architecture Sync",
+		State:      "recording",
+		AudioPath:  "/tmp/mtg-1.wav",
+		SampleRate: 16000,
+		CreatedAt:  now,
+		DurationMs: 0,
+	}
+	if err := s.SaveMeeting(m1); err != nil {
+		t.Fatalf("SaveMeeting: %v", err)
+	}
+
+	// 3. Get meeting
+	got, err := s.GetMeeting("mtg-1")
+	if err != nil || got == nil {
+		t.Fatalf("GetMeeting failed: %v, got: %+v", err, got)
+	}
+	if got.Title != "Q4 Architecture Sync" || got.State != "recording" {
+		t.Fatalf("unexpected meeting data: %+v", got)
+	}
+
+	// 4. Save segments
+	seg1 := MeetingSegment{
+		ID:           "seg-1",
+		MeetingID:    "mtg-1",
+		SegmentIndex: 0,
+		StartMs:      0,
+		EndMs:        15000,
+		Text:         "Good morning team, let's start the sync.",
+		Speaker:      "Speaker 1",
+		CreatedAt:    now,
+	}
+	seg2 := MeetingSegment{
+		ID:           "seg-2",
+		MeetingID:    "mtg-1",
+		SegmentIndex: 1,
+		StartMs:      15000,
+		EndMs:        30000,
+		Text:         "We are discussing the new audio pipeline today.",
+		Speaker:      "Speaker 2",
+		CreatedAt:    now.Add(15 * time.Second),
+	}
+	if err := s.SaveMeetingSegment(seg1); err != nil {
+		t.Fatalf("SaveMeetingSegment 1: %v", err)
+	}
+	if err := s.SaveMeetingSegment(seg2); err != nil {
+		t.Fatalf("SaveMeetingSegment 2: %v", err)
+	}
+
+	// 5. List segments
+	segs, err := s.ListMeetingSegments("mtg-1")
+	if err != nil || len(segs) != 2 {
+		t.Fatalf("ListMeetingSegments failed: %v, len: %d", err, len(segs))
+	}
+	if segs[0].SegmentIndex != 0 || segs[1].SegmentIndex != 1 {
+		t.Fatalf("unexpected segment order: %+v", segs)
+	}
+
+	// 6. Update meeting to stopped with ended_at and duration
+	endTime := now.Add(30 * time.Second)
+	m1.State = "stopped"
+	m1.EndedAt = &endTime
+	m1.DurationMs = 30000
+	if err := s.SaveMeeting(m1); err != nil {
+		t.Fatalf("Update meeting: %v", err)
+	}
+	updated, err := s.GetMeeting("mtg-1")
+	if err != nil || updated == nil || updated.State != "stopped" || updated.DurationMs != 30000 {
+		t.Fatalf("expected updated meeting state, got: %+v", updated)
+	}
+
+	// 7. Delete meeting
+	if err := s.DeleteMeeting("mtg-1"); err != nil {
+		t.Fatalf("DeleteMeeting: %v", err)
+	}
+	delMtg, err := s.GetMeeting("mtg-1")
+	if err != nil || delMtg != nil {
+		t.Fatalf("expected nil after deletion, got: %+v", delMtg)
+	}
+	delSegs, err := s.ListMeetingSegments("mtg-1")
+	if err != nil || len(delSegs) != 0 {
+		t.Fatalf("expected 0 segments after meeting deletion, got: %d", len(delSegs))
+	}
+}

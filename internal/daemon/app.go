@@ -24,6 +24,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/edit"
 	"github.com/AdeshDeshmukh/cadence/internal/hotkey"
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
+	"github.com/AdeshDeshmukh/cadence/internal/meeting"
 	"github.com/AdeshDeshmukh/cadence/internal/paste"
 	"github.com/AdeshDeshmukh/cadence/internal/pipeline"
 	"github.com/AdeshDeshmukh/cadence/internal/polish"
@@ -101,6 +102,7 @@ type App struct {
 	mode             system.OperatingMode
 	agentEngine      *agent.Engine
 	actionPolicy     *agent.ConfirmationPolicy
+	meetingMgr       *meeting.Manager
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -246,6 +248,11 @@ func WithAgentEngine(e *agent.Engine) Option {
 // WithActionPolicy sets a custom action confirmation policy.
 func WithActionPolicy(cp *agent.ConfirmationPolicy) Option {
 	return func(a *App) { a.actionPolicy = cp }
+}
+
+// WithMeetingManager sets a custom continuous meeting capture manager.
+func WithMeetingManager(m *meeting.Manager) Option {
+	return func(a *App) { a.meetingMgr = m }
 }
 
 // NewApp instantiates a fully configured Cadence daemon application.
@@ -457,6 +464,23 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 		} else {
 			a.asr = asr.MockEngine{Text: "Cadence local dictation"}
 		}
+	}
+
+	if a.meetingMgr == nil {
+		storageDir := ""
+		if cfg.Storage.DBPath != "" {
+			storageDir = filepath.Join(filepath.Dir(cfg.Storage.DBPath), "meetings")
+		} else {
+			home, _ := os.UserHomeDir()
+			storageDir = filepath.Join(home, ".cadence", "meetings")
+		}
+		a.meetingMgr = meeting.NewManager(
+			a.store,
+			a.capture,
+			meeting.WithAudioDirectory(storageDir),
+			meeting.WithASREngine(a.asr),
+			meeting.WithSampleRate(cfg.Audio.SampleRate),
+		)
 	}
 
 	if a.kernel == nil {
@@ -805,6 +829,11 @@ func (a *App) AgentEngine() *agent.Engine {
 // ActionPolicy returns the active confirmation policy engine.
 func (a *App) ActionPolicy() *agent.ConfirmationPolicy {
 	return a.actionPolicy
+}
+
+// MeetingManager returns the continuous recording manager.
+func (a *App) MeetingManager() *meeting.Manager {
+	return a.meetingMgr
 }
 
 // Router returns the active application context router.
@@ -2502,6 +2531,107 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			"category": string(cat),
 			"profile":  routed,
 		}, nil
+
+	case "meeting_start":
+		if a.meetingMgr == nil {
+			return nil, errors.New("meeting manager not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		title, _ := params["title"].(string)
+		sess, err := a.meetingMgr.Start(ctx, title)
+		if err != nil {
+			return nil, err
+		}
+		return sess, nil
+
+	case "meeting_pause":
+		if a.meetingMgr == nil {
+			return nil, errors.New("meeting manager not configured")
+		}
+		if err := a.meetingMgr.Pause(); err != nil {
+			return nil, err
+		}
+		status := a.meetingMgr.Status()
+		return map[string]any{"ok": true, "status": status}, nil
+
+	case "meeting_resume":
+		if a.meetingMgr == nil {
+			return nil, errors.New("meeting manager not configured")
+		}
+		if err := a.meetingMgr.Resume(); err != nil {
+			return nil, err
+		}
+		status := a.meetingMgr.Status()
+		return map[string]any{"ok": true, "status": status}, nil
+
+	case "meeting_stop":
+		if a.meetingMgr == nil {
+			return nil, errors.New("meeting manager not configured")
+		}
+		sess, err := a.meetingMgr.Stop()
+		if err != nil {
+			return nil, err
+		}
+		return sess, nil
+
+	case "meeting_status":
+		if a.meetingMgr == nil {
+			return nil, errors.New("meeting manager not configured")
+		}
+		return a.meetingMgr.Status(), nil
+
+	case "meeting_list":
+		if a.meetingMgr == nil {
+			return nil, errors.New("meeting manager not configured")
+		}
+		limit := 20
+		if params, ok := req.Params.(map[string]any); ok {
+			if l, ok := params["limit"].(float64); ok && l > 0 {
+				limit = int(l)
+			} else if l, ok := params["limit"].(int); ok && l > 0 {
+				limit = l
+			}
+		}
+		meetings, err := a.meetingMgr.List(limit)
+		if err != nil {
+			return nil, err
+		}
+		return meetings, nil
+
+	case "meeting_get":
+		if a.meetingMgr == nil {
+			return nil, errors.New("meeting manager not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		id, _ := params["id"].(string)
+		if strings.TrimSpace(id) == "" {
+			return nil, errors.New("missing meeting id parameter")
+		}
+		mtg, segs, err := a.meetingMgr.Get(id)
+		if err != nil {
+			return nil, err
+		}
+		if mtg == nil {
+			return nil, errors.New("meeting not found")
+		}
+		return map[string]any{
+			"meeting":  mtg,
+			"segments": segs,
+		}, nil
+
+	case "meeting_delete":
+		if a.meetingMgr == nil {
+			return nil, errors.New("meeting manager not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		id, _ := params["id"].(string)
+		if strings.TrimSpace(id) == "" {
+			return nil, errors.New("missing meeting id parameter")
+		}
+		if err := a.meetingMgr.Delete(id); err != nil {
+			return nil, err
+		}
+		return map[string]any{"ok": true, "id": id}, nil
 
 	default:
 		return nil, errors.New("unknown method: " + req.Method)

@@ -60,6 +60,30 @@ type PolishProfile struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
+// Meeting represents a continuous recording meeting capture session.
+type Meeting struct {
+	ID         string     `json:"id"`
+	Title      string     `json:"title"`
+	State      string     `json:"state"` // "recording", "paused", "stopped"
+	AudioPath  string     `json:"audio_path,omitempty"`
+	SampleRate int        `json:"sample_rate"`
+	CreatedAt  time.Time  `json:"created_at"`
+	EndedAt    *time.Time `json:"ended_at,omitempty"`
+	DurationMs int64      `json:"duration_ms"`
+}
+
+// MeetingSegment represents an audio/transcript chunk within a meeting session.
+type MeetingSegment struct {
+	ID           string    `json:"id"`
+	MeetingID    string    `json:"meeting_id"`
+	SegmentIndex int       `json:"segment_index"`
+	StartMs      int64     `json:"start_ms"`
+	EndMs        int64     `json:"end_ms"`
+	Text         string    `json:"text"`
+	Speaker      string    `json:"speaker,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
 type Store interface {
 	SaveTranscript(Transcript) error
 	ListTranscripts(int) ([]Transcript, error)
@@ -79,4 +103,10 @@ type Store interface {
 	GetPolishProfile(string) (*PolishProfile, error)
 	ListPolishProfiles() ([]PolishProfile, error)
 	DeletePolishProfile(string) error
+	SaveMeeting(Meeting) error
+	GetMeeting(string) (*Meeting, error)
+	ListMeetings(int) ([]Meeting, error)
+	DeleteMeeting(string) error
+	SaveMeetingSegment(MeetingSegment) error
+	ListMeetingSegments(string) ([]MeetingSegment, error)
 }

@@ -93,6 +93,38 @@ CREATE TABLE IF NOT EXISTS polish_profiles (
 CREATE INDEX IF NOT EXISTS idx_polish_profiles_name ON polish_profiles (name);
 `,
 	},
+	{
+		version: 5,
+		name:    "create_meetings",
+		up: `
+CREATE TABLE IF NOT EXISTS meetings (
+	id TEXT PRIMARY KEY,
+	title TEXT NOT NULL,
+	state TEXT NOT NULL,
+	audio_path TEXT NOT NULL DEFAULT '',
+	sample_rate INTEGER NOT NULL DEFAULT 16000,
+	created_at TIMESTAMP NOT NULL,
+	ended_at TIMESTAMP,
+	duration_ms INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_meetings_created_at ON meetings (created_at DESC);
+
+CREATE TABLE IF NOT EXISTS meeting_segments (
+	id TEXT PRIMARY KEY,
+	meeting_id TEXT NOT NULL,
+	segment_index INTEGER NOT NULL,
+	start_ms INTEGER NOT NULL,
+	end_ms INTEGER NOT NULL,
+	text TEXT NOT NULL DEFAULT '',
+	speaker TEXT NOT NULL DEFAULT '',
+	created_at TIMESTAMP NOT NULL,
+	FOREIGN KEY(meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_meeting_segments_meeting_id ON meeting_segments (meeting_id, segment_index ASC);
+`,
+	},
 }
 
 // SQLite implements persistent Store backed by an SQLite database.
@@ -653,6 +685,129 @@ ORDER BY name ASC;
 func (s *SQLite) DeletePolishProfile(name string) error {
 	_, err := s.db.Exec("DELETE FROM polish_profiles WHERE name = ?", name)
 	return err
+}
+
+// SaveMeeting inserts or updates a meeting record.
+func (s *SQLite) SaveMeeting(m Meeting) error {
+	const query = `
+INSERT INTO meetings (id, title, state, audio_path, sample_rate, created_at, ended_at, duration_ms)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+	title = excluded.title,
+	state = excluded.state,
+	audio_path = excluded.audio_path,
+	sample_rate = excluded.sample_rate,
+	ended_at = excluded.ended_at,
+	duration_ms = excluded.duration_ms;
+`
+	_, err := s.db.Exec(query, m.ID, m.Title, m.State, m.AudioPath, m.SampleRate, m.CreatedAt, m.EndedAt, m.DurationMs)
+	return err
+}
+
+// GetMeeting retrieves a meeting by ID.
+func (s *SQLite) GetMeeting(id string) (*Meeting, error) {
+	const query = `
+SELECT id, title, state, audio_path, sample_rate, created_at, ended_at, duration_ms
+FROM meetings
+WHERE id = ?;
+`
+	var m Meeting
+	var endedAt sql.NullTime
+	err := s.db.QueryRow(query, id).Scan(
+		&m.ID, &m.Title, &m.State, &m.AudioPath, &m.SampleRate, &m.CreatedAt, &endedAt, &m.DurationMs,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if endedAt.Valid {
+		m.EndedAt = &endedAt.Time
+	}
+	return &m, nil
+}
+
+// ListMeetings returns recent meetings ordered by created_at DESC.
+func (s *SQLite) ListMeetings(limit int) ([]Meeting, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	const query = `
+SELECT id, title, state, audio_path, sample_rate, created_at, ended_at, duration_ms
+FROM meetings
+ORDER BY created_at DESC
+LIMIT ?;
+`
+	rows, err := s.db.Query(query, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Meeting
+	for rows.Next() {
+		var m Meeting
+		var endedAt sql.NullTime
+		if err := rows.Scan(
+			&m.ID, &m.Title, &m.State, &m.AudioPath, &m.SampleRate, &m.CreatedAt, &endedAt, &m.DurationMs,
+		); err != nil {
+			return nil, err
+		}
+		if endedAt.Valid {
+			m.EndedAt = &endedAt.Time
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// DeleteMeeting removes a meeting and cascades to its segments.
+func (s *SQLite) DeleteMeeting(id string) error {
+	_, err := s.db.Exec("DELETE FROM meetings WHERE id = ?", id)
+	return err
+}
+
+// SaveMeetingSegment inserts a new segment for a meeting.
+func (s *SQLite) SaveMeetingSegment(seg MeetingSegment) error {
+	const query = `
+INSERT INTO meeting_segments (id, meeting_id, segment_index, start_ms, end_ms, text, speaker, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+	text = excluded.text,
+	speaker = excluded.speaker,
+	start_ms = excluded.start_ms,
+	end_ms = excluded.end_ms;
+`
+	_, err := s.db.Exec(query, seg.ID, seg.MeetingID, seg.SegmentIndex, seg.StartMs, seg.EndMs, seg.Text, seg.Speaker, seg.CreatedAt)
+	return err
+}
+
+// ListMeetingSegments returns all segments for a meeting ordered by segment_index ASC.
+func (s *SQLite) ListMeetingSegments(meetingID string) ([]MeetingSegment, error) {
+	const query = `
+SELECT id, meeting_id, segment_index, start_ms, end_ms, text, speaker, created_at
+FROM meeting_segments
+WHERE meeting_id = ?
+ORDER BY segment_index ASC;
+`
+	rows, err := s.db.Query(query, meetingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []MeetingSegment
+	for rows.Next() {
+		var seg MeetingSegment
+		if err := rows.Scan(
+			&seg.ID, &seg.MeetingID, &seg.SegmentIndex, &seg.StartMs, &seg.EndMs, &seg.Text, &seg.Speaker, &seg.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, seg)
+	}
+	return out, rows.Err()
 }
 
 // Close releases the underlying SQLite database handle.

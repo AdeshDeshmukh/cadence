@@ -64,6 +64,7 @@ Commands:
   tool <name> [k=v...] Invoke a specific agent tool directly (e.g. "tool fs action=list path=.")
   permissions [list|grant|revoke|check] Manage per-tool permission policies (allow, deny, ask)
   policy [show|set|evaluate] Manage action confirmation policies (always_ask, auto_approve_safe, etc.)
+  meeting [subcommand] Continuous meeting recording and capture (start, stop, pause, resume, status, list, show, delete)
   context [show|set|clear] Show or manage developer/code editor context (file, language, selection)
   terminal [status|hook] Inspect terminal/shell context or generate shell integration hooks
   app                Show detected active foreground application and category
@@ -280,6 +281,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "policy", "action-policy":
 		if err := cmdPolicy(ctx, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "meeting":
+		if err := cmdMeeting(ctx, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -4194,4 +4202,365 @@ Flags:
 		fmt.Fprintln(stdout, "  Status:      Ready")
 	}
 	return nil
+}
+
+func formatMeetingDuration(ms int64) string {
+	d := time.Duration(ms) * time.Millisecond
+	minutes := int(d.Minutes())
+	seconds := int(d.Seconds()) % 60
+	return fmt.Sprintf("%02d:%02d", minutes, seconds)
+}
+
+func cmdMeeting(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	action := "status"
+	var rest []string
+	if len(args) > 0 {
+		action = strings.ToLower(args[0])
+		rest = args[1:]
+	}
+
+	switch action {
+	case "start":
+		return cmdMeetingStart(ctx, client, rest, out)
+	case "stop":
+		return cmdMeetingStop(ctx, client, out)
+	case "pause":
+		return cmdMeetingPause(ctx, client, out)
+	case "resume":
+		return cmdMeetingResume(ctx, client, out)
+	case "status":
+		return cmdMeetingStatus(ctx, client, out)
+	case "list", "ls":
+		return cmdMeetingList(ctx, client, rest, out)
+	case "show", "get":
+		return cmdMeetingShow(ctx, client, rest, out)
+	case "delete", "rm":
+		return cmdMeetingDelete(ctx, client, rest, out)
+	case "help", "-h", "--help":
+		cmdMeetingUsage(out)
+		return nil
+	default:
+		return fmt.Errorf("unknown meeting subcommand: %s (supported: start, stop, pause, resume, status, list, show, delete)", action)
+	}
+}
+
+func cmdMeetingStart(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	title := ""
+	if len(args) > 0 {
+		title = strings.Join(args, " ")
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	params := map[string]any{}
+	if title != "" {
+		params["title"] = title
+	}
+	resp, err := client.Call(callCtx, "meeting_start", params)
+	if err != nil {
+		return fmt.Errorf("failed to start meeting recording: %w", err)
+	}
+
+	resMap, ok := resp.(map[string]any)
+	if !ok {
+		return fmt.Errorf("unexpected meeting_start response: %v", resp)
+	}
+	sessID, _ := resMap["id"].(string)
+	sessTitle, _ := resMap["title"].(string)
+	audioPath, _ := resMap["audio_path"].(string)
+
+	fmt.Fprintln(out, "Continuous meeting recording started.")
+	fmt.Fprintf(out, "Session ID: %s\n", sessID)
+	if sessTitle != "" {
+		fmt.Fprintf(out, "Title:      %s\n", sessTitle)
+	}
+	if audioPath != "" {
+		fmt.Fprintf(out, "Audio File: %s\n", audioPath)
+	}
+	return nil
+}
+
+func cmdMeetingStop(ctx context.Context, client ipc.Client, out io.Writer) error {
+	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	resp, err := client.Call(callCtx, "meeting_stop", nil)
+	if err != nil {
+		return fmt.Errorf("failed to stop meeting recording: %w", err)
+	}
+
+	resMap, ok := resp.(map[string]any)
+	if !ok {
+		return fmt.Errorf("unexpected meeting_stop response: %v", resp)
+	}
+	sessID, _ := resMap["id"].(string)
+	title, _ := resMap["title"].(string)
+	audioPath, _ := resMap["audio_path"].(string)
+	durMs := int64(0)
+	if d, ok := resMap["duration_ms"].(float64); ok {
+		durMs = int64(d)
+	}
+	var segCount int
+	if segs, ok := resMap["segments"].([]any); ok {
+		segCount = len(segs)
+	}
+
+	fmt.Fprintln(out, "Meeting recording stopped.")
+	fmt.Fprintf(out, "Session ID: %s\n", sessID)
+	if title != "" {
+		fmt.Fprintf(out, "Title:      %s\n", title)
+	}
+	fmt.Fprintf(out, "Duration:   %s\n", formatMeetingDuration(durMs))
+	fmt.Fprintf(out, "Segments:   %d\n", segCount)
+	if audioPath != "" {
+		fmt.Fprintf(out, "Audio File: %s\n", audioPath)
+	}
+	return nil
+}
+
+func cmdMeetingPause(ctx context.Context, client ipc.Client, out io.Writer) error {
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	_, err := client.Call(callCtx, "meeting_pause", nil)
+	if err != nil {
+		return fmt.Errorf("failed to pause meeting recording: %w", err)
+	}
+	fmt.Fprintln(out, "Meeting recording paused.")
+	return nil
+}
+
+func cmdMeetingResume(ctx context.Context, client ipc.Client, out io.Writer) error {
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	_, err := client.Call(callCtx, "meeting_resume", nil)
+	if err != nil {
+		return fmt.Errorf("failed to resume meeting recording: %w", err)
+	}
+	fmt.Fprintln(out, "Meeting recording resumed.")
+	return nil
+}
+
+func cmdMeetingStatus(ctx context.Context, client ipc.Client, out io.Writer) error {
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	resp, err := client.Call(callCtx, "meeting_status", nil)
+	if err != nil {
+		return fmt.Errorf("failed to get meeting status: %w", err)
+	}
+
+	resMap, ok := resp.(map[string]any)
+	if !ok {
+		return fmt.Errorf("unexpected meeting_status response: %v", resp)
+	}
+
+	isRec, _ := resMap["is_recording"].(bool)
+	isPaused, _ := resMap["is_paused"].(bool)
+	if !isRec && !isPaused {
+		fmt.Fprintln(out, "No active meeting recording.")
+		return nil
+	}
+
+	sessMap, _ := resMap["active_session"].(map[string]any)
+	sessID := ""
+	title := ""
+	audioPath := ""
+	if sessMap != nil {
+		sessID, _ = sessMap["id"].(string)
+		title, _ = sessMap["title"].(string)
+		audioPath, _ = sessMap["audio_path"].(string)
+	}
+
+	statusStr := "recording"
+	if isPaused {
+		statusStr = "paused"
+	}
+
+	elapsedMs := int64(0)
+	if e, ok := resMap["elapsed_ms"].(float64); ok {
+		elapsedMs = int64(e)
+	}
+	segCount := 0
+	if c, ok := resMap["segment_count"].(float64); ok {
+		segCount = int(c)
+	}
+
+	fmt.Fprintf(out, "Meeting Session: %s\n", sessID)
+	if title != "" {
+		fmt.Fprintf(out, "Title:           %s\n", title)
+	}
+	fmt.Fprintf(out, "Status:          %s\n", statusStr)
+	fmt.Fprintf(out, "Elapsed:         %s\n", formatMeetingDuration(elapsedMs))
+	fmt.Fprintf(out, "Segments:        %d\n", segCount)
+	if audioPath != "" {
+		fmt.Fprintf(out, "Audio File:      %s\n", audioPath)
+	}
+	return nil
+}
+
+func cmdMeetingList(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	limit := 20
+	if len(args) > 0 {
+		if l, err := strconv.Atoi(args[0]); err == nil && l > 0 {
+			limit = l
+		}
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	resp, err := client.Call(callCtx, "meeting_list", map[string]any{"limit": limit})
+	if err != nil {
+		return fmt.Errorf("failed to list meetings: %w", err)
+	}
+
+	items, ok := resp.([]any)
+	if !ok || len(items) == 0 {
+		fmt.Fprintln(out, "No recorded meetings found.")
+		return nil
+	}
+
+	fmt.Fprintf(out, "%-16s  %-25s  %-10s  %-10s  %s\n", "ID", "TITLE", "DURATION", "STATUS", "DATE")
+	fmt.Fprintf(out, "%-16s  %-25s  %-10s  %-10s  %s\n", "----------------", "-------------------------", "----------", "----------", "----------------")
+
+	for _, it := range items {
+		m, ok := it.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, _ := m["id"].(string)
+		title, _ := m["title"].(string)
+		status, _ := m["state"].(string)
+		durMs := int64(0)
+		if d, ok := m["duration_ms"].(float64); ok {
+			durMs = int64(d)
+		}
+		createdAt := ""
+		if ca, ok := m["created_at"].(string); ok {
+			if t, err := time.Parse(time.RFC3339Nano, ca); err == nil {
+				createdAt = t.Local().Format("2006-01-02 15:04")
+			} else {
+				createdAt = ca
+			}
+		}
+
+		if len(title) > 25 {
+			title = title[:22] + "..."
+		}
+		if len(id) > 16 {
+			id = id[:13] + "..."
+		}
+
+		fmt.Fprintf(out, "%-16s  %-25s  %-10s  %-10s  %s\n", id, title, formatMeetingDuration(durMs), status, createdAt)
+	}
+	return nil
+}
+
+func cmdMeetingShow(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("missing meeting id (usage: cadence meeting show <id>)")
+	}
+	id := args[0]
+
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	resp, err := client.Call(callCtx, "meeting_get", map[string]any{"id": id})
+	if err != nil {
+		return fmt.Errorf("failed to get meeting: %w", err)
+	}
+
+	resMap, ok := resp.(map[string]any)
+	if !ok {
+		return fmt.Errorf("unexpected meeting_get response: %v", resp)
+	}
+
+	mtg, _ := resMap["meeting"].(map[string]any)
+	if mtg == nil {
+		return errors.New("meeting not found")
+	}
+
+	title, _ := mtg["title"].(string)
+	state, _ := mtg["state"].(string)
+	audioPath, _ := mtg["audio_path"].(string)
+	durMs := int64(0)
+	if d, ok := mtg["duration_ms"].(float64); ok {
+		durMs = int64(d)
+	}
+	createdAt := ""
+	if ca, ok := mtg["created_at"].(string); ok {
+		if t, err := time.Parse(time.RFC3339Nano, ca); err == nil {
+			createdAt = t.Local().Format("2006-01-02 15:04:05")
+		} else {
+			createdAt = ca
+		}
+	}
+
+	fmt.Fprintf(out, "Meeting:    %s (%s)\n", title, id)
+	fmt.Fprintf(out, "Status:     %s\n", state)
+	fmt.Fprintf(out, "Date:       %s\n", createdAt)
+	fmt.Fprintf(out, "Duration:   %s\n", formatMeetingDuration(durMs))
+	if audioPath != "" {
+		fmt.Fprintf(out, "Audio File: %s\n", audioPath)
+	}
+
+	segs, _ := resMap["segments"].([]any)
+	fmt.Fprintf(out, "\nSegments (%d):\n", len(segs))
+	if len(segs) == 0 {
+		fmt.Fprintln(out, "  (No segments transcribed yet)")
+	} else {
+		for _, s := range segs {
+			sMap, ok := s.(map[string]any)
+			if !ok {
+				continue
+			}
+			startMs := int64(0)
+			if st, ok := sMap["start_ms"].(float64); ok {
+				startMs = int64(st)
+			}
+			endMs := int64(0)
+			if en, ok := sMap["end_ms"].(float64); ok {
+				endMs = int64(en)
+			}
+			text, _ := sMap["text"].(string)
+			if text == "" {
+				text = "..."
+			}
+			fmt.Fprintf(out, "  [%s - %s] %s\n", formatMeetingDuration(startMs), formatMeetingDuration(endMs), text)
+		}
+	}
+	return nil
+}
+
+func cmdMeetingDelete(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("missing meeting id (usage: cadence meeting delete <id>)")
+	}
+	id := args[0]
+
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	_, err := client.Call(callCtx, "meeting_delete", map[string]any{"id": id})
+	if err != nil {
+		return fmt.Errorf("failed to delete meeting: %w", err)
+	}
+	fmt.Fprintf(out, "Meeting %s deleted.\n", id)
+	return nil
+}
+
+func cmdMeetingUsage(out io.Writer) {
+	fmt.Fprintln(out, "Usage: cadence meeting <subcommand> [arguments]")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Subcommands:")
+	fmt.Fprintln(out, "  start [title]        Start a continuous meeting recording session")
+	fmt.Fprintln(out, "  stop                 Stop and finalize the active meeting recording")
+	fmt.Fprintln(out, "  pause                Pause incoming audio recording")
+	fmt.Fprintln(out, "  resume               Resume paused meeting recording")
+	fmt.Fprintln(out, "  status               Show current meeting recording status and duration")
+	fmt.Fprintln(out, "  list [limit]         List past meeting recordings")
+	fmt.Fprintln(out, "  show <id>            Show details and transcribed segments for a meeting")
+	fmt.Fprintln(out, "  delete <id>          Delete a meeting record and its audio segments")
 }

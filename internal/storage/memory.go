@@ -15,6 +15,8 @@ type Memory struct {
 	recoveries  map[string]SessionRecovery
 	snippets    map[string]Snippet
 	profiles    map[string]PolishProfile
+	meetings    map[string]Meeting
+	segments    map[string][]MeetingSegment
 }
 
 func NewMemory() *Memory {
@@ -23,6 +25,8 @@ func NewMemory() *Memory {
 		recoveries: map[string]SessionRecovery{},
 		snippets:   map[string]Snippet{},
 		profiles:   map[string]PolishProfile{},
+		meetings:   map[string]Meeting{},
+		segments:   map[string][]MeetingSegment{},
 	}
 }
 
@@ -240,4 +244,65 @@ func (m *Memory) DeletePolishProfile(name string) error {
 	defer m.mu.Unlock()
 	delete(m.profiles, name)
 	return nil
+}
+
+func (m *Memory) SaveMeeting(mtg Meeting) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.meetings[mtg.ID] = mtg
+	return nil
+}
+
+func (m *Memory) GetMeeting(id string) (*Meeting, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	mtg, ok := m.meetings[id]
+	if !ok {
+		return nil, nil
+	}
+	res := mtg
+	return &res, nil
+}
+
+func (m *Memory) ListMeetings(limit int) ([]Meeting, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]Meeting, 0, len(m.meetings))
+	for _, mtg := range m.meetings {
+		out = append(out, mtg)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	if limit > 0 && limit < len(out) {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (m *Memory) DeleteMeeting(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.meetings, id)
+	delete(m.segments, id)
+	return nil
+}
+
+func (m *Memory) SaveMeetingSegment(seg MeetingSegment) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.segments[seg.MeetingID] = append(m.segments[seg.MeetingID], seg)
+	return nil
+}
+
+func (m *Memory) ListMeetingSegments(meetingID string) ([]MeetingSegment, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	segs := m.segments[meetingID]
+	out := make([]MeetingSegment, len(segs))
+	copy(out, segs)
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].SegmentIndex < out[j].SegmentIndex
+	})
+	return out, nil
 }

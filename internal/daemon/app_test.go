@@ -21,6 +21,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/edit"
 	"github.com/AdeshDeshmukh/cadence/internal/hotkey"
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
+	"github.com/AdeshDeshmukh/cadence/internal/meeting"
 	"github.com/AdeshDeshmukh/cadence/internal/paste"
 	"github.com/AdeshDeshmukh/cadence/internal/polish"
 	"github.com/AdeshDeshmukh/cadence/internal/postprocess"
@@ -2299,7 +2300,7 @@ func TestApp_AgentIPC(t *testing.T) {
 	mockCtrl := system.NewMockController()
 	agentEng := agent.NewEngine(agent.WithSystemController(mockCtrl))
 	cfg := config.Default()
-	app := NewApp(cfg, WithSystemController(mockCtrl), WithAgentEngine(agentEng))
+	app := NewApp(cfg, WithCapture(&testLiveCapture{}), WithStore(storage.NewMemory()), WithSystemController(mockCtrl), WithAgentEngine(agentEng))
 	ctx := context.Background()
 
 	// 1. agent_plan error on empty goal
@@ -2376,7 +2377,7 @@ func TestApp_ToolRegistryIPC(t *testing.T) {
 	mockCtrl := system.NewMockController()
 	agentEng := agent.NewEngine(agent.WithSystemController(mockCtrl))
 	cfg := config.Default()
-	app := NewApp(cfg, WithSystemController(mockCtrl), WithAgentEngine(agentEng))
+	app := NewApp(cfg, WithCapture(&testLiveCapture{}), WithStore(storage.NewMemory()), WithSystemController(mockCtrl), WithAgentEngine(agentEng))
 	ctx := context.Background()
 
 	// 1. tool_list
@@ -2440,7 +2441,7 @@ func TestApp_PermissionsIPC(t *testing.T) {
 	mockCtrl := system.NewMockController()
 	agentEng := agent.NewEngine(agent.WithSystemController(mockCtrl))
 	cfg := config.Default()
-	app := NewApp(cfg, WithSystemController(mockCtrl), WithAgentEngine(agentEng))
+	app := NewApp(cfg, WithCapture(&testLiveCapture{}), WithStore(storage.NewMemory()), WithSystemController(mockCtrl), WithAgentEngine(agentEng))
 	ctx := context.Background()
 
 	// 1. permission_list
@@ -2543,7 +2544,7 @@ func TestApp_PolicyIPC(t *testing.T) {
 	mockCtrl := system.NewMockController()
 	agentEng := agent.NewEngine(agent.WithSystemController(mockCtrl))
 	cfg := config.Default()
-	app := NewApp(cfg, WithSystemController(mockCtrl), WithAgentEngine(agentEng))
+	app := NewApp(cfg, WithCapture(&testLiveCapture{}), WithStore(storage.NewMemory()), WithSystemController(mockCtrl), WithAgentEngine(agentEng))
 	ctx := context.Background()
 
 	// 1. policy_get (default is auto_approve_safe)
@@ -2607,5 +2608,178 @@ func TestApp_PolicyIPC(t *testing.T) {
 	}
 	if _, err := app.Handle(ctx, ipc.Request{Method: "policy_evaluate"}); err == nil {
 		t.Fatal("expected error on missing tool parameter in evaluate")
+	}
+}
+
+func TestApp_MeetingIPC(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := storage.NewMemory()
+	capture := &testLiveCapture{chunk: audio.Chunk{
+		Samples:    []float32{0.1, 0.2, -0.1},
+		SampleRate: 16000,
+		Timestamp:  time.Now(),
+	}}
+	engine := asr.MockEngine{Text: "Continuous meeting audio"}
+
+	mgr := meeting.NewManager(
+		store,
+		capture,
+		meeting.WithAudioDirectory(tmpDir),
+		meeting.WithASREngine(engine),
+	)
+
+	cfg := config.Default()
+	app := NewApp(
+		cfg,
+		WithStore(store),
+		WithCapture(capture),
+		WithASR(engine),
+		WithMeetingManager(mgr),
+	)
+	ctx := context.Background()
+
+	// 1. Initial meeting_status: not recording
+	statusRes, err := app.Handle(ctx, ipc.Request{Method: "meeting_status"})
+	if err != nil {
+		t.Fatalf("meeting_status failed: %v", err)
+	}
+	rep, ok := statusRes.(meeting.StatusReport)
+	if !ok {
+		t.Fatalf("expected meeting.StatusReport, got %T", statusRes)
+	}
+	if rep.IsRecording {
+		t.Fatal("expected initial meeting_status to not be recording")
+	}
+
+	// 2. meeting_start
+	startRes, err := app.Handle(ctx, ipc.Request{
+		Method: "meeting_start",
+		Params: map[string]any{"title": "Engineering Sync"},
+	})
+	if err != nil {
+		t.Fatalf("meeting_start failed: %v", err)
+	}
+	sess, ok := startRes.(*meeting.Session)
+	if !ok || sess.ID == "" || sess.Title != "Engineering Sync" {
+		t.Fatalf("unexpected meeting_start result: %+v", startRes)
+	}
+
+	// 3. meeting_status while recording
+	statusRes2, err := app.Handle(ctx, ipc.Request{Method: "meeting_status"})
+	if err != nil {
+		t.Fatalf("meeting_status failed: %v", err)
+	}
+	rep2 := statusRes2.(meeting.StatusReport)
+	if !rep2.IsRecording || rep2.ActiveSession == nil {
+		t.Fatalf("expected recording status with active session, got %+v", rep2)
+	}
+
+	// 4. meeting_pause
+	pauseRes, err := app.Handle(ctx, ipc.Request{Method: "meeting_pause"})
+	if err != nil {
+		t.Fatalf("meeting_pause failed: %v", err)
+	}
+	pMap, ok := pauseRes.(map[string]any)
+	if !ok || pMap["ok"] != true {
+		t.Fatalf("unexpected meeting_pause result: %+v", pauseRes)
+	}
+	pStatus, ok := pMap["status"].(meeting.StatusReport)
+	if !ok || !pStatus.IsPaused {
+		t.Fatalf("expected status.IsPaused to be true, got %+v", pMap)
+	}
+
+	// 5. meeting_resume
+	resumeRes, err := app.Handle(ctx, ipc.Request{Method: "meeting_resume"})
+	if err != nil {
+		t.Fatalf("meeting_resume failed: %v", err)
+	}
+	rMap, ok := resumeRes.(map[string]any)
+	if !ok || rMap["ok"] != true {
+		t.Fatalf("unexpected meeting_resume result: %+v", resumeRes)
+	}
+	rStatus, ok := rMap["status"].(meeting.StatusReport)
+	if !ok || rStatus.IsPaused {
+		t.Fatalf("expected status.IsPaused to be false, got %+v", rMap)
+	}
+
+	// 6. meeting_stop
+	stopRes, err := app.Handle(ctx, ipc.Request{Method: "meeting_stop"})
+	if err != nil {
+		t.Fatalf("meeting_stop failed: %v", err)
+	}
+	stoppedSess, ok := stopRes.(*meeting.Session)
+	if !ok || stoppedSess.State != meeting.StateStopped {
+		t.Fatalf("unexpected meeting_stop result: %+v", stopRes)
+	}
+
+	// 7. meeting_list
+	listRes, err := app.Handle(ctx, ipc.Request{
+		Method: "meeting_list",
+		Params: map[string]any{"limit": float64(10)},
+	})
+	if err != nil {
+		t.Fatalf("meeting_list failed: %v", err)
+	}
+	meetings, ok := listRes.([]storage.Meeting)
+	if !ok || len(meetings) == 0 {
+		t.Fatalf("expected at least 1 meeting in list, got %+v", listRes)
+	}
+	if meetings[0].ID != sess.ID {
+		t.Fatalf("expected meeting ID %s, got %s", sess.ID, meetings[0].ID)
+	}
+
+	// 8. meeting_get
+	getRes, err := app.Handle(ctx, ipc.Request{
+		Method: "meeting_get",
+		Params: map[string]any{"id": sess.ID},
+	})
+	if err != nil {
+		t.Fatalf("meeting_get failed: %v", err)
+	}
+	gMap, ok := getRes.(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected meeting_get response shape: %+v", getRes)
+	}
+	gotMtg, ok := gMap["meeting"].(*storage.Meeting)
+	if !ok || gotMtg == nil || gotMtg.ID != sess.ID {
+		t.Fatalf("expected valid meeting in meeting_get, got %+v", gMap["meeting"])
+	}
+
+	// 9. meeting_delete
+	delRes, err := app.Handle(ctx, ipc.Request{
+		Method: "meeting_delete",
+		Params: map[string]any{"id": sess.ID},
+	})
+	if err != nil {
+		t.Fatalf("meeting_delete failed: %v", err)
+	}
+	dMap, ok := delRes.(map[string]any)
+	if !ok || dMap["ok"] != true {
+		t.Fatalf("unexpected meeting_delete result: %+v", delRes)
+	}
+
+	// Verify get after delete fails or returns meeting not found
+	if _, err := app.Handle(ctx, ipc.Request{
+		Method: "meeting_get",
+		Params: map[string]any{"id": sess.ID},
+	}); err == nil {
+		t.Fatal("expected error getting deleted meeting")
+	}
+
+	// 10. Error validations
+	if _, err := app.Handle(ctx, ipc.Request{Method: "meeting_get"}); err == nil {
+		t.Fatal("expected error on meeting_get without id")
+	}
+	if _, err := app.Handle(ctx, ipc.Request{Method: "meeting_delete"}); err == nil {
+		t.Fatal("expected error on meeting_delete without id")
+	}
+	if _, err := app.Handle(ctx, ipc.Request{Method: "meeting_pause"}); err == nil {
+		t.Fatal("expected error pausing when no active meeting")
+	}
+	if _, err := app.Handle(ctx, ipc.Request{Method: "meeting_resume"}); err == nil {
+		t.Fatal("expected error resuming when no active meeting")
+	}
+	if _, err := app.Handle(ctx, ipc.Request{Method: "meeting_stop"}); err == nil {
+		t.Fatal("expected error stopping when no active meeting")
 	}
 }
