@@ -444,6 +444,26 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 				"status": "success",
 			},
 		}, nil
+	case "tool_list":
+		reg := agent.NewRegistry(system.NewMockController(), nil)
+		return map[string]any{
+			"tools":      reg.List(),
+			"categories": reg.Categories(),
+			"schemas":    reg.ExportJSONSchema(),
+		}, nil
+	case "tool_call":
+		params, _ := req.Params.(map[string]any)
+		name, _ := params["name"].(string)
+		pMap, _ := params["params"].(map[string]any)
+		reg := agent.NewRegistry(system.NewMockController(), nil)
+		res, err := reg.Call(context.Background(), name, pMap)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"name":   name,
+			"result": res,
+		}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -2097,5 +2117,77 @@ func TestCLI_Agent(t *testing.T) {
 	code := run([]string{"agent", "--plan-only", "open", "Chrome"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run agent failed with code %d, stderr: %s", code, stderr.String())
+	}
+}
+
+func TestCLI_Tools(t *testing.T) {
+	mockCtrl := system.NewMockController()
+	systemControllerOverride = mockCtrl
+	defer func() { systemControllerOverride = nil }()
+
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("cad_tools_%d.sock", time.Now().UnixNano()))
+	cleanup := startMockDaemon(t, sockPath)
+	defer cleanup()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sockPath,
+	}
+	ctx := context.Background()
+	var out bytes.Buffer
+
+	// 1. tools list
+	out.Reset()
+	if err := cmdTools(ctx, client, []string{"list"}, &out); err != nil {
+		t.Fatalf("cmdTools list failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Registered Agent Tools") {
+		t.Fatalf("expected tools header, got: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "fs") || !strings.Contains(out.String(), "clipboard") {
+		t.Fatalf("expected fs and clipboard tools in output, got: %s", out.String())
+	}
+
+	// 2. tools schema
+	out.Reset()
+	if err := cmdTools(ctx, client, []string{"schema"}, &out); err != nil {
+		t.Fatalf("cmdTools schema failed: %v", err)
+	}
+	var schemas []map[string]any
+	if err := json.Unmarshal(out.Bytes(), &schemas); err != nil {
+		t.Fatalf("invalid schema json: %v", err)
+	}
+	if len(schemas) < 5 {
+		t.Fatalf("expected at least 5 tool schemas, got %d", len(schemas))
+	}
+
+	// 3. tool call echo
+	out.Reset()
+	if err := cmdTool(ctx, client, []string{"echo", "message=registry-test-output"}, &out); err != nil {
+		t.Fatalf("cmdTool echo failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "registry-test-output") {
+		t.Fatalf("expected echo output, got: %s", out.String())
+	}
+
+	// 4. tool call errors
+	if err := cmdTool(ctx, client, []string{}, &out); err == nil {
+		t.Fatal("expected error on empty tool args")
+	}
+	if err := cmdTool(ctx, client, []string{"unknown_tool"}, &out); err == nil {
+		t.Fatal("expected error on unknown tool")
+	}
+
+	// 5. Integration through run() entrypoint
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"tools"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run tools failed with code %d, stderr: %s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	code = run([]string{"tool", "echo", "message=run-integration"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run tool echo failed with code %d, stderr: %s", code, stderr.String())
 	}
 }

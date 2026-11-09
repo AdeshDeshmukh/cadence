@@ -2369,3 +2369,67 @@ func TestApp_AgentIPC(t *testing.T) {
 		t.Fatalf("expected at least 2 history items, got %+v", histRes)
 	}
 }
+
+func TestApp_ToolRegistryIPC(t *testing.T) {
+	mockCtrl := system.NewMockController()
+	agentEng := agent.NewEngine(agent.WithSystemController(mockCtrl))
+	cfg := config.Default()
+	app := NewApp(cfg, WithSystemController(mockCtrl), WithAgentEngine(agentEng))
+	ctx := context.Background()
+
+	// 1. tool_list
+	listRes, err := app.Handle(ctx, ipc.Request{Method: "tool_list"})
+	if err != nil {
+		t.Fatalf("tool_list failed: %v", err)
+	}
+	lMap, ok := listRes.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map response, got %T", listRes)
+	}
+	tools, ok := lMap["tools"].([]agent.ToolDefinition)
+	if !ok || len(tools) < 5 {
+		t.Fatalf("expected at least 5 tools, got %d", len(tools))
+	}
+	cats, ok := lMap["categories"].([]string)
+	if !ok || len(cats) < 3 {
+		t.Fatalf("expected at least 3 categories, got %d", len(cats))
+	}
+
+	// 2. tool_call success (echo)
+	callRes, err := app.Handle(ctx, ipc.Request{
+		Method: "tool_call",
+		Params: map[string]any{
+			"name": "echo",
+			"params": map[string]any{
+				"message": "hello tool registry",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("tool_call echo failed: %v", err)
+	}
+	cMap := callRes.(map[string]any)
+	tRes := cMap["result"].(agent.ToolResult)
+	if !tRes.Success || tRes.Output != "hello tool registry" {
+		t.Fatalf("unexpected echo result: %+v", tRes)
+	}
+
+	// 3. tool_call error missing name
+	if _, err := app.Handle(ctx, ipc.Request{Method: "tool_call"}); err == nil {
+		t.Fatal("expected error on missing name")
+	}
+
+	// 4. tool_call unregistered tool
+	unregRes, err := app.Handle(ctx, ipc.Request{
+		Method: "tool_call",
+		Params: map[string]any{"name": "unknown_tool"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected transport error: %v", err)
+	}
+	uMap := unregRes.(map[string]any)
+	uRes := uMap["result"].(agent.ToolResult)
+	if uRes.Success {
+		t.Fatal("expected failure on unknown tool")
+	}
+}

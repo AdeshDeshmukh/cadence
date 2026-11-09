@@ -1,8 +1,12 @@
 package agent
 
 import (
+	"context"
 	"time"
 )
+
+// ToolHandler defines a function signature for invoking an agent tool.
+type ToolHandler func(ctx context.Context, params map[string]any) (ToolResult, error)
 
 // StepStatus indicates the lifecycle phase of an individual plan step.
 type StepStatus string
