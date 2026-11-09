@@ -3,7 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
-	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -11,16 +11,14 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/system"
 )
 
-// ToolHandler defines a function signature for invoking an agent tool.
-type ToolHandler func(ctx context.Context, params map[string]any) (ToolResult, error)
-
 // Engine orchestrates the autonomous Agent loop (plan -> tool call -> observe -> report).
 type Engine struct {
-	mu         sync.RWMutex
-	tools      map[string]ToolHandler
-	history    []*ExecutionTrajectory
-	maxSteps   int
-	systemCtrl system.Controller
+	mu             sync.RWMutex
+	registry       *Registry
+	history        []*ExecutionTrajectory
+	maxSteps       int
+	systemCtrl     system.Controller
+	searchProvider SearchProvider
 }
 
 // Option configures dependencies for the Agent Engine.
@@ -29,6 +27,11 @@ type Option func(*Engine)
 // WithSystemController configures a desktop system automation controller.
 func WithSystemController(c system.Controller) Option {
 	return func(e *Engine) { e.systemCtrl = c }
+}
+
+// WithSearchProvider configures a custom web search provider.
+func WithSearchProvider(sp SearchProvider) Option {
+	return func(e *Engine) { e.searchProvider = sp }
 }
 
 // WithMaxSteps sets the global default maximum step limit.
@@ -43,7 +46,6 @@ func WithMaxSteps(n int) Option {
 // NewEngine creates a new Agent loop engine with default built-in tools.
 func NewEngine(opts ...Option) *Engine {
 	e := &Engine{
-		tools:    make(map[string]ToolHandler),
 		maxSteps: 10,
 	}
 
@@ -55,121 +57,24 @@ func NewEngine(opts ...Option) *Engine {
 		e.systemCtrl = system.NewDefaultController()
 	}
 
-	// Register built-in tools
-	e.registerBuiltins()
+	e.registry = NewRegistry(e.systemCtrl, e.searchProvider)
 
 	return e
 }
 
-func (e *Engine) registerBuiltins() {
-	// 1. Echo tool
-	e.RegisterTool("echo", func(_ context.Context, params map[string]any) (ToolResult, error) {
-		msg, _ := params["message"].(string)
-		return ToolResult{
-			Success: true,
-			Output:  msg,
-		}, nil
-	})
-
-	// 2. Shell execution tool
-	e.RegisterTool("exec", func(ctx context.Context, params map[string]any) (ToolResult, error) {
-		cmdStr, _ := params["command"].(string)
-		if strings.TrimSpace(cmdStr) == "" {
-			return ToolResult{Success: false, Error: "missing command parameter"}, nil
-		}
-		cmd := exec.CommandContext(ctx, "sh", "-c", cmdStr)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			return ToolResult{
-				Success: false,
-				Output:  string(out),
-				Error:   err.Error(),
-			}, nil
-		}
-		return ToolResult{
-			Success: true,
-			Output:  strings.TrimSpace(string(out)),
-		}, nil
-	})
-
-	// 3. System action tool
-	e.RegisterTool("system", func(ctx context.Context, params map[string]any) (ToolResult, error) {
-		action, _ := params["action"].(string)
-		target, _ := params["target"].(string)
-
-		switch strings.ToLower(action) {
-		case "launch":
-			if err := e.systemCtrl.LaunchApp(ctx, target); err != nil {
-				return ToolResult{Success: false, Error: err.Error()}, nil
-			}
-			return ToolResult{Success: true, Output: fmt.Sprintf("Launched %s", target)}, nil
-
-		case "focus":
-			if err := e.systemCtrl.FocusApp(ctx, target); err != nil {
-				return ToolResult{Success: false, Error: err.Error()}, nil
-			}
-			return ToolResult{Success: true, Output: fmt.Sprintf("Switched to %s", target)}, nil
-
-		case "quit":
-			if err := e.systemCtrl.QuitApp(ctx, target); err != nil {
-				return ToolResult{Success: false, Error: err.Error()}, nil
-			}
-			return ToolResult{Success: true, Output: fmt.Sprintf("Quit %s", target)}, nil
-
-		case "window":
-			wAct := system.WindowAction(target)
-			if err := e.systemCtrl.ControlWindow(ctx, wAct); err != nil {
-				return ToolResult{Success: false, Error: err.Error()}, nil
-			}
-			return ToolResult{Success: true, Output: fmt.Sprintf("Window %s executed", target)}, nil
-
-		case "screenshot":
-			clip, _ := params["clipboard"].(bool)
-			win, _ := params["window"].(bool)
-			path, _ := params["path"].(string)
-			res, err := e.systemCtrl.CaptureScreenshot(ctx, system.ScreenshotOptions{
-				ActiveWindowOnly: win,
-				CopyToClipboard:  clip,
-				SavePath:         path,
-			})
-			if err != nil {
-				return ToolResult{Success: false, Error: err.Error()}, nil
-			}
-			msg := fmt.Sprintf("Screenshot saved to %s", res.Path)
-			if res.CopiedToClipboard {
-				msg = "Screenshot copied to clipboard"
-			}
-			return ToolResult{Success: true, Output: msg}, nil
-
-		case "volume":
-			if m, ok := params["mute"].(bool); ok {
-				if err := e.systemCtrl.MuteVolume(ctx, m); err != nil {
-					return ToolResult{Success: false, Error: err.Error()}, nil
-				}
-				if m {
-					return ToolResult{Success: true, Output: "Volume muted"}, nil
-				}
-				return ToolResult{Success: true, Output: "Volume unmuted"}, nil
-			}
-			if lvl, ok := params["level"].(float64); ok {
-				if err := e.systemCtrl.SetVolume(ctx, int(lvl)); err != nil {
-					return ToolResult{Success: false, Error: err.Error()}, nil
-				}
-				return ToolResult{Success: true, Output: fmt.Sprintf("Volume set to %d%%", int(lvl))}, nil
-			}
-			return ToolResult{Success: false, Error: "missing volume parameter"}, nil
-
-		default:
-			return ToolResult{Success: false, Error: fmt.Sprintf("unknown system action: %s", action)}, nil
-		}
-	})
+// Registry returns the active tool registry.
+func (e *Engine) Registry() *Registry {
+	return e.registry
 }
 
-// RegisterTool adds or overrides a named tool handler.
+// RegisterTool adds or overrides a named tool handler in the registry.
 func (e *Engine) RegisterTool(name string, handler ToolHandler) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.tools[name] = handler
+	_ = e.registry.Register(ToolDefinition{
+		Name:        name,
+		Category:    "custom",
+		Description: fmt.Sprintf("Custom tool %s", name),
+		Handler:     handler,
+	})
 }
 
 // Plan decomposes a high-level goal into structured executable steps.
@@ -210,9 +115,147 @@ func (e *Engine) Plan(_ context.Context, goal string) (Plan, error) {
 	}, nil
 }
 
+var (
+	reReadFile      = regexp.MustCompile(`(?i)^(?:read\s+file|read|cat)\s+(.+)$`)
+	reWriteFile     = regexp.MustCompile(`(?i)^(?:write\s+file|write\s+to)\s+(\S+)\s+(?:with\s+content\s+|content\s+)?(.+)$`)
+	reListDir       = regexp.MustCompile(`(?i)^(?:list\s+files\s+in|list\s+directory|ls|list\s+dir)(?:\s+(.+))?$`)
+	reSearchFiles   = regexp.MustCompile(`(?i)^(?:search\s+files\s+for|find\s+files\s+matching)\s+(.+)$`)
+	reSearchWeb     = regexp.MustCompile(`(?i)^(?:search\s+(?:the\s+)?web\s+for|search\s+for|google)\s+(.+)$`)
+	reClipboardCopy = regexp.MustCompile(`(?i)^(?:copy\s+to\s+clipboard|copy|set\s+clipboard\s+to)\s+(.+)$`)
+)
+
 func (e *Engine) decomposePhrase(index int, phrase string) PlanStep {
-	// Check if this matches a system automation command
-	if sysCmd, ok := system.ParseSystemCommand(phrase); ok {
+	clean := strings.TrimSpace(phrase)
+	lower := strings.ToLower(clean)
+
+	// 1. Clipboard tool intents
+	if lower == "get clipboard" || lower == "read clipboard" || lower == "show clipboard" || lower == "paste clipboard" {
+		return PlanStep{
+			Index:       index,
+			Description: "Get clipboard content",
+			Tool:        "clipboard",
+			Params:      map[string]any{"action": "get"},
+			Status:      StepPending,
+		}
+	}
+	if lower == "clear clipboard" || lower == "empty clipboard" {
+		return PlanStep{
+			Index:       index,
+			Description: "Clear clipboard",
+			Tool:        "clipboard",
+			Params:      map[string]any{"action": "clear"},
+			Status:      StepPending,
+		}
+	}
+	if m := reClipboardCopy.FindStringSubmatch(clean); len(m) == 2 {
+		txt := strings.TrimSpace(m[1])
+		return PlanStep{
+			Index:       index,
+			Description: fmt.Sprintf("Copy %q to clipboard", txt),
+			Tool:        "clipboard",
+			Params:      map[string]any{"action": "set", "text": txt},
+			Status:      StepPending,
+		}
+	}
+
+	// 2. Web search intents
+	if m := reSearchWeb.FindStringSubmatch(clean); len(m) == 2 {
+		q := strings.TrimSpace(m[1])
+		return PlanStep{
+			Index:       index,
+			Description: fmt.Sprintf("Search web for: %s", q),
+			Tool:        "web_search",
+			Params:      map[string]any{"query": q},
+			Status:      StepPending,
+		}
+	}
+
+	// 3. System info intents
+	if lower == "check battery" || lower == "battery status" || lower == "battery" {
+		return PlanStep{
+			Index:       index,
+			Description: "Check battery status",
+			Tool:        "system_info",
+			Params:      map[string]any{"action": "battery"},
+			Status:      StepPending,
+		}
+	}
+	if lower == "check os" || lower == "os info" || lower == "system info" || lower == "system specs" {
+		return PlanStep{
+			Index:       index,
+			Description: "Check OS environment",
+			Tool:        "system_info",
+			Params:      map[string]any{"action": "os"},
+			Status:      StepPending,
+		}
+	}
+	if lower == "check network" || lower == "network info" || lower == "ip address" || lower == "my ip" {
+		return PlanStep{
+			Index:       index,
+			Description: "Check network interfaces",
+			Tool:        "system_info",
+			Params:      map[string]any{"action": "network"},
+			Status:      StepPending,
+		}
+	}
+	if lower == "hostname" || lower == "check hostname" {
+		return PlanStep{
+			Index:       index,
+			Description: "Check host name",
+			Tool:        "system_info",
+			Params:      map[string]any{"action": "hostname"},
+			Status:      StepPending,
+		}
+	}
+
+	// 4. Filesystem tool intents
+	if m := reWriteFile.FindStringSubmatch(clean); len(m) == 3 {
+		filePath := strings.TrimSpace(m[1])
+		fileContent := strings.TrimSpace(m[2])
+		return PlanStep{
+			Index:       index,
+			Description: fmt.Sprintf("Write file %s", filePath),
+			Tool:        "fs",
+			Params:      map[string]any{"action": "write", "path": filePath, "content": fileContent},
+			Status:      StepPending,
+		}
+	}
+	if m := reReadFile.FindStringSubmatch(clean); len(m) == 2 {
+		filePath := strings.TrimSpace(m[1])
+		return PlanStep{
+			Index:       index,
+			Description: fmt.Sprintf("Read file %s", filePath),
+			Tool:        "fs",
+			Params:      map[string]any{"action": "read", "path": filePath},
+			Status:      StepPending,
+		}
+	}
+	if m := reListDir.FindStringSubmatch(clean); len(m) == 2 {
+		dirPath := strings.TrimSpace(m[1])
+		if dirPath == "" {
+			dirPath = "."
+		}
+		return PlanStep{
+			Index:       index,
+			Description: fmt.Sprintf("List directory %s", dirPath),
+			Tool:        "fs",
+			Params:      map[string]any{"action": "list", "path": dirPath},
+			Status:      StepPending,
+		}
+	}
+	if m := reSearchFiles.FindStringSubmatch(clean); len(m) == 2 {
+		pat := strings.TrimSpace(m[1])
+		return PlanStep{
+			Index:       index,
+			Description: fmt.Sprintf("Search files matching %s", pat),
+			Tool:        "fs",
+			Params:      map[string]any{"action": "search", "path": ".", "pattern": pat},
+			Status:      StepPending,
+		}
+	}
+
+	// 5. System automation command
+	if sysCmd, ok := system.ParseSystemCommand(clean); ok {
 		switch sysCmd.Type {
 		case system.IntentLaunchApp:
 			return PlanStep{
@@ -277,8 +320,7 @@ func (e *Engine) decomposePhrase(index int, phrase string) PlanStep {
 		}
 	}
 
-	// Shell command invocation
-	lower := strings.ToLower(phrase)
+	// 6. Shell command invocation
 	if strings.HasPrefix(lower, "run ") || strings.HasPrefix(lower, "exec ") || strings.HasPrefix(lower, "execute ") {
 		cmd := strings.TrimPrefix(lower, "run ")
 		cmd = strings.TrimPrefix(cmd, "exec ")
@@ -295,9 +337,9 @@ func (e *Engine) decomposePhrase(index int, phrase string) PlanStep {
 	// Default fallback to echo diagnostic step
 	return PlanStep{
 		Index:       index,
-		Description: phrase,
+		Description: clean,
 		Tool:        "echo",
-		Params:      map[string]any{"message": phrase},
+		Params:      map[string]any{"message": clean},
 		Status:      StepPending,
 	}
 }
@@ -344,21 +386,10 @@ func (e *Engine) Run(ctx context.Context, goal string, opts RunOptions) (*Execut
 		stepStart := time.Now()
 		thought := fmt.Sprintf("Executing step %d/%d: %s", planStep.Index, len(plan.Steps), planStep.Description)
 
-		e.mu.RLock()
-		handler, exists := e.tools[planStep.Tool]
-		e.mu.RUnlock()
-
-		var tRes ToolResult
-		var callErr error
-
-		if !exists {
-			callErr = fmt.Errorf("unregistered tool: %s", planStep.Tool)
+		// Dispatch via registry
+		tRes, callErr := e.registry.Call(ctx, planStep.Tool, planStep.Params)
+		if callErr != nil {
 			tRes = ToolResult{Success: false, Error: callErr.Error()}
-		} else {
-			tRes, callErr = handler(ctx, planStep.Params)
-			if callErr != nil {
-				tRes = ToolResult{Success: false, Error: callErr.Error()}
-			}
 		}
 
 		obs := Observation{

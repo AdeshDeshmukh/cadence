@@ -60,6 +60,8 @@ Commands:
   mode [name]        Show or set active operating mode (dictation, code, command, agent)
   control <phrase>   Execute voice self-control command (e.g. "switch to code mode", "start recording")
   agent [flags] <goal> Autonomous agent loop: plan, tool call, observe, report
+  tools [list|schema] Inspect registered agent tools and function schemas
+  tool <name> [k=v...] Invoke a specific agent tool directly (e.g. "tool fs action=list path=.")
   context [show|set|clear] Show or manage developer/code editor context (file, language, selection)
   terminal [status|hook] Inspect terminal/shell context or generate shell integration hooks
   app                Show detected active foreground application and category
@@ -248,6 +250,20 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "agent":
 		if err := cmdAgent(ctx, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "tools":
+		if err := cmdTools(ctx, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "tool":
+		if err := cmdTool(ctx, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -2956,6 +2972,123 @@ Flags:
 
 	fmt.Fprintf(out, "\n🏁 Final Report: %s\n", traj.FinalReport)
 	fmt.Fprintf(out, "📊 Status: %s\n", traj.Status)
+	return nil
+}
+
+func cmdTools(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	action := "list"
+	if len(args) > 0 {
+		action = strings.ToLower(args[0])
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+
+	var tools []agent.ToolDefinition
+	var schemas []map[string]any
+
+	ipcRes, err := client.Call(callCtx, "tool_list", nil)
+	if err == nil {
+		if m, ok := ipcRes.(map[string]any); ok {
+			if raw, mErr := json.Marshal(m["tools"]); mErr == nil {
+				_ = json.Unmarshal(raw, &tools)
+			}
+			if raw, mErr := json.Marshal(m["schemas"]); mErr == nil {
+				_ = json.Unmarshal(raw, &schemas)
+			}
+		}
+	} else {
+		// Standalone fallback
+		reg := agent.NewRegistry(getSystemController(), nil)
+		tools = reg.List()
+		schemas = reg.ExportJSONSchema()
+	}
+
+	if action == "schema" || action == "schemas" || action == "--json" {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(schemas)
+	}
+
+	fmt.Fprintf(out, "Registered Agent Tools (%d):\n", len(tools))
+	for _, t := range tools {
+		fmt.Fprintf(out, "  • %-12s [%-10s] %s\n", t.Name, t.Category, t.Description)
+		if len(t.Parameters) > 0 {
+			var params []string
+			for _, p := range t.Parameters {
+				req := ""
+				if p.Required {
+					req = "*"
+				}
+				params = append(params, fmt.Sprintf("%s%s (%s)", p.Name, req, p.Type))
+			}
+			fmt.Fprintf(out, "    Parameters: %s\n", strings.Join(params, ", "))
+		}
+	}
+	return nil
+}
+
+func cmdTool(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: cadence tool <tool-name> [action] [param=value...]")
+	}
+	name := strings.ToLower(args[0])
+	params := make(map[string]any)
+
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		if strings.Contains(arg, "=") {
+			parts := strings.SplitN(arg, "=", 2)
+			params[parts[0]] = parts[1]
+		} else if i == 1 && !strings.HasPrefix(arg, "-") {
+			params["action"] = arg
+		} else if i == 2 && params["action"] != nil && !strings.HasPrefix(arg, "-") {
+			switch name {
+			case "fs":
+				params["path"] = arg
+			case "system":
+				params["target"] = arg
+			case "web_search":
+				params["query"] = arg
+			case "clipboard":
+				params["text"] = arg
+			}
+		}
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	var result agent.ToolResult
+	ipcRes, err := client.Call(callCtx, "tool_call", map[string]any{
+		"name":   name,
+		"params": params,
+	})
+	if err == nil {
+		if m, ok := ipcRes.(map[string]any); ok {
+			if raw, mErr := json.Marshal(m["result"]); mErr == nil {
+				_ = json.Unmarshal(raw, &result)
+			}
+		}
+	} else {
+		// Standalone fallback
+		reg := agent.NewRegistry(getSystemController(), nil)
+		var callErr error
+		result, callErr = reg.Call(ctx, name, params)
+		if callErr != nil {
+			return callErr
+		}
+	}
+
+	if !result.Success {
+		return fmt.Errorf("tool execution failed: %s", result.Error)
+	}
+
+	if result.Output != "" {
+		fmt.Fprintln(out, result.Output)
+	} else {
+		fmt.Fprintln(out, "Tool executed successfully.")
+	}
 	return nil
 }
 

@@ -1689,6 +1689,45 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 		}
 		return a.agentEngine.History(limit), nil
 
+	case "tool_list":
+		if a.agentEngine == nil || a.agentEngine.Registry() == nil {
+			return nil, errors.New("agent engine or tool registry is not configured")
+		}
+		reg := a.agentEngine.Registry()
+		return map[string]any{
+			"tools":      reg.List(),
+			"categories": reg.Categories(),
+			"schemas":    reg.ExportJSONSchema(),
+		}, nil
+
+	case "tool_call":
+		if a.agentEngine == nil || a.agentEngine.Registry() == nil {
+			return nil, errors.New("agent engine or tool registry is not configured")
+		}
+		var name string
+		var pMap map[string]any
+		if params, ok := req.Params.(map[string]any); ok && params != nil {
+			if n, ok := params["name"].(string); ok {
+				name = n
+			}
+			if p, ok := params["params"].(map[string]any); ok {
+				pMap = p
+			} else {
+				pMap = params
+			}
+		}
+		if strings.TrimSpace(name) == "" {
+			return nil, errors.New("missing 'name' parameter for tool_call")
+		}
+		res, err := a.agentEngine.Registry().Call(ctx, name, pMap)
+		if err != nil {
+			return nil, fmt.Errorf("tool call %q: %w", name, err)
+		}
+		return map[string]any{
+			"name":   name,
+			"result": res,
+		}, nil
+
 	case "selection_get":
 		var res selection.Result
 		var err error
