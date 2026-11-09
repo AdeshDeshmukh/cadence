@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/config"
 	appcontext "github.com/AdeshDeshmukh/cadence/internal/context"
 	"github.com/AdeshDeshmukh/cadence/internal/developer"
+	"github.com/AdeshDeshmukh/cadence/internal/diarize"
 	"github.com/AdeshDeshmukh/cadence/internal/edit"
 	"github.com/AdeshDeshmukh/cadence/internal/hotkey"
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
@@ -103,6 +105,7 @@ type App struct {
 	agentEngine      *agent.Engine
 	actionPolicy     *agent.ConfirmationPolicy
 	meetingMgr       *meeting.Manager
+	diarizer         diarize.Diarizer
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -253,6 +256,11 @@ func WithActionPolicy(cp *agent.ConfirmationPolicy) Option {
 // WithMeetingManager sets a custom continuous meeting capture manager.
 func WithMeetingManager(m *meeting.Manager) Option {
 	return func(a *App) { a.meetingMgr = m }
+}
+
+// WithDiarizer sets a custom speaker diarization engine.
+func WithDiarizer(d diarize.Diarizer) Option {
+	return func(a *App) { a.diarizer = d }
 }
 
 // NewApp instantiates a fully configured Cadence daemon application.
@@ -466,6 +474,14 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 		}
 	}
 
+	if a.diarizer == nil && cfg.Meeting.Diarization.Enabled {
+		if a.workerMgr != nil {
+			a.diarizer = diarize.NewPyannoteDiarizer(a.workerMgr)
+		} else {
+			a.diarizer = diarize.NewMockDiarizer()
+		}
+	}
+
 	if a.meetingMgr == nil {
 		storageDir := ""
 		if cfg.Storage.DBPath != "" {
@@ -479,6 +495,7 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 			a.capture,
 			meeting.WithAudioDirectory(storageDir),
 			meeting.WithASREngine(a.asr),
+			meeting.WithDiarizer(a.diarizer),
 			meeting.WithSampleRate(cfg.Audio.SampleRate),
 		)
 	}
@@ -834,6 +851,11 @@ func (a *App) ActionPolicy() *agent.ConfirmationPolicy {
 // MeetingManager returns the continuous recording manager.
 func (a *App) MeetingManager() *meeting.Manager {
 	return a.meetingMgr
+}
+
+// Diarizer returns the active speaker diarization backend.
+func (a *App) Diarizer() diarize.Diarizer {
+	return a.diarizer
 }
 
 // Router returns the active application context router.
@@ -2632,6 +2654,60 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			return nil, err
 		}
 		return map[string]any{"ok": true, "id": id}, nil
+
+	case "meeting_diarize":
+		if a.meetingMgr == nil {
+			return nil, errors.New("meeting manager not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		id, _ := params["id"].(string)
+		if strings.TrimSpace(id) == "" {
+			return nil, errors.New("missing meeting id parameter")
+		}
+		opts := diarize.Options{}
+		if s, ok := params["num_speakers"].(float64); ok && s > 0 {
+			opts.NumSpeakers = int(s)
+		} else if s, ok := params["num_speakers"].(int); ok && s > 0 {
+			opts.NumSpeakers = s
+		}
+		if s, ok := params["min_speakers"].(float64); ok && s > 0 {
+			opts.MinSpeakers = int(s)
+		} else if s, ok := params["min_speakers"].(int); ok && s > 0 {
+			opts.MinSpeakers = s
+		}
+		if s, ok := params["max_speakers"].(float64); ok && s > 0 {
+			opts.MaxSpeakers = int(s)
+		} else if s, ok := params["max_speakers"].(int); ok && s > 0 {
+			opts.MaxSpeakers = s
+		}
+		if token, ok := params["hf_token"].(string); ok {
+			opts.HFToken = token
+		}
+
+		segs, err := a.meetingMgr.DiarizeMeeting(ctx, id, opts)
+		if err != nil {
+			return nil, err
+		}
+
+		seenSpeakers := make(map[string]bool)
+		for _, s := range segs {
+			if s.Speaker != "" {
+				seenSpeakers[s.Speaker] = true
+			}
+		}
+		speakers := make([]string, 0, len(seenSpeakers))
+		for spk := range seenSpeakers {
+			speakers = append(speakers, spk)
+		}
+		sort.Strings(speakers)
+
+		return map[string]any{
+			"ok":            true,
+			"meeting_id":    id,
+			"segments":      segs,
+			"speakers":      speakers,
+			"speaker_count": len(speakers),
+		}, nil
 
 	default:
 		return nil, errors.New("unknown method: " + req.Method)

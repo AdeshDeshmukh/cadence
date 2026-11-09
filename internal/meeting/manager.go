@@ -12,6 +12,7 @@ import (
 
 	"github.com/AdeshDeshmukh/cadence/internal/asr"
 	"github.com/AdeshDeshmukh/cadence/internal/audio"
+	"github.com/AdeshDeshmukh/cadence/internal/diarize"
 	"github.com/AdeshDeshmukh/cadence/internal/storage"
 )
 
@@ -52,12 +53,22 @@ func WithSegmentDuration(d time.Duration) ManagerOption {
 	}
 }
 
+// WithDiarizer sets a custom speaker diarization engine.
+func WithDiarizer(d diarize.Diarizer) ManagerOption {
+	return func(m *Manager) {
+		if d != nil {
+			m.diarizer = diarize.NewEngine(d)
+		}
+	}
+}
+
 // Manager coordinates continuous recording sessions, rolling segmentation, and persistence.
 type Manager struct {
 	mu              sync.RWMutex
 	store           storage.Store
 	capture         audio.Capture
 	asrEngine       asr.Engine
+	diarizer        *diarize.Engine
 	audioDir        string
 	sampleRate      int
 	segmentDuration time.Duration
@@ -405,6 +416,56 @@ func (m *Manager) Delete(id string) error {
 		return errors.New("storage engine is not configured")
 	}
 	return m.store.DeleteMeeting(id)
+}
+
+// Diarizer returns the active speaker diarization engine.
+func (m *Manager) Diarizer() *diarize.Engine {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.diarizer
+}
+
+// DiarizeMeeting executes speaker diarization on a recorded meeting audio file,
+// aligns speaker identities to transcript segments, and updates them in persistent storage.
+func (m *Manager) DiarizeMeeting(ctx context.Context, meetingID string, opts diarize.Options) ([]storage.MeetingSegment, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.store == nil {
+		return nil, errors.New("storage engine is not configured")
+	}
+	if m.diarizer == nil {
+		return nil, errors.New("speaker diarizer is not configured")
+	}
+	if strings.TrimSpace(meetingID) == "" {
+		return nil, errors.New("missing meeting id")
+	}
+
+	mtg, err := m.store.GetMeeting(meetingID)
+	if err != nil || mtg == nil {
+		return nil, fmt.Errorf("meeting not found: %s", meetingID)
+	}
+
+	if mtg.AudioPath == "" {
+		return nil, errors.New("meeting audio file path is empty")
+	}
+
+	segs, err := m.store.ListMeetingSegments(meetingID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list meeting segments: %w", err)
+	}
+
+	diarized, err := m.diarizer.Diarize(ctx, mtg.AudioPath, opts)
+	if err != nil {
+		return nil, fmt.Errorf("diarization failed: %w", err)
+	}
+
+	aligned := m.diarizer.AlignMeetingSegments(segs, diarized)
+	for _, seg := range aligned {
+		_ = m.store.SaveMeetingSegment(seg)
+	}
+
+	return aligned, nil
 }
 
 // onSegmentProduced handles newly partitioned segments, invokes ASR if configured, and saves to database.

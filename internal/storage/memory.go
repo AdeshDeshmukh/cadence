@@ -291,7 +291,15 @@ func (m *Memory) DeleteMeeting(id string) error {
 func (m *Memory) SaveMeetingSegment(seg MeetingSegment) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.segments[seg.MeetingID] = append(m.segments[seg.MeetingID], seg)
+	list := m.segments[seg.MeetingID]
+	for i, existing := range list {
+		if existing.ID == seg.ID {
+			list[i] = seg
+			m.segments[seg.MeetingID] = list
+			return nil
+		}
+	}
+	m.segments[seg.MeetingID] = append(list, seg)
 	return nil
 }
 

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/AdeshDeshmukh/cadence/internal/asr"
+	"github.com/AdeshDeshmukh/cadence/internal/diarize"
 	"github.com/AdeshDeshmukh/cadence/internal/storage"
 )
 
@@ -198,5 +199,80 @@ func TestMeetingManager_Lifecycle(t *testing.T) {
 	afterDel, _, _ := mgr.Get(sess.ID)
 	if afterDel != nil {
 		t.Fatalf("expected nil after delete, got %+v", afterDel)
+	}
+}
+
+func TestMeetingManager_Diarize(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := storage.NewMemory()
+
+	// Pre-populate a meeting and segments
+	mtgID := "mtg-diarize-test"
+	wavFile := filepath.Join(tmpDir, "dummy.wav")
+	_ = os.WriteFile(wavFile, []byte("dummy-audio-content"), 0644)
+
+	_ = store.SaveMeeting(storage.Meeting{
+		ID:        mtgID,
+		Title:     "Sprint Retrospective",
+		AudioPath: wavFile,
+		State:     "stopped",
+		CreatedAt: time.Now(),
+	})
+
+	_ = store.SaveMeetingSegment(storage.MeetingSegment{
+		ID:           "seg-1",
+		MeetingID:    mtgID,
+		SegmentIndex: 0,
+		StartMs:      0,
+		EndMs:        10000,
+		Text:         "Good job on the release.",
+		CreatedAt:    time.Now(),
+	})
+	_ = store.SaveMeetingSegment(storage.MeetingSegment{
+		ID:           "seg-2",
+		MeetingID:    mtgID,
+		SegmentIndex: 1,
+		StartMs:      10000,
+		EndMs:        20000,
+		Text:         "Thanks, we worked hard on it.",
+		CreatedAt:    time.Now(),
+	})
+
+	mockDiarizer := diarize.NewMockDiarizer(
+		diarize.Segment{StartMs: 0, EndMs: 9500, Speaker: "SPEAKER_ALICE", Confidence: 0.95},
+		diarize.Segment{StartMs: 10500, EndMs: 19500, Speaker: "SPEAKER_BOB", Confidence: 0.90},
+	)
+
+	mgr := NewManager(
+		store,
+		nil,
+		WithAudioDirectory(tmpDir),
+		WithDiarizer(mockDiarizer),
+	)
+
+	ctx := context.Background()
+	updatedSegs, err := mgr.DiarizeMeeting(ctx, mtgID, diarize.Options{NumSpeakers: 2})
+	if err != nil {
+		t.Fatalf("DiarizeMeeting failed: %v", err)
+	}
+
+	if len(updatedSegs) != 2 {
+		t.Fatalf("expected 2 updated segments, got %d", len(updatedSegs))
+	}
+
+	if updatedSegs[0].Speaker != "SPEAKER_ALICE" {
+		t.Fatalf("expected SPEAKER_ALICE for seg-1, got %q", updatedSegs[0].Speaker)
+	}
+	if updatedSegs[1].Speaker != "SPEAKER_BOB" {
+		t.Fatalf("expected SPEAKER_BOB for seg-2, got %q", updatedSegs[1].Speaker)
+	}
+
+	// Verify persistence in store
+	storedSegs, err := store.ListMeetingSegments(mtgID)
+	if err != nil {
+		t.Fatalf("ListMeetingSegments failed: %v", err)
+	}
+	if storedSegs[0].Speaker != "SPEAKER_ALICE" || storedSegs[1].Speaker != "SPEAKER_BOB" {
+		t.Fatalf("segments not persisted with speaker labels: %+v", storedSegs)
 	}
 }

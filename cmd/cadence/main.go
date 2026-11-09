@@ -64,7 +64,7 @@ Commands:
   tool <name> [k=v...] Invoke a specific agent tool directly (e.g. "tool fs action=list path=.")
   permissions [list|grant|revoke|check] Manage per-tool permission policies (allow, deny, ask)
   policy [show|set|evaluate] Manage action confirmation policies (always_ask, auto_approve_safe, etc.)
-  meeting [subcommand] Continuous meeting recording and capture (start, stop, pause, resume, status, list, show, delete)
+  meeting [subcommand] Continuous meeting recording and capture (start, stop, pause, resume, status, list, show, diarize, delete)
   context [show|set|clear] Show or manage developer/code editor context (file, language, selection)
   terminal [status|hook] Inspect terminal/shell context or generate shell integration hooks
   app                Show detected active foreground application and category
@@ -4234,13 +4234,15 @@ func cmdMeeting(ctx context.Context, client ipc.Client, args []string, out io.Wr
 		return cmdMeetingList(ctx, client, rest, out)
 	case "show", "get":
 		return cmdMeetingShow(ctx, client, rest, out)
+	case "diarize":
+		return cmdMeetingDiarize(ctx, client, rest, out)
 	case "delete", "rm":
 		return cmdMeetingDelete(ctx, client, rest, out)
 	case "help", "-h", "--help":
 		cmdMeetingUsage(out)
 		return nil
 	default:
-		return fmt.Errorf("unknown meeting subcommand: %s (supported: start, stop, pause, resume, status, list, show, delete)", action)
+		return fmt.Errorf("unknown meeting subcommand: %s (supported: start, stop, pause, resume, status, list, show, diarize, delete)", action)
 	}
 }
 
@@ -4528,9 +4530,110 @@ func cmdMeetingShow(ctx context.Context, client ipc.Client, args []string, out i
 			if text == "" {
 				text = "..."
 			}
-			fmt.Fprintf(out, "  [%s - %s] %s\n", formatMeetingDuration(startMs), formatMeetingDuration(endMs), text)
+			speaker, _ := sMap["speaker"].(string)
+			if speaker != "" {
+				fmt.Fprintf(out, "  [%s - %s] %s: %s\n", formatMeetingDuration(startMs), formatMeetingDuration(endMs), speaker, text)
+			} else {
+				fmt.Fprintf(out, "  [%s - %s] %s\n", formatMeetingDuration(startMs), formatMeetingDuration(endMs), text)
+			}
 		}
 	}
+	return nil
+}
+
+func cmdMeetingDiarize(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("missing meeting id (usage: cadence meeting diarize <id> [--speakers N])")
+	}
+
+	id := args[0]
+	numSpeakers := 0
+	minSpeakers := 0
+	maxSpeakers := 0
+
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "--speakers", "-s", "--num-speakers":
+			if i+1 < len(args) {
+				numSpeakers, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--min-speakers":
+			if i+1 < len(args) {
+				minSpeakers, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--max-speakers":
+			if i+1 < len(args) {
+				maxSpeakers, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		}
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	params := map[string]any{"id": id}
+	if numSpeakers > 0 {
+		params["num_speakers"] = numSpeakers
+	}
+	if minSpeakers > 0 {
+		params["min_speakers"] = minSpeakers
+	}
+	if maxSpeakers > 0 {
+		params["max_speakers"] = maxSpeakers
+	}
+
+	resp, err := client.Call(callCtx, "meeting_diarize", params)
+	if err != nil {
+		return fmt.Errorf("failed to diarize meeting: %w", err)
+	}
+
+	resMap, ok := resp.(map[string]any)
+	if !ok {
+		return fmt.Errorf("unexpected meeting_diarize response: %v", resp)
+	}
+
+	spkCount := 0
+	if c, ok := resMap["speaker_count"].(float64); ok {
+		spkCount = int(c)
+	}
+	var speakers []string
+	if rawList, ok := resMap["speakers"].([]any); ok {
+		for _, spk := range rawList {
+			if s, ok := spk.(string); ok {
+				speakers = append(speakers, s)
+			}
+		}
+	}
+
+	fmt.Fprintf(out, "Speaker diarization complete for meeting %s.\n", id)
+	fmt.Fprintf(out, "Detected Speakers (%d): %s\n\n", spkCount, strings.Join(speakers, ", "))
+
+	segs, _ := resMap["segments"].([]any)
+	fmt.Fprintf(out, "Diarized Segments (%d):\n", len(segs))
+	for _, s := range segs {
+		sMap, ok := s.(map[string]any)
+		if !ok {
+			continue
+		}
+		startMs := int64(0)
+		if st, ok := sMap["start_ms"].(float64); ok {
+			startMs = int64(st)
+		}
+		endMs := int64(0)
+		if en, ok := sMap["end_ms"].(float64); ok {
+			endMs = int64(en)
+		}
+		speaker, _ := sMap["speaker"].(string)
+		if speaker == "" {
+			speaker = "SPEAKER_??"
+		}
+		text, _ := sMap["text"].(string)
+		fmt.Fprintf(out, "  [%s - %s] %s: %s\n", formatMeetingDuration(startMs), formatMeetingDuration(endMs), speaker, text)
+	}
+
 	return nil
 }
 
@@ -4562,5 +4665,6 @@ func cmdMeetingUsage(out io.Writer) {
 	fmt.Fprintln(out, "  status               Show current meeting recording status and duration")
 	fmt.Fprintln(out, "  list [limit]         List past meeting recordings")
 	fmt.Fprintln(out, "  show <id>            Show details and transcribed segments for a meeting")
+	fmt.Fprintln(out, "  diarize <id> [flags] Partition meeting audio by speaker (--speakers N)")
 	fmt.Fprintln(out, "  delete <id>          Delete a meeting record and its audio segments")
 }

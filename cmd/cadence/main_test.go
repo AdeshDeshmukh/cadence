@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -612,6 +613,32 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 		}, nil
 	case "meeting_delete":
 		return map[string]any{"ok": true, "id": "mtg-mock-1"}, nil
+	case "meeting_diarize":
+		params, _ := req.Params.(map[string]any)
+		id, _ := params["id"].(string)
+		if id == "" {
+			return nil, errors.New("missing meeting id")
+		}
+		return map[string]any{
+			"ok":            true,
+			"meeting_id":    id,
+			"speaker_count": float64(2),
+			"speakers":      []any{"SPEAKER_00", "SPEAKER_01"},
+			"segments": []any{
+				map[string]any{
+					"start_ms": float64(0),
+					"end_ms":   float64(15000),
+					"speaker":  "SPEAKER_00",
+					"text":     "Welcome team to the architecture review.",
+				},
+				map[string]any{
+					"start_ms": float64(15000),
+					"end_ms":   float64(30000),
+					"speaker":  "SPEAKER_01",
+					"text":     "Today we are discussing continuous recording mode.",
+				},
+			},
+		}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -2561,7 +2588,16 @@ func TestCLI_Meeting(t *testing.T) {
 		t.Fatalf("unexpected show output: %s", out.String())
 	}
 
-	// 8. meeting delete
+	// 8. meeting diarize
+	out.Reset()
+	if err := cmdMeeting(ctx, client, []string{"diarize", "mtg-mock-1", "--speakers", "2"}, &out); err != nil {
+		t.Fatalf("cmdMeeting diarize failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Speaker diarization complete") || !strings.Contains(out.String(), "SPEAKER_00") {
+		t.Fatalf("unexpected diarize output: %s", out.String())
+	}
+
+	// 9. meeting delete
 	out.Reset()
 	if err := cmdMeeting(ctx, client, []string{"delete", "mtg-mock-1"}, &out); err != nil {
 		t.Fatalf("cmdMeeting delete failed: %v", err)
@@ -2570,7 +2606,7 @@ func TestCLI_Meeting(t *testing.T) {
 		t.Fatalf("unexpected delete output: %s", out.String())
 	}
 
-	// 9. meeting help
+	// 10. meeting help
 	out.Reset()
 	if err := cmdMeeting(ctx, client, []string{"help"}, &out); err != nil {
 		t.Fatalf("cmdMeeting help failed: %v", err)
@@ -2579,9 +2615,12 @@ func TestCLI_Meeting(t *testing.T) {
 		t.Fatalf("unexpected help output: %s", out.String())
 	}
 
-	// 10. Error validation
+	// 11. Error validation
 	if err := cmdMeeting(ctx, client, []string{"show"}, &out); err == nil {
 		t.Fatal("expected error showing meeting without id")
+	}
+	if err := cmdMeeting(ctx, client, []string{"diarize"}, &out); err == nil {
+		t.Fatal("expected error diarizing meeting without id")
 	}
 	if err := cmdMeeting(ctx, client, []string{"delete"}, &out); err == nil {
 		t.Fatal("expected error deleting meeting without id")
