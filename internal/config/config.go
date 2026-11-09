@@ -16,6 +16,7 @@ type Config struct {
 	Hotkey  HotkeyConfig
 	IPC     IPCConfig
 	Storage StorageConfig
+	Meeting MeetingConfig
 }
 
 type AudioConfig struct {
@@ -80,6 +81,21 @@ type IPCConfig struct {
 
 type StorageConfig struct {
 	DBPath string
+}
+
+type MeetingConfig struct {
+	AudioDir        string
+	SegmentDuration int
+	Diarization     DiarizationConfig
+}
+
+type DiarizationConfig struct {
+	Enabled     bool
+	Backend     string
+	Model       string
+	HFToken     string
+	MinSpeakers int
+	MaxSpeakers int
 }
 
 func DefaultDBPath() string {
@@ -150,6 +166,16 @@ func Default() Config {
 		},
 		Storage: StorageConfig{
 			DBPath: DefaultDBPath(),
+		},
+		Meeting: MeetingConfig{
+			SegmentDuration: 15,
+			Diarization: DiarizationConfig{
+				Enabled:     true,
+				Backend:     "pyannote",
+				Model:       "pyannote/speaker-diarization-3.1",
+				MinSpeakers: 1,
+				MaxSpeakers: 8,
+			},
 		},
 	}
 }

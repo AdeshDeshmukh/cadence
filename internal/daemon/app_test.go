@@ -18,6 +18,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/config"
 	appcontext "github.com/AdeshDeshmukh/cadence/internal/context"
 	"github.com/AdeshDeshmukh/cadence/internal/developer"
+	"github.com/AdeshDeshmukh/cadence/internal/diarize"
 	"github.com/AdeshDeshmukh/cadence/internal/edit"
 	"github.com/AdeshDeshmukh/cadence/internal/hotkey"
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
@@ -2781,5 +2782,114 @@ func TestApp_MeetingIPC(t *testing.T) {
 	}
 	if _, err := app.Handle(ctx, ipc.Request{Method: "meeting_stop"}); err == nil {
 		t.Fatal("expected error stopping when no active meeting")
+	}
+}
+
+func TestApp_MeetingDiarizeIPC(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := storage.NewMemory()
+	capture := &testLiveCapture{chunk: audio.Chunk{
+		Samples:    []float32{0.1, 0.2, -0.1},
+		SampleRate: 16000,
+		Timestamp:  time.Now(),
+	}}
+	engine := asr.MockEngine{Text: "Meeting text"}
+
+	mockDiarizer := diarize.NewMockDiarizer(
+		diarize.Segment{StartMs: 0, EndMs: 12000, Speaker: "SPEAKER_00", Confidence: 0.95},
+		diarize.Segment{StartMs: 12000, EndMs: 25000, Speaker: "SPEAKER_01", Confidence: 0.90},
+	)
+
+	mgr := meeting.NewManager(
+		store,
+		capture,
+		meeting.WithAudioDirectory(tmpDir),
+		meeting.WithASREngine(engine),
+		meeting.WithDiarizer(mockDiarizer),
+	)
+
+	cfg := config.Default()
+	app := NewApp(
+		cfg,
+		WithStore(store),
+		WithCapture(capture),
+		WithASR(engine),
+		WithMeetingManager(mgr),
+		WithDiarizer(mockDiarizer),
+	)
+	ctx := context.Background()
+
+	// Pre-create meeting and segments in storage
+	mtgID := "mtg-diarize-ipc"
+	wavFile := filepath.Join(tmpDir, "meeting.wav")
+	_ = os.WriteFile(wavFile, []byte("audio-bytes"), 0644)
+
+	_ = store.SaveMeeting(storage.Meeting{
+		ID:        mtgID,
+		Title:     "Sprint Planning",
+		State:     "stopped",
+		AudioPath: wavFile,
+		CreatedAt: time.Now(),
+	})
+	_ = store.SaveMeetingSegment(storage.MeetingSegment{
+		ID:           "seg-1",
+		MeetingID:    mtgID,
+		SegmentIndex: 0,
+		StartMs:      0,
+		EndMs:        10000,
+		Text:         "Let's review the sprint backlog.",
+		CreatedAt:    time.Now(),
+	})
+	_ = store.SaveMeetingSegment(storage.MeetingSegment{
+		ID:           "seg-2",
+		MeetingID:    mtgID,
+		SegmentIndex: 1,
+		StartMs:      10000,
+		EndMs:        20000,
+		Text:         "I will take the diarization task.",
+		CreatedAt:    time.Now(),
+	})
+
+	// 1. Successful meeting_diarize call
+	res, err := app.Handle(ctx, ipc.Request{
+		Method: "meeting_diarize",
+		Params: map[string]any{
+			"id":           mtgID,
+			"num_speakers": float64(2),
+		},
+	})
+	if err != nil {
+		t.Fatalf("meeting_diarize failed: %v", err)
+	}
+
+	resMap, ok := res.(map[string]any)
+	if !ok || resMap["ok"] != true {
+		t.Fatalf("unexpected meeting_diarize response: %+v", res)
+	}
+
+	segs, ok := resMap["segments"].([]storage.MeetingSegment)
+	if !ok || len(segs) != 2 {
+		t.Fatalf("expected 2 diarized segments, got %+v", resMap["segments"])
+	}
+	if segs[0].Speaker != "SPEAKER_00" || segs[1].Speaker != "SPEAKER_01" {
+		t.Fatalf("unexpected assigned speakers: seg0=%s, seg1=%s", segs[0].Speaker, segs[1].Speaker)
+	}
+
+	speakers, ok := resMap["speakers"].([]string)
+	if !ok || len(speakers) != 2 {
+		t.Fatalf("expected 2 unique speakers, got %+v", resMap["speakers"])
+	}
+
+	// 2. Error on missing id
+	if _, err := app.Handle(ctx, ipc.Request{Method: "meeting_diarize"}); err == nil {
+		t.Fatal("expected error on meeting_diarize without id")
+	}
+
+	// 3. Error on non-existent meeting
+	if _, err := app.Handle(ctx, ipc.Request{
+		Method: "meeting_diarize",
+		Params: map[string]any{"id": "non-existent-meeting"},
+	}); err == nil {
+		t.Fatal("expected error for non-existent meeting")
 	}
 }
