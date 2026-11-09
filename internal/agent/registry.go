@@ -45,11 +45,12 @@ type SearchProvider func(ctx context.Context, query string, limit int) ([]Search
 
 // Registry manages tool registration, metadata lookup, and execution.
 type Registry struct {
-	mu             sync.RWMutex
-	tools          map[string]ToolDefinition
-	systemCtrl     system.Controller
-	searchProvider SearchProvider
-	permissions    *PermissionEngine
+	mu                 sync.RWMutex
+	tools              map[string]ToolDefinition
+	systemCtrl         system.Controller
+	searchProvider     SearchProvider
+	permissions        *PermissionEngine
+	confirmationPolicy *ConfirmationPolicy
 }
 
 // NewRegistry initializes a ToolRegistry pre-populated with standard Cadence agent tools.
@@ -80,6 +81,20 @@ func (r *Registry) Permissions() *PermissionEngine {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.permissions
+}
+
+// SetConfirmationPolicy configures the active confirmation policy engine.
+func (r *Registry) SetConfirmationPolicy(cp *ConfirmationPolicy) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.confirmationPolicy = cp
+}
+
+// ConfirmationPolicy returns the active confirmation policy engine.
+func (r *Registry) ConfirmationPolicy() *ConfirmationPolicy {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.confirmationPolicy
 }
 
 // Register registers a tool definition in the registry.
@@ -181,6 +196,33 @@ func (r *Registry) Call(ctx context.Context, name string, params map[string]any)
 			return ToolResult{
 				Success: false,
 				Error:   fmt.Sprintf("permission denied: %s", decision.Reason),
+			}, nil
+		}
+	}
+
+	// Confirmation policy enforcement
+	r.mu.RLock()
+	cPol := r.confirmationPolicy
+	r.mu.RUnlock()
+
+	if cPol != nil {
+		action := ""
+		if params != nil {
+			if a, ok := params["action"].(string); ok {
+				action = a
+			}
+		}
+		decision := cPol.Evaluate(name, action, params)
+		if !decision.Allowed {
+			if decision.RequiresConfirmation {
+				return ToolResult{
+					Success: false,
+					Error:   fmt.Sprintf("confirmation required (%s): %s", decision.RiskLevel, decision.Reason),
+				}, nil
+			}
+			return ToolResult{
+				Success: false,
+				Error:   fmt.Sprintf("action prohibited by confirmation policy (%s): %s", decision.RiskLevel, decision.Reason),
 			}, nil
 		}
 	}

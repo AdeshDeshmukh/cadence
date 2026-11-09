@@ -63,6 +63,7 @@ Commands:
   tools [list|schema] Inspect registered agent tools and function schemas
   tool <name> [k=v...] Invoke a specific agent tool directly (e.g. "tool fs action=list path=.")
   permissions [list|grant|revoke|check] Manage per-tool permission policies (allow, deny, ask)
+  policy [show|set|evaluate] Manage action confirmation policies (always_ask, auto_approve_safe, etc.)
   context [show|set|clear] Show or manage developer/code editor context (file, language, selection)
   terminal [status|hook] Inspect terminal/shell context or generate shell integration hooks
   app                Show detected active foreground application and category
@@ -272,6 +273,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "permissions", "permission", "perms":
 		if err := cmdPermissions(ctx, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "policy", "action-policy":
+		if err := cmdPolicy(ctx, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -3332,6 +3340,166 @@ func cmdPermissionsCheck(ctx context.Context, client ipc.Client, args []string, 
 	fmt.Fprintf(out, "  Reason:       %s\n", decision.Reason)
 	if decision.MatchedRule != nil {
 		fmt.Fprintf(out, "  Matched Rule: %s.%s (%s)\n", decision.MatchedRule.Tool, decision.MatchedRule.Action, decision.MatchedRule.Level)
+	}
+	return nil
+}
+
+func cmdPolicy(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	action := "show"
+	var rest []string
+	if len(args) > 0 {
+		action = strings.ToLower(args[0])
+		rest = args[1:]
+	}
+
+	switch action {
+	case "show", "get", "status", "list":
+		return cmdPolicyShow(ctx, client, out)
+	case "set":
+		return cmdPolicySet(ctx, client, rest, out)
+	case "eval", "evaluate", "check", "test":
+		return cmdPolicyEvaluate(ctx, client, rest, out)
+	default:
+		// If argument directly matches a valid confirmation mode (e.g. "cadence policy always_ask")
+		if agent.IsValidConfirmationMode(action) {
+			return cmdPolicySet(ctx, client, []string{action}, out)
+		}
+		return fmt.Errorf("unknown policy subcommand: %s (supported: show, set, evaluate)", action)
+	}
+}
+
+func cmdPolicyShow(ctx context.Context, client ipc.Client, out io.Writer) error {
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	mode := string(agent.ModeAutoApproveSafe)
+	desc := agent.ModeDescription(agent.ModeAutoApproveSafe)
+	supported := []string{
+		string(agent.ModeAlwaysAsk),
+		string(agent.ModeAutoApproveSafe),
+		string(agent.ModeAutoApproveRisky),
+		string(agent.ModeAutoApproveAll),
+		string(agent.ModeReadOnly),
+	}
+
+	res, err := client.Call(callCtx, "policy_get", nil)
+	if err == nil {
+		if m, ok := res.(map[string]any); ok {
+			if md, ok := m["mode"].(string); ok {
+				mode = md
+			}
+			if d, ok := m["description"].(string); ok {
+				desc = d
+			}
+			if s, ok := m["supported_modes"].([]any); ok {
+				var sm []string
+				for _, item := range s {
+					if str, ok := item.(string); ok {
+						sm = append(sm, str)
+					}
+				}
+				if len(sm) > 0 {
+					supported = sm
+				}
+			}
+		}
+	}
+
+	fmt.Fprintln(out, "Action Confirmation Policy:")
+	fmt.Fprintf(out, "  Active Mode: %s\n", mode)
+	fmt.Fprintf(out, "  Description: %s\n\n", desc)
+	fmt.Fprintln(out, "Supported Modes:")
+	for _, m := range supported {
+		marker := " "
+		if m == mode {
+			marker = "*"
+		}
+		fmt.Fprintf(out, " %s %-20s %s\n", marker, m, agent.ModeDescription(agent.ConfirmationMode(m)))
+	}
+	return nil
+}
+
+func cmdPolicySet(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: cadence policy set <mode> (e.g. always_ask, auto_approve_safe, auto_approve_all, read_only)")
+	}
+	targetMode := strings.ToLower(strings.TrimSpace(args[0]))
+	if !agent.IsValidConfirmationMode(targetMode) {
+		return fmt.Errorf("invalid confirmation mode %q (supported: always_ask, auto_approve_safe, auto_approve_risky, auto_approve_all, read_only)", targetMode)
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	_, err := client.Call(callCtx, "policy_set", map[string]any{
+		"mode": targetMode,
+	})
+	if err != nil {
+		fmt.Fprintf(out, "Warning: daemon offline (%v). Policy set for local session.\n", err)
+	}
+
+	fmt.Fprintf(out, "Action confirmation policy updated to: %s\n", targetMode)
+	fmt.Fprintf(out, "  %s\n", agent.ModeDescription(agent.ConfirmationMode(targetMode)))
+	return nil
+}
+
+func cmdPolicyEvaluate(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: cadence policy evaluate <tool> [action] [param=value...]")
+	}
+	tool := args[0]
+	action := "*"
+	params := make(map[string]any)
+
+	idx := 1
+	if idx < len(args) && !strings.Contains(args[idx], "=") && !strings.HasPrefix(args[idx], "-") {
+		action = args[idx]
+		idx++
+	}
+
+	for ; idx < len(args); idx++ {
+		arg := args[idx]
+		if strings.Contains(arg, "=") {
+			parts := strings.SplitN(arg, "=", 2)
+			params[parts[0]] = parts[1]
+		}
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	var decision agent.ConfirmationDecision
+	res, err := client.Call(callCtx, "policy_evaluate", map[string]any{
+		"tool":   tool,
+		"action": action,
+		"params": params,
+	})
+	if err == nil {
+		if raw, mErr := json.Marshal(res); mErr == nil {
+			_ = json.Unmarshal(raw, &decision)
+		}
+	} else {
+		// Standalone fallback
+		cp := agent.DefaultConfirmationPolicy()
+		decision = cp.Evaluate(tool, action, params)
+	}
+
+	status := "PROHIBITED"
+	if decision.Allowed {
+		status = "AUTO_APPROVED"
+	} else if decision.RequiresConfirmation {
+		status = "CONFIRMATION_REQUIRED"
+	}
+
+	fmt.Fprintf(out, "Action Policy Decision: %s\n", status)
+	fmt.Fprintf(out, "  Tool:                  %s\n", tool)
+	fmt.Fprintf(out, "  Action:                %s\n", action)
+	fmt.Fprintf(out, "  Risk Level:            %s\n", string(decision.RiskLevel))
+	fmt.Fprintf(out, "  Requires Confirmation: %v\n", decision.RequiresConfirmation)
+	fmt.Fprintf(out, "  Allowed:               %v\n", decision.Allowed)
+	fmt.Fprintf(out, "  Reason:                %s\n", decision.Reason)
+	if decision.Prompt != "" {
+		fmt.Fprintf(out, "  Prompt:                %s\n", decision.Prompt)
 	}
 	return nil
 }
