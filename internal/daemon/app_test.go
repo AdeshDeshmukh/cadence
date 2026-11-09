@@ -2434,3 +2434,106 @@ func TestApp_ToolRegistryIPC(t *testing.T) {
 		t.Fatal("expected failure on unknown tool")
 	}
 }
+
+func TestApp_PermissionsIPC(t *testing.T) {
+	mockCtrl := system.NewMockController()
+	agentEng := agent.NewEngine(agent.WithSystemController(mockCtrl))
+	cfg := config.Default()
+	app := NewApp(cfg, WithSystemController(mockCtrl), WithAgentEngine(agentEng))
+	ctx := context.Background()
+
+	// 1. permission_list
+	listRes, err := app.Handle(ctx, ipc.Request{Method: "permission_list"})
+	if err != nil {
+		t.Fatalf("permission_list failed: %v", err)
+	}
+	lMap, ok := listRes.(map[string]any)
+	if !ok || lMap["count"].(int) < 5 {
+		t.Fatalf("expected at least 5 rules in list, got %+v", listRes)
+	}
+
+	// 2. permission_grant (deny fs write)
+	grantRes, err := app.Handle(ctx, ipc.Request{
+		Method: "permission_grant",
+		Params: map[string]any{
+			"tool":        "fs",
+			"action":      "write",
+			"level":       "deny",
+			"description": "Deny all filesystem writes in test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("permission_grant failed: %v", err)
+	}
+	gMap := grantRes.(map[string]any)
+	if gMap["ok"] != true {
+		t.Fatalf("expected ok true in grant response, got %+v", grantRes)
+	}
+
+	// 3. permission_check (should report denied)
+	chkRes, err := app.Handle(ctx, ipc.Request{
+		Method: "permission_check",
+		Params: map[string]any{
+			"tool":   "fs",
+			"action": "write",
+			"params": map[string]any{"path": "test.txt"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("permission_check failed: %v", err)
+	}
+	cMap := chkRes.(map[string]any)
+	if cMap["granted"] != false || cMap["level"] != "deny" {
+		t.Fatalf("expected fs write to be denied, got %+v", chkRes)
+	}
+
+	// 4. permission_revoke (revoke the deny rule)
+	revRes, err := app.Handle(ctx, ipc.Request{
+		Method: "permission_revoke",
+		Params: map[string]any{
+			"tool":   "fs",
+			"action": "write",
+		},
+	})
+	if err != nil {
+		t.Fatalf("permission_revoke failed: %v", err)
+	}
+	rMap := revRes.(map[string]any)
+	if rMap["revoked"] != true {
+		t.Fatalf("expected revoked true, got %+v", revRes)
+	}
+
+	// 5. permission_check again (fallback to generic allow)
+	chkRes2, err := app.Handle(ctx, ipc.Request{
+		Method: "permission_check",
+		Params: map[string]any{
+			"tool":   "fs",
+			"action": "write",
+			"params": map[string]any{"path": "test.txt"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("permission_check failed: %v", err)
+	}
+	cMap2 := chkRes2.(map[string]any)
+	if cMap2["granted"] != true {
+		t.Fatalf("expected fs write to be allowed after revoking deny, got %+v", chkRes2)
+	}
+
+	// 6. Error validations
+	if _, err := app.Handle(ctx, ipc.Request{Method: "permission_grant"}); err == nil {
+		t.Fatal("expected error on missing tool in grant")
+	}
+	if _, err := app.Handle(ctx, ipc.Request{
+		Method: "permission_grant",
+		Params: map[string]any{"tool": "fs", "level": "invalid_level"},
+	}); err == nil {
+		t.Fatal("expected error on invalid permission level")
+	}
+	if _, err := app.Handle(ctx, ipc.Request{Method: "permission_revoke"}); err == nil {
+		t.Fatal("expected error on missing tool in revoke")
+	}
+	if _, err := app.Handle(ctx, ipc.Request{Method: "permission_check"}); err == nil {
+		t.Fatal("expected error on missing tool in check")
+	}
+}
