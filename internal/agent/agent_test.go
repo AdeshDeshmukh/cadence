@@ -143,4 +143,3 @@ func TestEngine_Run(t *testing.T) {
 		t.Errorf("expected at least 3 history items, got %d", len(history))
 	}
 }
-

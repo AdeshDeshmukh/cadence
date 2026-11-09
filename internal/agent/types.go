@@ -88,4 +88,3 @@ type RunOptions struct {
 	MaxSteps int  `json:"max_steps,omitempty"`
 	PlanOnly bool `json:"plan_only,omitempty"`
 }
-

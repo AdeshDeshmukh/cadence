@@ -436,4 +436,3 @@ func (e *Engine) History(limit int) []*ExecutionTrajectory {
 	}
 	return result
 }
-
