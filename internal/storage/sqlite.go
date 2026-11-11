@@ -141,6 +141,24 @@ CREATE TABLE IF NOT EXISTS meeting_speakers (
 CREATE INDEX IF NOT EXISTS idx_meeting_speakers_meeting_id ON meeting_speakers (meeting_id);
 `,
 	},
+	{
+		version: 7,
+		name:    "create_meeting_summaries",
+		up: `
+CREATE TABLE IF NOT EXISTS meeting_summaries (
+	meeting_id TEXT PRIMARY KEY,
+	overview TEXT NOT NULL DEFAULT '',
+	decisions TEXT NOT NULL DEFAULT '[]',
+	action_items TEXT NOT NULL DEFAULT '[]',
+	topics TEXT NOT NULL DEFAULT '[]',
+	created_at TIMESTAMP NOT NULL,
+	updated_at TIMESTAMP NOT NULL,
+	FOREIGN KEY(meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_meeting_summaries_meeting_id ON meeting_summaries (meeting_id);
+`,
+	},
 }
 
 // SQLite implements persistent Store backed by an SQLite database.
@@ -904,6 +922,100 @@ WHERE meeting_id = ? AND speaker = ?;
 	}
 
 	return tx.Commit()
+}
+
+// SaveMeetingSummary persists or updates the structured summary for a meeting.
+func (s *SQLite) SaveMeetingSummary(ms MeetingSummary) error {
+	if ms.MeetingID == "" {
+		return errors.New("meeting_id is required")
+	}
+	now := time.Now().UTC()
+	if ms.CreatedAt.IsZero() {
+		ms.CreatedAt = now
+	}
+	ms.UpdatedAt = now
+
+	decisionsJSON, err := json.Marshal(ms.Decisions)
+	if err != nil {
+		return fmt.Errorf("marshal decisions: %w", err)
+	}
+	actionItemsJSON, err := json.Marshal(ms.ActionItems)
+	if err != nil {
+		return fmt.Errorf("marshal action items: %w", err)
+	}
+	topicsJSON, err := json.Marshal(ms.Topics)
+	if err != nil {
+		return fmt.Errorf("marshal topics: %w", err)
+	}
+
+	const query = `
+INSERT INTO meeting_summaries (meeting_id, overview, decisions, action_items, topics, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(meeting_id) DO UPDATE SET
+	overview = excluded.overview,
+	decisions = excluded.decisions,
+	action_items = excluded.action_items,
+	topics = excluded.topics,
+	updated_at = excluded.updated_at;
+`
+	_, err = s.db.Exec(query, ms.MeetingID, ms.Overview, string(decisionsJSON), string(actionItemsJSON), string(topicsJSON), ms.CreatedAt, ms.UpdatedAt)
+	return err
+}
+
+// GetMeetingSummary retrieves the structured summary for a meeting, if present.
+func (s *SQLite) GetMeetingSummary(meetingID string) (*MeetingSummary, error) {
+	const query = `
+SELECT meeting_id, overview, decisions, action_items, topics, created_at, updated_at
+FROM meeting_summaries
+WHERE meeting_id = ?;
+`
+	var (
+		ms                                         MeetingSummary
+		decisionsJSON, actionItemsJSON, topicsJSON string
+	)
+	err := s.db.QueryRow(query, meetingID).Scan(
+		&ms.MeetingID,
+		&ms.Overview,
+		&decisionsJSON,
+		&actionItemsJSON,
+		&topicsJSON,
+		&ms.CreatedAt,
+		&ms.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if decisionsJSON != "" {
+		_ = json.Unmarshal([]byte(decisionsJSON), &ms.Decisions)
+	}
+	if ms.Decisions == nil {
+		ms.Decisions = []string{}
+	}
+	if actionItemsJSON != "" {
+		_ = json.Unmarshal([]byte(actionItemsJSON), &ms.ActionItems)
+	}
+	if ms.ActionItems == nil {
+		ms.ActionItems = []ActionItem{}
+	}
+	if topicsJSON != "" {
+		_ = json.Unmarshal([]byte(topicsJSON), &ms.Topics)
+	}
+	if ms.Topics == nil {
+		ms.Topics = []string{}
+	}
+
+	return &ms, nil
+}
+
+// DeleteMeetingSummary removes the structured summary for a meeting.
+func (s *SQLite) DeleteMeetingSummary(meetingID string) error {
+	const query = `DELETE FROM meeting_summaries WHERE meeting_id = ?;`
+	_, err := s.db.Exec(query, meetingID)
+	return err
 }
 
 // Close releases the underlying SQLite database handle.

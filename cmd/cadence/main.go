@@ -64,7 +64,7 @@ Commands:
   tool <name> [k=v...] Invoke a specific agent tool directly (e.g. "tool fs action=list path=.")
   permissions [list|grant|revoke|check] Manage per-tool permission policies (allow, deny, ask)
   policy [show|set|evaluate] Manage action confirmation policies (always_ask, auto_approve_safe, etc.)
-  meeting [subcommand] Continuous meeting recording and capture (start, stop, pause, resume, status, list, show, diarize, speaker, turns, delete)
+  meeting [subcommand] Continuous meeting recording and capture (start, stop, pause, resume, status, list, show, diarize, speaker, turns, summarize, summary, delete)
   context [show|set|clear] Show or manage developer/code editor context (file, language, selection)
   terminal [status|hook] Inspect terminal/shell context or generate shell integration hooks
   app                Show detected active foreground application and category
@@ -4240,13 +4240,17 @@ func cmdMeeting(ctx context.Context, client ipc.Client, args []string, out io.Wr
 		return cmdMeetingSpeaker(ctx, client, rest, out)
 	case "turns", "transcript":
 		return cmdMeetingTurns(ctx, client, rest, out)
+	case "summarize":
+		return cmdMeetingSummarize(ctx, client, rest, out)
+	case "summary":
+		return cmdMeetingSummary(ctx, client, rest, out)
 	case "delete", "rm":
 		return cmdMeetingDelete(ctx, client, rest, out)
 	case "help", "-h", "--help":
 		cmdMeetingUsage(out)
 		return nil
 	default:
-		return fmt.Errorf("unknown meeting subcommand: %s (supported: start, stop, pause, resume, status, list, show, diarize, speaker, turns, delete)", action)
+		return fmt.Errorf("unknown meeting subcommand: %s (supported: start, stop, pause, resume, status, list, show, diarize, speaker, turns, summarize, summary, delete)", action)
 	}
 }
 
@@ -4780,6 +4784,121 @@ func cmdMeetingTurns(ctx context.Context, client ipc.Client, args []string, out 
 	return nil
 }
 
+func cmdMeetingSummarize(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("missing meeting id (usage: cadence meeting summarize <meeting-id>)")
+	}
+	meetingID := args[0]
+
+	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	resp, err := client.Call(callCtx, "meeting_summarize", map[string]any{"meeting_id": meetingID})
+	if err != nil {
+		return fmt.Errorf("failed to summarize meeting: %w", err)
+	}
+
+	resMap, ok := resp.(map[string]any)
+	if !ok {
+		return fmt.Errorf("unexpected meeting_summarize response: %v", resp)
+	}
+
+	summaryMap, _ := resMap["summary"].(map[string]any)
+	if summaryMap == nil {
+		return fmt.Errorf("no summary generated for meeting %s", meetingID)
+	}
+
+	return printMeetingSummary(out, meetingID, summaryMap)
+}
+
+func cmdMeetingSummary(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("missing meeting id (usage: cadence meeting summary <meeting-id>)")
+	}
+	meetingID := args[0]
+
+	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	resp, err := client.Call(callCtx, "meeting_summary_get", map[string]any{"meeting_id": meetingID})
+	if err != nil {
+		return fmt.Errorf("failed to get meeting summary: %w", err)
+	}
+
+	resMap, ok := resp.(map[string]any)
+	if !ok {
+		return fmt.Errorf("unexpected meeting_summary_get response: %v", resp)
+	}
+
+	summaryMap, _ := resMap["summary"].(map[string]any)
+	if summaryMap == nil {
+		fmt.Fprintf(out, "No summary found for meeting %s. Run 'cadence meeting summarize %s' to generate one.\n", meetingID, meetingID)
+		return nil
+	}
+
+	return printMeetingSummary(out, meetingID, summaryMap)
+}
+
+func printMeetingSummary(out io.Writer, meetingID string, summaryMap map[string]any) error {
+	overview, _ := summaryMap["overview"].(string)
+
+	fmt.Fprintf(out, "Meeting Summary for %s:\n\n", meetingID)
+	if overview != "" {
+		fmt.Fprintf(out, "Overview:\n  %s\n\n", overview)
+	}
+
+	// Decisions
+	if decisionsRaw, ok := summaryMap["decisions"].([]any); ok && len(decisionsRaw) > 0 {
+		fmt.Fprintln(out, "Key Decisions:")
+		for _, d := range decisionsRaw {
+			if str, ok := d.(string); ok && str != "" {
+				fmt.Fprintf(out, "  - %s\n", str)
+			}
+		}
+		fmt.Fprintln(out, "")
+	}
+
+	// Action Items
+	if actionItemsRaw, ok := summaryMap["action_items"].([]any); ok && len(actionItemsRaw) > 0 {
+		fmt.Fprintln(out, "Action Items:")
+		for _, a := range actionItemsRaw {
+			aMap, ok := a.(map[string]any)
+			if !ok {
+				continue
+			}
+			desc, _ := aMap["description"].(string)
+			assignee, _ := aMap["assignee"].(string)
+			completed, _ := aMap["completed"].(bool)
+
+			status := "[ ]"
+			if completed {
+				status = "[x]"
+			}
+			if assignee != "" {
+				fmt.Fprintf(out, "  %s %s (@%s)\n", status, desc, assignee)
+			} else {
+				fmt.Fprintf(out, "  %s %s\n", status, desc)
+			}
+		}
+		fmt.Fprintln(out, "")
+	}
+
+	// Topics
+	if topicsRaw, ok := summaryMap["topics"].([]any); ok && len(topicsRaw) > 0 {
+		topics := make([]string, 0, len(topicsRaw))
+		for _, t := range topicsRaw {
+			if str, ok := t.(string); ok && str != "" {
+				topics = append(topics, str)
+			}
+		}
+		if len(topics) > 0 {
+			fmt.Fprintf(out, "Topics:\n  %s\n", strings.Join(topics, ", "))
+		}
+	}
+
+	return nil
+}
+
 func cmdMeetingUsage(out io.Writer) {
 	fmt.Fprintln(out, "Usage: cadence meeting <subcommand> [arguments]")
 	fmt.Fprintln(out, "")
@@ -4794,5 +4913,7 @@ func cmdMeetingUsage(out io.Writer) {
 	fmt.Fprintln(out, "  diarize <id> [flags] Partition meeting audio by speaker (--speakers N)")
 	fmt.Fprintln(out, "  speaker <subcmd>     Manage speaker labels (list, rename <id> <from> <to>)")
 	fmt.Fprintln(out, "  turns <id>           Show consolidated conversational dialogue turns")
+	fmt.Fprintln(out, "  summarize <id>       Generate meeting summary, decisions, and action items")
+	fmt.Fprintln(out, "  summary <id>         Display structured summary for a meeting")
 	fmt.Fprintln(out, "  delete <id>          Delete a meeting record and its audio segments")
 }

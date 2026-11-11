@@ -727,3 +727,113 @@ func TestSQLite_MeetingSpeakers(t *testing.T) {
 		t.Fatalf("expected 0 speakers after meeting delete, got %d", len(speakersAfterDel))
 	}
 }
+
+func TestSQLite_MeetingSummaries(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer s.Close()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	m := Meeting{
+		ID:        "mtg-sum-1",
+		Title:     "Sprint Planning",
+		State:     "stopped",
+		CreatedAt: now,
+	}
+	if err := s.SaveMeeting(m); err != nil {
+		t.Fatalf("SaveMeeting failed: %v", err)
+	}
+
+	// 1. Initial Get should return nil
+	sum, err := s.GetMeetingSummary(m.ID)
+	if err != nil {
+		t.Fatalf("GetMeetingSummary initial error: %v", err)
+	}
+	if sum != nil {
+		t.Fatalf("expected nil summary, got %+v", sum)
+	}
+
+	// 2. SaveMeetingSummary
+	orig := MeetingSummary{
+		MeetingID: m.ID,
+		Overview:  "Discussed Q3 deliverables and agreed on architecture.",
+		Decisions: []string{"Use SQLite for storage", "Support continuous mode"},
+		ActionItems: []ActionItem{
+			{ID: "act-1", Description: "Implement summarizer", Assignee: "Alice", Completed: false},
+			{ID: "act-2", Description: "Add CLI flags", Assignee: "Bob", Completed: true},
+		},
+		Topics:    []string{"Storage", "CLI", "Architecture"},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := s.SaveMeetingSummary(orig); err != nil {
+		t.Fatalf("SaveMeetingSummary failed: %v", err)
+	}
+
+	// 3. Retrieve and verify
+	got, err := s.GetMeetingSummary(m.ID)
+	if err != nil {
+		t.Fatalf("GetMeetingSummary failed: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected non-nil summary")
+	}
+	if got.Overview != orig.Overview {
+		t.Errorf("expected overview %q, got %q", orig.Overview, got.Overview)
+	}
+	if len(got.Decisions) != 2 || got.Decisions[0] != "Use SQLite for storage" {
+		t.Errorf("unexpected decisions: %+v", got.Decisions)
+	}
+	if len(got.ActionItems) != 2 || got.ActionItems[0].Assignee != "Alice" || !got.ActionItems[1].Completed {
+		t.Errorf("unexpected action items: %+v", got.ActionItems)
+	}
+	if len(got.Topics) != 3 || got.Topics[1] != "CLI" {
+		t.Errorf("unexpected topics: %+v", got.Topics)
+	}
+
+	// 4. Update summary
+	got.Overview = "Updated summary after review."
+	got.Decisions = append(got.Decisions, "Deploy to staging first")
+	if err := s.SaveMeetingSummary(*got); err != nil {
+		t.Fatalf("SaveMeetingSummary update failed: %v", err)
+	}
+	updated, err := s.GetMeetingSummary(m.ID)
+	if err != nil {
+		t.Fatalf("GetMeetingSummary after update: %v", err)
+	}
+	if len(updated.Decisions) != 3 {
+		t.Errorf("expected 3 decisions, got %d", len(updated.Decisions))
+	}
+	if updated.Overview != "Updated summary after review." {
+		t.Errorf("expected updated overview, got %q", updated.Overview)
+	}
+
+	// 5. DeleteMeetingSummary
+	if err := s.DeleteMeetingSummary(m.ID); err != nil {
+		t.Fatalf("DeleteMeetingSummary failed: %v", err)
+	}
+	afterDel, err := s.GetMeetingSummary(m.ID)
+	if err != nil {
+		t.Fatalf("GetMeetingSummary after delete: %v", err)
+	}
+	if afterDel != nil {
+		t.Fatalf("expected nil after delete, got %+v", afterDel)
+	}
+
+	// 6. Test cascading delete with meeting
+	if err := s.SaveMeetingSummary(orig); err != nil {
+		t.Fatalf("SaveMeetingSummary re-save failed: %v", err)
+	}
+	if err := s.DeleteMeeting(m.ID); err != nil {
+		t.Fatalf("DeleteMeeting failed: %v", err)
+	}
+	cascaded, err := s.GetMeetingSummary(m.ID)
+	if err != nil {
+		t.Fatalf("GetMeetingSummary after DeleteMeeting: %v", err)
+	}
+	if cascaded != nil {
+		t.Fatalf("expected nil summary after DeleteMeeting cascade, got %+v", cascaded)
+	}
+}

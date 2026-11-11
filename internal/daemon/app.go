@@ -490,12 +490,19 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 			home, _ := os.UserHomeDir()
 			storageDir = filepath.Join(home, ".cadence", "meetings")
 		}
+		var sum meeting.Summarizer
+		if a.polisher != nil {
+			sum = meeting.NewLLMSummarizer(a.polisher)
+		} else {
+			sum = meeting.NewExtractiveSummarizer()
+		}
 		a.meetingMgr = meeting.NewManager(
 			a.store,
 			a.capture,
 			meeting.WithAudioDirectory(storageDir),
 			meeting.WithASREngine(a.asr),
 			meeting.WithDiarizer(a.diarizer),
+			meeting.WithSummarizer(sum),
 			meeting.WithSampleRate(cfg.Audio.SampleRate),
 		)
 	}
@@ -2780,6 +2787,56 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			"meeting_id": id,
 			"turns":      turns,
 			"count":      len(turns),
+		}, nil
+
+	case "meeting_summarize":
+		if a.meetingMgr == nil {
+			return nil, errors.New("meeting manager not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		id, _ := params["meeting_id"].(string)
+		if id == "" {
+			id, _ = params["id"].(string)
+		}
+		if strings.TrimSpace(id) == "" {
+			return nil, errors.New("missing meeting_id parameter")
+		}
+		summary, err := a.meetingMgr.SummarizeMeeting(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		var summaryVal any
+		if summary != nil {
+			summaryVal = summary
+		}
+		return map[string]any{
+			"ok":      true,
+			"summary": summaryVal,
+		}, nil
+
+	case "meeting_summary_get":
+		if a.meetingMgr == nil {
+			return nil, errors.New("meeting manager not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		id, _ := params["meeting_id"].(string)
+		if id == "" {
+			id, _ = params["id"].(string)
+		}
+		if strings.TrimSpace(id) == "" {
+			return nil, errors.New("missing meeting_id parameter")
+		}
+		summary, err := a.meetingMgr.GetMeetingSummary(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		var summaryVal any
+		if summary != nil {
+			summaryVal = summary
+		}
+		return map[string]any{
+			"ok":      true,
+			"summary": summaryVal,
 		}, nil
 
 	default:
