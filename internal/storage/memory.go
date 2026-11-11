@@ -18,6 +18,7 @@ type Memory struct {
 	meetings    map[string]Meeting
 	segments    map[string][]MeetingSegment
 	speakers    map[string]map[string]MeetingSpeaker
+	summaries   map[string]MeetingSummary
 }
 
 func NewMemory() *Memory {
@@ -29,6 +30,7 @@ func NewMemory() *Memory {
 		meetings:   map[string]Meeting{},
 		segments:   map[string][]MeetingSegment{},
 		speakers:   map[string]map[string]MeetingSpeaker{},
+		summaries:  map[string]MeetingSummary{},
 	}
 }
 
@@ -288,6 +290,7 @@ func (m *Memory) DeleteMeeting(id string) error {
 	delete(m.meetings, id)
 	delete(m.segments, id)
 	delete(m.speakers, id)
+	delete(m.summaries, id)
 	return nil
 }
 
@@ -372,5 +375,38 @@ func (m *Memory) RenameMeetingSpeaker(meetingID string, fromSpeaker string, toNa
 		}
 	}
 	m.segments[meetingID] = list
+	return nil
+}
+
+func (m *Memory) SaveMeetingSummary(s MeetingSummary) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s.MeetingID == "" {
+		return errors.New("meeting_id is required")
+	}
+	now := time.Now()
+	if s.CreatedAt.IsZero() {
+		s.CreatedAt = now
+	}
+	s.UpdatedAt = now
+	m.summaries[s.MeetingID] = s
+	return nil
+}
+
+func (m *Memory) GetMeetingSummary(meetingID string) (*MeetingSummary, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	s, ok := m.summaries[meetingID]
+	if !ok {
+		return nil, nil
+	}
+	res := s
+	return &res, nil
+}
+
+func (m *Memory) DeleteMeetingSummary(meetingID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.summaries, meetingID)
 	return nil
 }

@@ -92,6 +92,25 @@ type MeetingSpeaker struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// ActionItem represents a task or deliverable extracted from a meeting.
+type ActionItem struct {
+	ID          string `json:"id"`
+	Description string `json:"description"`
+	Assignee    string `json:"assignee,omitempty"`
+	Completed   bool   `json:"completed"`
+}
+
+// MeetingSummary captures structured intelligence extracted from a meeting.
+type MeetingSummary struct {
+	MeetingID   string       `json:"meeting_id"`
+	Overview    string       `json:"overview"`
+	Decisions   []string     `json:"decisions"`
+	ActionItems []ActionItem `json:"action_items"`
+	Topics      []string     `json:"topics"`
+	CreatedAt   time.Time    `json:"created_at"`
+	UpdatedAt   time.Time    `json:"updated_at"`
+}
+
 type Store interface {
 	SaveTranscript(Transcript) error
 	ListTranscripts(int) ([]Transcript, error)
@@ -120,4 +139,7 @@ type Store interface {
 	SetMeetingSpeaker(MeetingSpeaker) error
 	ListMeetingSpeakers(string) ([]MeetingSpeaker, error)
 	RenameMeetingSpeaker(meetingID string, fromSpeaker string, toName string) error
+	SaveMeetingSummary(MeetingSummary) error
+	GetMeetingSummary(string) (*MeetingSummary, error)
+	DeleteMeetingSummary(string) error
 }

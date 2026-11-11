@@ -683,6 +683,38 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 				},
 			},
 		}, nil
+	case "meeting_summarize", "meeting_summary_get":
+		params, _ := req.Params.(map[string]any)
+		id, _ := params["meeting_id"].(string)
+		return map[string]any{
+			"ok": true,
+			"summary": map[string]any{
+				"meeting_id": id,
+				"overview":   "Discussed architecture roadmap and finalized decisions.",
+				"decisions": []any{
+					"Use SQLite for local metadata",
+					"Implement LLM summarizer with extractive fallback",
+				},
+				"action_items": []any{
+					map[string]any{
+						"id":          "act-1",
+						"description": "Write CLI tests",
+						"assignee":    "Adesh",
+						"completed":   false,
+					},
+					map[string]any{
+						"id":          "act-2",
+						"description": "Document schema migrations",
+						"assignee":    "Alice",
+						"completed":   true,
+					},
+				},
+				"topics": []any{
+					"Architecture",
+					"Storage",
+				},
+			},
+		}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -2669,7 +2701,32 @@ func TestCLI_Meeting(t *testing.T) {
 		t.Fatalf("unexpected turns output: %s", out.String())
 	}
 
-	// 12. meeting delete
+	// 12. meeting summarize
+	out.Reset()
+	if err := cmdMeeting(ctx, client, []string{"summarize", "mtg-mock-1"}, &out); err != nil {
+		t.Fatalf("cmdMeeting summarize failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Meeting Summary for mtg-mock-1:") ||
+		!strings.Contains(out.String(), "Discussed architecture roadmap") ||
+		!strings.Contains(out.String(), "Use SQLite for local metadata") ||
+		!strings.Contains(out.String(), "[ ] Write CLI tests (@Adesh)") ||
+		!strings.Contains(out.String(), "[x] Document schema migrations (@Alice)") ||
+		!strings.Contains(out.String(), "Architecture, Storage") {
+		t.Fatalf("unexpected summarize output: %s", out.String())
+	}
+
+	// 13. meeting summary
+	out.Reset()
+	if err := cmdMeeting(ctx, client, []string{"summary", "mtg-mock-1"}, &out); err != nil {
+		t.Fatalf("cmdMeeting summary failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Meeting Summary for mtg-mock-1:") ||
+		!strings.Contains(out.String(), "Key Decisions:") ||
+		!strings.Contains(out.String(), "Action Items:") {
+		t.Fatalf("unexpected summary output: %s", out.String())
+	}
+
+	// 14. meeting delete
 	out.Reset()
 	if err := cmdMeeting(ctx, client, []string{"delete", "mtg-mock-1"}, &out); err != nil {
 		t.Fatalf("cmdMeeting delete failed: %v", err)
@@ -2678,16 +2735,18 @@ func TestCLI_Meeting(t *testing.T) {
 		t.Fatalf("unexpected delete output: %s", out.String())
 	}
 
-	// 13. meeting help
+	// 15. meeting help
 	out.Reset()
 	if err := cmdMeeting(ctx, client, []string{"help"}, &out); err != nil {
 		t.Fatalf("cmdMeeting help failed: %v", err)
 	}
-	if !strings.Contains(out.String(), "Usage: cadence meeting <subcommand>") {
+	if !strings.Contains(out.String(), "Usage: cadence meeting <subcommand>") ||
+		!strings.Contains(out.String(), "summarize <id>") ||
+		!strings.Contains(out.String(), "summary <id>") {
 		t.Fatalf("unexpected help output: %s", out.String())
 	}
 
-	// 14. Error validation
+	// 16. Error validation
 	if err := cmdMeeting(ctx, client, []string{"show"}, &out); err == nil {
 		t.Fatal("expected error showing meeting without id")
 	}
@@ -2702,6 +2761,12 @@ func TestCLI_Meeting(t *testing.T) {
 	}
 	if err := cmdMeeting(ctx, client, []string{"turns"}, &out); err == nil {
 		t.Fatal("expected error on turns without meeting id")
+	}
+	if err := cmdMeeting(ctx, client, []string{"summarize"}, &out); err == nil {
+		t.Fatal("expected error on summarize without meeting id")
+	}
+	if err := cmdMeeting(ctx, client, []string{"summary"}, &out); err == nil {
+		t.Fatal("expected error on summary without meeting id")
 	}
 	if err := cmdMeeting(ctx, client, []string{"delete"}, &out); err == nil {
 		t.Fatal("expected error deleting meeting without id")

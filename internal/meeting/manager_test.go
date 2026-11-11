@@ -276,3 +276,76 @@ func TestMeetingManager_Diarize(t *testing.T) {
 		t.Fatalf("segments not persisted with speaker labels: %+v", storedSegs)
 	}
 }
+
+func TestMeetingManager_Summarize(t *testing.T) {
+	store := storage.NewMemory()
+	mtgID := "mtg-sum-mgr-test"
+
+	_ = store.SaveMeeting(storage.Meeting{
+		ID:        mtgID,
+		Title:     "API Redesign",
+		State:     "stopped",
+		CreatedAt: time.Now(),
+	})
+
+	_ = store.SaveMeetingSegment(storage.MeetingSegment{
+		ID:           "seg-1",
+		MeetingID:    mtgID,
+		SegmentIndex: 0,
+		StartMs:      0,
+		EndMs:        8000,
+		Speaker:      "Alice",
+		Text:         "We agreed to deprecate v1 endpoints next month.",
+		CreatedAt:    time.Now(),
+	})
+	_ = store.SaveMeetingSegment(storage.MeetingSegment{
+		ID:           "seg-2",
+		MeetingID:    mtgID,
+		SegmentIndex: 1,
+		StartMs:      8100,
+		EndMs:        16000,
+		Speaker:      "Bob",
+		Text:         "Action item: Carol will write the migration guide.",
+		CreatedAt:    time.Now(),
+	})
+
+	mgr := NewManager(store, nil)
+
+	ctx := context.Background()
+
+	// 1. Get before summarize should return nil
+	initial, err := mgr.GetMeetingSummary(ctx, mtgID)
+	if err != nil {
+		t.Fatalf("GetMeetingSummary initial: %v", err)
+	}
+	if initial != nil {
+		t.Fatalf("expected nil summary, got %+v", initial)
+	}
+
+	// 2. SummarizeMeeting
+	summary, err := mgr.SummarizeMeeting(ctx, mtgID)
+	if err != nil {
+		t.Fatalf("SummarizeMeeting failed: %v", err)
+	}
+	if summary == nil {
+		t.Fatal("expected non-nil summary")
+	}
+	if len(summary.Decisions) == 0 {
+		t.Errorf("expected decisions to be extracted")
+	}
+	if len(summary.ActionItems) == 0 {
+		t.Errorf("expected action items to be extracted")
+	}
+
+	// 3. GetMeetingSummary after summarize
+	fetched, err := mgr.GetMeetingSummary(ctx, mtgID)
+	if err != nil {
+		t.Fatalf("GetMeetingSummary: %v", err)
+	}
+	if fetched == nil || fetched.MeetingID != mtgID {
+		t.Fatalf("expected summary for %s, got %+v", mtgID, fetched)
+	}
+	if fetched.Overview != summary.Overview {
+		t.Errorf("expected overview %q, got %q", summary.Overview, fetched.Overview)
+	}
+}

@@ -62,6 +62,15 @@ func WithDiarizer(d diarize.Diarizer) ManagerOption {
 	}
 }
 
+// WithSummarizer configures the meeting summarizer.
+func WithSummarizer(s Summarizer) ManagerOption {
+	return func(m *Manager) {
+		if s != nil {
+			m.summarizer = s
+		}
+	}
+}
+
 // Manager coordinates continuous recording sessions, rolling segmentation, and persistence.
 type Manager struct {
 	mu              sync.RWMutex
@@ -69,6 +78,7 @@ type Manager struct {
 	capture         audio.Capture
 	asrEngine       asr.Engine
 	diarizer        *diarize.Engine
+	summarizer      Summarizer
 	audioDir        string
 	sampleRate      int
 	segmentDuration time.Duration
@@ -91,6 +101,7 @@ func NewManager(store storage.Store, capture audio.Capture, opts ...ManagerOptio
 	m := &Manager{
 		store:           store,
 		capture:         capture,
+		summarizer:      NewExtractiveSummarizer(),
 		audioDir:        defaultDir,
 		sampleRate:      16000,
 		segmentDuration: 15 * time.Second,
@@ -519,6 +530,58 @@ func (m *Manager) GetTranscriptTurns(ctx context.Context, meetingID string) ([]T
 	}
 
 	return AggregateTurns(segs), nil
+}
+
+// SummarizeMeeting generates and stores a structured summary (overview, decisions, action items) for a meeting.
+func (m *Manager) SummarizeMeeting(ctx context.Context, meetingID string) (*storage.MeetingSummary, error) {
+	if m.store == nil {
+		return nil, errors.New("storage engine is not configured")
+	}
+	meetingID = strings.TrimSpace(meetingID)
+	if meetingID == "" {
+		return nil, errors.New("missing meeting id")
+	}
+
+	meeting, err := m.store.GetMeeting(meetingID)
+	if err != nil {
+		return nil, fmt.Errorf("get meeting: %w", err)
+	}
+	if meeting == nil {
+		return nil, fmt.Errorf("meeting not found: %s", meetingID)
+	}
+
+	segments, err := m.store.ListMeetingSegments(meetingID)
+	if err != nil {
+		return nil, fmt.Errorf("list meeting segments: %w", err)
+	}
+
+	summarizer := m.summarizer
+	if summarizer == nil {
+		summarizer = NewExtractiveSummarizer()
+	}
+
+	summary, err := summarizer.Summarize(ctx, *meeting, segments)
+	if err != nil {
+		return nil, fmt.Errorf("generate summary: %w", err)
+	}
+
+	if err := m.store.SaveMeetingSummary(*summary); err != nil {
+		return nil, fmt.Errorf("save meeting summary: %w", err)
+	}
+
+	return summary, nil
+}
+
+// GetMeetingSummary retrieves the saved structured summary for a meeting.
+func (m *Manager) GetMeetingSummary(ctx context.Context, meetingID string) (*storage.MeetingSummary, error) {
+	if m.store == nil {
+		return nil, errors.New("storage engine is not configured")
+	}
+	meetingID = strings.TrimSpace(meetingID)
+	if meetingID == "" {
+		return nil, errors.New("missing meeting id")
+	}
+	return m.store.GetMeetingSummary(meetingID)
 }
 
 // onSegmentProduced handles newly partitioned segments, invokes ASR if configured, and saves to database.

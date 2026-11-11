@@ -3011,3 +3011,123 @@ func TestApp_MeetingSpeakersAndTurnsIPC(t *testing.T) {
 		t.Fatal("expected error on meeting_turns without id")
 	}
 }
+
+func TestApp_MeetingSummaryIPC(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := storage.NewMemory()
+	capture := &testLiveCapture{chunk: audio.Chunk{
+		Samples:    []float32{0.1, 0.2, -0.1},
+		SampleRate: 16000,
+		Timestamp:  time.Now(),
+	}}
+	engine := asr.MockEngine{Text: "Meeting text"}
+
+	mgr := meeting.NewManager(
+		store,
+		capture,
+		meeting.WithAudioDirectory(tmpDir),
+		meeting.WithASREngine(engine),
+	)
+
+	cfg := config.Default()
+	app := NewApp(
+		cfg,
+		WithStore(store),
+		WithCapture(capture),
+		WithASR(engine),
+		WithMeetingManager(mgr),
+	)
+	ctx := context.Background()
+
+	mtgID := "mtg-summary-ipc"
+	_ = store.SaveMeeting(storage.Meeting{
+		ID:        mtgID,
+		Title:     "Architecture Review",
+		State:     "stopped",
+		CreatedAt: time.Now(),
+	})
+	_ = store.SaveMeetingSegment(storage.MeetingSegment{
+		ID:           "seg-1",
+		MeetingID:    mtgID,
+		SegmentIndex: 0,
+		StartMs:      0,
+		EndMs:        8000,
+		Text:         "We decided to implement the action item extraction.",
+		Speaker:      "Alice",
+		CreatedAt:    time.Now(),
+	})
+	_ = store.SaveMeetingSegment(storage.MeetingSegment{
+		ID:           "seg-2",
+		MeetingID:    mtgID,
+		SegmentIndex: 1,
+		StartMs:      8100,
+		EndMs:        16000,
+		Text:         "Action item: Bob will complete the CLI tests.",
+		Speaker:      "Bob",
+		CreatedAt:    time.Now(),
+	})
+
+	// 1. meeting_summary_get should return nil before summarize
+	getInitRes, err := app.Handle(ctx, ipc.Request{
+		Method: "meeting_summary_get",
+		Params: map[string]any{"meeting_id": mtgID},
+	})
+	if err != nil {
+		t.Fatalf("meeting_summary_get initial failed: %v", err)
+	}
+	gInitMap := getInitRes.(map[string]any)
+	if gInitMap["summary"] != nil {
+		t.Fatalf("expected nil initial summary, got %+v", gInitMap["summary"])
+	}
+
+	// 2. meeting_summarize
+	sumRes, err := app.Handle(ctx, ipc.Request{
+		Method: "meeting_summarize",
+		Params: map[string]any{"meeting_id": mtgID},
+	})
+	if err != nil {
+		t.Fatalf("meeting_summarize failed: %v", err)
+	}
+	sMap := sumRes.(map[string]any)
+	if sMap["ok"] != true {
+		t.Fatalf("expected ok=true, got %+v", sMap)
+	}
+	summary, ok := sMap["summary"].(*storage.MeetingSummary)
+	if !ok || summary == nil {
+		t.Fatalf("expected *storage.MeetingSummary, got %+v", sMap["summary"])
+	}
+	if len(summary.Decisions) == 0 {
+		t.Errorf("expected decisions to be extracted")
+	}
+	if len(summary.ActionItems) == 0 {
+		t.Errorf("expected action items to be extracted")
+	}
+
+	// 3. meeting_summary_get after summarize
+	getRes, err := app.Handle(ctx, ipc.Request{
+		Method: "meeting_summary_get",
+		Params: map[string]any{"meeting_id": mtgID},
+	})
+	if err != nil {
+		t.Fatalf("meeting_summary_get after summarize failed: %v", err)
+	}
+	gMap := getRes.(map[string]any)
+	if gMap["ok"] != true {
+		t.Fatalf("expected ok=true, got %+v", gMap)
+	}
+	fetchedSummary, ok := gMap["summary"].(*storage.MeetingSummary)
+	if !ok || fetchedSummary == nil {
+		t.Fatalf("expected non-nil summary, got %+v", gMap["summary"])
+	}
+	if fetchedSummary.MeetingID != mtgID {
+		t.Errorf("expected meeting_id %s, got %s", mtgID, fetchedSummary.MeetingID)
+	}
+
+	// 4. Missing meeting_id validation
+	if _, err := app.Handle(ctx, ipc.Request{Method: "meeting_summarize"}); err == nil {
+		t.Fatal("expected error on meeting_summarize without id")
+	}
+	if _, err := app.Handle(ctx, ipc.Request{Method: "meeting_summary_get"}); err == nil {
+		t.Fatal("expected error on meeting_summary_get without id")
+	}
+}
