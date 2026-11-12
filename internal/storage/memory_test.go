@@ -240,3 +240,50 @@ func TestMemoryStore_KnowledgeBase(t *testing.T) {
 		t.Fatalf("expected nil note after delete, got %+v", afterNoteDel)
 	}
 }
+
+func TestMemoryStore_Search(t *testing.T) {
+	mem := storage.NewMemory()
+	now := time.Now()
+
+	_ = mem.SaveNote(storage.Note{
+		ID:        "note-mem-1",
+		Title:     "Docker Setup",
+		Content:   "Containerizing the application with multi-stage Dockerfile builds.",
+		CreatedAt: now,
+		UpdatedAt: now,
+	})
+	_ = mem.SaveTranscript(storage.Transcript{
+		ID:        "tr-mem-1",
+		Text:      "Docker compose up was executed.",
+		RawText:   "docker compose up was executed",
+		CreatedAt: now.Add(1 * time.Second),
+	})
+	_ = mem.SaveMeeting(storage.Meeting{
+		ID:        "mtg-mem-1",
+		Title:     "DevOps Review",
+		CreatedAt: now.Add(2 * time.Second),
+	})
+	_ = mem.SaveMeetingSegment(storage.MeetingSegment{
+		ID:        "seg-mem-1",
+		MeetingID: "mtg-mem-1",
+		Text:      "Let's migrate to Docker swarm or k8s.",
+		CreatedAt: now.Add(2 * time.Second),
+	})
+
+	// 1. Search all
+	res, err := mem.Search("Docker", storage.SearchFilter{})
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+	if len(res) != 3 {
+		t.Fatalf("expected 3 hits, got %d", len(res))
+	}
+
+	// 2. Search notes only
+	notesOnly, err := mem.Search("Docker", storage.SearchFilter{
+		Types: []storage.SearchResultType{storage.SearchResultNote},
+	})
+	if err != nil || len(notesOnly) != 1 {
+		t.Fatalf("expected 1 note hit, got %d", len(notesOnly))
+	}
+}

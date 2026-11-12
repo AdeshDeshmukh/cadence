@@ -37,6 +37,7 @@ var (
 // PreviewManager manages preview sessions for voice text editing.
 type PreviewManager struct {
 	mu       sync.RWMutex
+	seq      uint64
 	sessions map[string]*PreviewSession
 	order    []string
 	maxKeep  int
@@ -58,7 +59,8 @@ func (m *PreviewManager) Create(original, candidate string, instr Instruction) *
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	id := fmt.Sprintf("prev-%d", time.Now().UnixNano())
+	m.seq++
+	id := fmt.Sprintf("prev-%d-%d", time.Now().UnixNano(), m.seq)
 	sess := &PreviewSession{
 		ID:            id,
 		OriginalText:  original,

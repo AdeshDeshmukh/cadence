@@ -799,6 +799,28 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 		}, nil
 	case "tag_delete":
 		return map[string]any{"ok": true, "name": "v2"}, nil
+	case "search":
+		params, _ := req.Params.(map[string]any)
+		query, _ := params["query"].(string)
+		return map[string]any{
+			"ok":    true,
+			"query": query,
+			"count": 2,
+			"results": []any{
+				map[string]any{
+					"id":      "note-mock-1",
+					"type":    "note",
+					"title":   "Kubernetes Architecture",
+					"snippet": "Deploying Kubernetes pods in cluster...",
+				},
+				map[string]any{
+					"id":      "tr-mock-1",
+					"type":    "transcript",
+					"title":   "Dictation 2026-11-12",
+					"snippet": "We configured the Kubernetes ingress controller.",
+				},
+			},
+		}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -2979,5 +3001,42 @@ func TestCLI_KnowledgeBase(t *testing.T) {
 	}
 	if err := cmdTag(ctx, client, []string{"delete"}, &out); err == nil {
 		t.Fatal("expected error on tag delete without name")
+	}
+}
+
+func TestCLI_Search(t *testing.T) {
+	sock := filepath.Join(os.TempDir(), fmt.Sprintf("cad_search_%d.sock", time.Now().UnixNano()))
+	stop := startMockDaemon(t, sock)
+	defer stop()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sock,
+	}
+	ctx := context.Background()
+
+	// 1. Search all
+	var out bytes.Buffer
+	if err := cmdSearch(ctx, client, []string{"Kubernetes"}, &out); err != nil {
+		t.Fatalf("cmdSearch failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Search Results for \"Kubernetes\"") ||
+		!strings.Contains(out.String(), "[NOTE] Kubernetes Architecture") ||
+		!strings.Contains(out.String(), "[TRANSCRIPT] Dictation 2026-11-12") {
+		t.Fatalf("unexpected search output: %s", out.String())
+	}
+
+	// 2. Search with flags
+	out.Reset()
+	if err := cmdSearch(ctx, client, []string{"Kubernetes", "--type", "notes", "--limit", "5"}, &out); err != nil {
+		t.Fatalf("cmdSearch with flags failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Kubernetes Architecture") {
+		t.Fatalf("unexpected search output with flags: %s", out.String())
+	}
+
+	// 3. Error validation: missing query
+	if err := cmdSearch(ctx, client, []string{}, &out); err == nil {
+		t.Fatal("expected error on search without query")
 	}
 }

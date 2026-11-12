@@ -3100,6 +3100,51 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			"tags":    tags,
 		}, nil
 
+	case "search":
+		if a.store == nil {
+			return nil, errors.New("store not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		query, _ := params["query"].(string)
+		if query == "" {
+			query, _ = params["q"].(string)
+		}
+		if strings.TrimSpace(query) == "" {
+			return nil, errors.New("missing query parameter")
+		}
+
+		filter := storage.SearchFilter{}
+		if t, ok := params["type"].(string); ok && t != "" {
+			filter.Types = []storage.SearchResultType{storage.SearchResultType(t)}
+		} else if typesRaw, ok := params["types"].([]any); ok {
+			for _, item := range typesRaw {
+				if s, ok := item.(string); ok && s != "" {
+					filter.Types = append(filter.Types, storage.SearchResultType(s))
+				}
+			}
+		} else if typesSlice, ok := params["types"].([]string); ok {
+			for _, s := range typesSlice {
+				filter.Types = append(filter.Types, storage.SearchResultType(s))
+			}
+		}
+
+		if l, ok := params["limit"].(float64); ok {
+			filter.Limit = int(l)
+		} else if l, ok := params["limit"].(int); ok {
+			filter.Limit = l
+		}
+
+		results, err := a.store.Search(query, filter)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok":      true,
+			"query":   query,
+			"results": results,
+			"count":   len(results),
+		}, nil
+
 	default:
 		return nil, errors.New("unknown method: " + req.Method)
 	}

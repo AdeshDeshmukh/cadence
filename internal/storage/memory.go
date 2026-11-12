@@ -2,6 +2,7 @@ package storage
 
 import (
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -703,4 +704,161 @@ func (m *Memory) DeleteTag(name string) error {
 	}
 
 	return nil
+}
+
+// Search performs an in-memory search across notes, transcripts, and meetings.
+func (m *Memory) Search(query string, filter SearchFilter) ([]SearchResult, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	cleanQuery := strings.TrimSpace(query)
+	if cleanQuery == "" {
+		return []SearchResult{}, nil
+	}
+
+	lowerQuery := strings.ToLower(cleanQuery)
+	searchAll := len(filter.Types) == 0
+	typesSet := make(map[SearchResultType]bool)
+	for _, t := range filter.Types {
+		typesSet[t] = true
+	}
+
+	var results []SearchResult
+
+	// 1. Notes
+	if searchAll || typesSet[SearchResultNote] {
+		for _, n := range m.notes {
+			titleMatch := strings.Contains(strings.ToLower(n.Title), lowerQuery)
+			contentMatch := strings.Contains(strings.ToLower(n.Content), lowerQuery)
+			if titleMatch || contentMatch {
+				snippet := extractSnippet(n.Content, cleanQuery, 120)
+				if snippet == "" {
+					snippet = n.Title
+				}
+				results = append(results, SearchResult{
+					ID:        n.ID,
+					Type:      SearchResultNote,
+					Title:     n.Title,
+					Snippet:   snippet,
+					CreatedAt: n.CreatedAt,
+				})
+			}
+		}
+	}
+
+	// 2. Transcripts
+	if searchAll || typesSet[SearchResultTranscript] {
+		for _, t := range m.transcripts {
+			textMatch := strings.Contains(strings.ToLower(t.Text), lowerQuery)
+			rawMatch := strings.Contains(strings.ToLower(t.RawText), lowerQuery)
+			if textMatch || rawMatch {
+				snippet := extractSnippet(t.Text, cleanQuery, 120)
+				if snippet == "" {
+					snippet = extractSnippet(t.RawText, cleanQuery, 120)
+				}
+				title := fmt.Sprintf("Dictation %s", t.CreatedAt.Format("2006-01-02 15:04"))
+				results = append(results, SearchResult{
+					ID:        t.ID,
+					Type:      SearchResultTranscript,
+					Title:     title,
+					Snippet:   snippet,
+					CreatedAt: t.CreatedAt,
+				})
+			}
+		}
+	}
+
+	// 3. Meetings
+	if searchAll || typesSet[SearchResultMeeting] {
+		for _, mtg := range m.meetings {
+			mtgTitleMatch := strings.Contains(strings.ToLower(mtg.Title), lowerQuery)
+			var matchedText string
+			if mtgTitleMatch {
+				matchedText = mtg.Title
+			} else {
+				// Search segments
+				for _, seg := range m.segments[mtg.ID] {
+					if strings.Contains(strings.ToLower(seg.Text), lowerQuery) {
+						matchedText = seg.Text
+						break
+					}
+				}
+				// Search summary overview if not found yet
+				if matchedText == "" {
+					if sum, ok := m.summaries[mtg.ID]; ok {
+						if strings.Contains(strings.ToLower(sum.Overview), lowerQuery) {
+							matchedText = sum.Overview
+						}
+					}
+				}
+			}
+
+			if matchedText != "" {
+				snippet := extractSnippet(matchedText, cleanQuery, 120)
+				results = append(results, SearchResult{
+					ID:        mtg.ID,
+					Type:      SearchResultMeeting,
+					Title:     mtg.Title,
+					Snippet:   snippet,
+					CreatedAt: mtg.CreatedAt,
+				})
+			}
+		}
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].CreatedAt.After(results[j].CreatedAt)
+	})
+
+	if filter.Limit > 0 && filter.Limit < len(results) {
+		results = results[:filter.Limit]
+	}
+
+	return results, nil
+}
+
+func extractSnippet(text string, query string, maxLen int) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	if maxLen <= 0 {
+		maxLen = 120
+	}
+	lowerText := strings.ToLower(text)
+	lowerQuery := strings.ToLower(query)
+	idx := strings.Index(lowerText, lowerQuery)
+	if idx == -1 {
+		words := strings.Fields(lowerQuery)
+		for _, w := range words {
+			if pos := strings.Index(lowerText, w); pos != -1 {
+				idx = pos
+				break
+			}
+		}
+	}
+	if idx == -1 {
+		if len(text) > maxLen {
+			return text[:maxLen] + "..."
+		}
+		return text
+	}
+
+	start := idx - maxLen/4
+	if start < 0 {
+		start = 0
+	}
+	end := start + maxLen
+	if end > len(text) {
+		end = len(text)
+	}
+
+	snippet := strings.TrimSpace(text[start:end])
+	if start > 0 {
+		snippet = "..." + snippet
+	}
+	if end < len(text) {
+		snippet = snippet + "..."
+	}
+	return snippet
 }
