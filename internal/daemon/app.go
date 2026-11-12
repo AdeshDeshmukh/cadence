@@ -25,6 +25,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/diarize"
 	"github.com/AdeshDeshmukh/cadence/internal/edit"
 	"github.com/AdeshDeshmukh/cadence/internal/hotkey"
+	"github.com/AdeshDeshmukh/cadence/internal/impexp"
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
 	"github.com/AdeshDeshmukh/cadence/internal/knowledge"
 	"github.com/AdeshDeshmukh/cadence/internal/meeting"
@@ -110,6 +111,7 @@ type App struct {
 	diarizer         diarize.Diarizer
 	knowledgeMgr     *knowledge.Manager
 	semanticEngine   *search.SemanticEngine
+	importEngine     *impexp.ImportEngine
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -275,6 +277,11 @@ func WithKnowledgeManager(km *knowledge.Manager) Option {
 // WithSemanticEngine sets a custom semantic vector search engine.
 func WithSemanticEngine(se *search.SemanticEngine) Option {
 	return func(a *App) { a.semanticEngine = se }
+}
+
+// WithImportEngine sets a custom media and subtitle import engine.
+func WithImportEngine(ie *impexp.ImportEngine) Option {
+	return func(a *App) { a.importEngine = ie }
 }
 
 // NewApp instantiates a fully configured Cadence daemon application.
@@ -527,6 +534,10 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 
 	if a.semanticEngine == nil && a.store != nil {
 		a.semanticEngine = search.NewSemanticEngine(a.store, search.NewLocalHashEmbedder(384))
+	}
+
+	if a.importEngine == nil && a.store != nil {
+		a.importEngine = impexp.NewImportEngine(a.store, a.asr, nil)
 	}
 
 	if a.kernel == nil {
@@ -3272,6 +3283,147 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			"ok":      true,
 			"indexed": indexed,
 			"model":   a.semanticEngine.Embedder().ModelName(),
+		}, nil
+
+	case "export":
+		if a.store == nil {
+			return nil, errors.New("store not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		targetID, _ := params["id"].(string)
+		if targetID == "" {
+			return nil, errors.New("missing id parameter")
+		}
+		targetType, _ := params["type"].(string)
+		if targetType == "" {
+			targetType, _ = params["target_type"].(string)
+		}
+		if targetType == "" {
+			targetType = "meeting"
+		}
+
+		formatStr, _ := params["format"].(string)
+		if formatStr == "" {
+			formatStr = "markdown"
+		}
+		fmtChoice, err := impexp.NormalizeFormat(formatStr)
+		if err != nil {
+			return nil, err
+		}
+
+		var data []byte
+		switch strings.ToLower(targetType) {
+		case "meeting", "meetings":
+			mtg, err := a.store.GetMeeting(targetID)
+			if err != nil {
+				return nil, fmt.Errorf("meeting not found: %w", err)
+			}
+			segs, _ := a.store.ListMeetingSegments(targetID)
+			speakers, _ := a.store.ListMeetingSpeakers(targetID)
+			summary, _ := a.store.GetMeetingSummary(targetID)
+
+			bundle := impexp.MeetingBundle{
+				Meeting:  *mtg,
+				Segments: segs,
+				Speakers: speakers,
+				Summary:  summary,
+			}
+			data, err = impexp.ExportMeeting(bundle, fmtChoice)
+			if err != nil {
+				return nil, err
+			}
+
+		case "transcript", "transcripts":
+			tr, err := a.store.GetTranscript(targetID)
+			if err != nil {
+				return nil, fmt.Errorf("transcript not found: %w", err)
+			}
+			data, err = impexp.ExportTranscript(*tr, fmtChoice)
+			if err != nil {
+				return nil, err
+			}
+
+		case "note", "notes":
+			note, err := a.store.GetNote(targetID)
+			if err != nil {
+				return nil, fmt.Errorf("note not found: %w", err)
+			}
+			data, err = impexp.ExportNote(*note, fmtChoice)
+			if err != nil {
+				return nil, err
+			}
+
+		default:
+			return nil, fmt.Errorf("unsupported export target type: %s", targetType)
+		}
+
+		outputPath, _ := params["output_path"].(string)
+		if outputPath == "" {
+			outputPath, _ = params["output"].(string)
+		}
+		if outputPath != "" {
+			_ = os.MkdirAll(filepath.Dir(outputPath), 0755)
+			if err := os.WriteFile(outputPath, data, 0644); err != nil {
+				return nil, fmt.Errorf("write export file: %w", err)
+			}
+		}
+
+		return map[string]any{
+			"ok":          true,
+			"type":        targetType,
+			"id":          targetID,
+			"format":      string(fmtChoice),
+			"content":     string(data),
+			"bytes":       len(data),
+			"output_path": outputPath,
+		}, nil
+
+	case "import_file", "import":
+		if a.importEngine == nil {
+			return nil, errors.New("import engine not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		filePath, _ := params["path"].(string)
+		if filePath == "" {
+			filePath, _ = params["file_path"].(string)
+		}
+		if filePath == "" {
+			return nil, errors.New("missing path parameter")
+		}
+
+		title, _ := params["title"].(string)
+		transcribe := true
+		if tr, ok := params["transcribe"].(bool); ok {
+			transcribe = tr
+		}
+
+		ext := strings.ToLower(filepath.Ext(filePath))
+		var bundle *impexp.MeetingBundle
+		var impErr error
+
+		switch ext {
+		case ".srt", ".vtt", ".json":
+			f, oErr := os.Open(filePath)
+			if oErr != nil {
+				return nil, oErr
+			}
+			defer f.Close()
+
+			fmtChoice, _ := impexp.NormalizeFormat(ext)
+			bundle, impErr = a.importEngine.ImportSubtitles(ctx, title, fmtChoice, f)
+		default:
+			bundle, impErr = a.importEngine.ImportMedia(ctx, filePath, title, "", transcribe)
+		}
+
+		if impErr != nil {
+			return nil, impErr
+		}
+
+		return map[string]any{
+			"ok":             true,
+			"meeting":        bundle.Meeting,
+			"segments_count": len(bundle.Segments),
+			"speakers_count": len(bundle.Speakers),
 		}, nil
 
 	default:

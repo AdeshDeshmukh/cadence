@@ -71,6 +71,8 @@ Commands:
   search <query>       Full-text or semantic search across notes, transcripts, and meetings (--semantic)
   related <id>         Retrieve semantically related transcripts and notes for a given ID
   index-embeddings     Generate vector embeddings for all stored transcripts, notes, and meetings
+  export <type> <id>   Export meeting, transcript, or note (markdown, srt, vtt, json, txt)
+  import <file>        Import media file (audio/video) or subtitles (.srt, .vtt, .json)
   context [show|set|clear] Show or manage developer/code editor context (file, language, selection)
   terminal [status|hook] Inspect terminal/shell context or generate shell integration hooks
   app                Show detected active foreground application and category
@@ -336,6 +338,20 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "index-embeddings", "reindex":
 		if err := cmdIndexEmbeddings(ctx, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "export":
+		if err := cmdExport(ctx, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "import":
+		if err := cmdImport(ctx, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -5684,5 +5700,140 @@ func cmdIndexEmbeddings(ctx context.Context, client ipc.Client, args []string, o
 	indexed, _ := resMap["indexed"]
 	model, _ := resMap["model"].(string)
 	fmt.Fprintf(out, "Successfully indexed %v items using model %s.\n", indexed, model)
+	return nil
+}
+
+func cmdExport(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: cadence export <type> <id> [--format markdown|srt|vtt|json|txt] [--output <path>]")
+	}
+
+	targetType := ""
+	targetID := ""
+	format := "markdown"
+	outputPath := ""
+
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case (arg == "--format" || arg == "-f") && i+1 < len(args):
+			format = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--format="):
+			format = strings.TrimPrefix(arg, "--format=")
+		case (arg == "--output" || arg == "-o") && i+1 < len(args):
+			outputPath = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--output="):
+			outputPath = strings.TrimPrefix(arg, "--output=")
+		default:
+			positional = append(positional, arg)
+		}
+	}
+
+	if len(positional) >= 2 {
+		targetType = positional[0]
+		targetID = positional[1]
+	} else if len(positional) == 1 {
+		targetType = "meeting"
+		targetID = positional[0]
+	} else {
+		return errors.New("usage: cadence export <type> <id> [--format markdown|srt|vtt|json|txt] [--output <path>]")
+	}
+
+	params := map[string]any{
+		"type":        targetType,
+		"id":          targetID,
+		"format":      format,
+		"output_path": outputPath,
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	resp, err := client.Call(callCtx, "export", params)
+	if err != nil {
+		return fmt.Errorf("export failed: %w", err)
+	}
+
+	resMap, ok := resp.(map[string]any)
+	if !ok {
+		return fmt.Errorf("unexpected export response: %v", resp)
+	}
+
+	content, _ := resMap["content"].(string)
+	if outputPath != "" {
+		bytesCount, _ := resMap["bytes"]
+		fmt.Fprintf(out, "Successfully exported %s %s to %s (%v bytes).\n", targetType, targetID, outputPath, bytesCount)
+	} else {
+		fmt.Fprint(out, content)
+	}
+	return nil
+}
+
+func cmdImport(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: cadence import <file-path> [--title <title>] [--no-transcribe]")
+	}
+
+	filePath := ""
+	title := ""
+	transcribe := true
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case (arg == "--title" || arg == "-t") && i+1 < len(args):
+			title = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--title="):
+			title = strings.TrimPrefix(arg, "--title=")
+		case arg == "--no-transcribe":
+			transcribe = false
+		default:
+			if filePath == "" {
+				filePath = arg
+			}
+		}
+	}
+
+	if filePath == "" {
+		return errors.New("usage: cadence import <file-path> [--title <title>] [--no-transcribe]")
+	}
+
+	absPath, err := filepath.Abs(filePath)
+	if err == nil {
+		filePath = absPath
+	}
+
+	params := map[string]any{
+		"path":       filePath,
+		"title":      title,
+		"transcribe": transcribe,
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	resp, err := client.Call(callCtx, "import_file", params)
+	if err != nil {
+		return fmt.Errorf("import failed: %w", err)
+	}
+
+	resMap, ok := resp.(map[string]any)
+	if !ok {
+		return fmt.Errorf("unexpected import response: %v", resp)
+	}
+
+	mtgRaw, _ := resMap["meeting"].(map[string]any)
+	mtgID, _ := mtgRaw["id"].(string)
+	mtgTitle, _ := mtgRaw["title"].(string)
+	segCount, _ := resMap["segments_count"]
+
+	fmt.Fprintf(out, "Successfully imported %s:\n", filepath.Base(filePath))
+	fmt.Fprintf(out, "  Meeting ID: %s\n", mtgID)
+	fmt.Fprintf(out, "  Title:      %s\n", mtgTitle)
+	fmt.Fprintf(out, "  Segments:   %v\n", segCount)
 	return nil
 }
