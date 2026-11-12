@@ -111,6 +111,42 @@ type MeetingSummary struct {
 	UpdatedAt   time.Time    `json:"updated_at"`
 }
 
+// Folder represents an organizational folder or notebook for notes.
+type Folder struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	ParentID  string    `json:"parent_id,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// NoteFilter allows filtering notes by folder, tag, or linked meeting.
+type NoteFilter struct {
+	FolderID  string `json:"folder_id,omitempty"`
+	Tag       string `json:"tag,omitempty"`
+	MeetingID string `json:"meeting_id,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
+}
+
+// Note represents a markdown note or document in the personal knowledge base.
+type Note struct {
+	ID        string    `json:"id"`
+	FolderID  string    `json:"folder_id,omitempty"`
+	Title     string    `json:"title"`
+	Content   string    `json:"content"`
+	MeetingID string    `json:"meeting_id,omitempty"`
+	Tags      []string  `json:"tags,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// Tag represents a categorization label with count of tagged notes.
+type Tag struct {
+	Name      string    `json:"name"`
+	NoteCount int       `json:"note_count,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 type Store interface {
 	SaveTranscript(Transcript) error
 	ListTranscripts(int) ([]Transcript, error)
@@ -142,4 +178,22 @@ type Store interface {
 	SaveMeetingSummary(MeetingSummary) error
 	GetMeetingSummary(string) (*MeetingSummary, error)
 	DeleteMeetingSummary(string) error
+
+	// Knowledge base: Folders
+	SaveFolder(Folder) error
+	GetFolder(id string) (*Folder, error)
+	ListFolders() ([]Folder, error)
+	DeleteFolder(id string) error
+
+	// Knowledge base: Notes
+	SaveNote(Note) error
+	GetNote(id string) (*Note, error)
+	ListNotes(filter NoteFilter) ([]Note, error)
+	DeleteNote(id string) error
+
+	// Knowledge base: Tags
+	ListTags() ([]Tag, error)
+	SetNoteTags(noteID string, tags []string) error
+	GetNoteTags(noteID string) ([]string, error)
+	DeleteTag(name string) error
 }

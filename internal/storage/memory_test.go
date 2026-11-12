@@ -171,3 +171,72 @@ func TestMemoryStore_Snippets(t *testing.T) {
 		t.Fatalf("expected nil after delete, got %v", gotAfter)
 	}
 }
+
+func TestMemoryStore_KnowledgeBase(t *testing.T) {
+	mem := storage.NewMemory()
+	now := time.Now()
+
+	// 1. Folders
+	f := storage.Folder{
+		ID:        "folder-1",
+		Name:      "Engineering",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := mem.SaveFolder(f); err != nil {
+		t.Fatalf("SaveFolder: %v", err)
+	}
+	gotF, err := mem.GetFolder("folder-1")
+	if err != nil || gotF == nil || gotF.Name != "Engineering" {
+		t.Fatalf("GetFolder failed: %v, got %+v", err, gotF)
+	}
+
+	// 2. Notes
+	n := storage.Note{
+		ID:        "note-1",
+		FolderID:  "folder-1",
+		Title:     "Standup Notes",
+		Content:   "Discussed sprint goals",
+		Tags:      []string{"daily", "standup"},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := mem.SaveNote(n); err != nil {
+		t.Fatalf("SaveNote: %v", err)
+	}
+
+	gotN, err := mem.GetNote("note-1")
+	if err != nil || gotN == nil || len(gotN.Tags) != 2 {
+		t.Fatalf("GetNote failed: %v, got %+v", err, gotN)
+	}
+
+	// 3. Filter notes
+	filtered, err := mem.ListNotes(storage.NoteFilter{Tag: "standup"})
+	if err != nil || len(filtered) != 1 {
+		t.Fatalf("ListNotes by tag: %v, got %+v", err, filtered)
+	}
+
+	// 4. Tags
+	tags, err := mem.ListTags()
+	if err != nil || len(tags) != 2 {
+		t.Fatalf("ListTags failed: %v, got %+v", err, tags)
+	}
+
+	// 5. Delete folder unlinks
+	if err := mem.DeleteFolder("folder-1"); err != nil {
+		t.Fatalf("DeleteFolder: %v", err)
+	}
+	afterFolderDel, err := mem.GetNote("note-1")
+	if err != nil || afterFolderDel.FolderID != "" {
+		t.Fatalf("expected folder_id unlinked, got %q", afterFolderDel.FolderID)
+	}
+
+	// 6. Delete note
+	if err := mem.DeleteNote("note-1"); err != nil {
+		t.Fatalf("DeleteNote: %v", err)
+	}
+	afterNoteDel, err := mem.GetNote("note-1")
+	if err != nil || afterNoteDel != nil {
+		t.Fatalf("expected nil note after delete, got %+v", afterNoteDel)
+	}
+}

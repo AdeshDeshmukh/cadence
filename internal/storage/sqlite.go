@@ -159,6 +159,54 @@ CREATE TABLE IF NOT EXISTS meeting_summaries (
 CREATE INDEX IF NOT EXISTS idx_meeting_summaries_meeting_id ON meeting_summaries (meeting_id);
 `,
 	},
+	{
+		version: 8,
+		name:    "create_knowledge_base",
+		up: `
+CREATE TABLE IF NOT EXISTS folders (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL,
+	parent_id TEXT NOT NULL DEFAULT '',
+	created_at TIMESTAMP NOT NULL,
+	updated_at TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_folders_parent_id ON folders (parent_id);
+CREATE INDEX IF NOT EXISTS idx_folders_name ON folders (name);
+
+CREATE TABLE IF NOT EXISTS notes (
+	id TEXT PRIMARY KEY,
+	folder_id TEXT,
+	title TEXT NOT NULL DEFAULT '',
+	content TEXT NOT NULL DEFAULT '',
+	meeting_id TEXT,
+	created_at TIMESTAMP NOT NULL,
+	updated_at TIMESTAMP NOT NULL,
+	FOREIGN KEY(folder_id) REFERENCES folders(id) ON DELETE SET NULL,
+	FOREIGN KEY(meeting_id) REFERENCES meetings(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_notes_folder_id ON notes (folder_id);
+CREATE INDEX IF NOT EXISTS idx_notes_meeting_id ON notes (meeting_id);
+CREATE INDEX IF NOT EXISTS idx_notes_updated_at ON notes (updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS tags (
+	name TEXT PRIMARY KEY,
+	created_at TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS note_tags (
+	note_id TEXT NOT NULL,
+	tag_name TEXT NOT NULL,
+	PRIMARY KEY (note_id, tag_name),
+	FOREIGN KEY(note_id) REFERENCES notes(id) ON DELETE CASCADE,
+	FOREIGN KEY(tag_name) REFERENCES tags(name) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_note_tags_note_id ON note_tags (note_id);
+CREATE INDEX IF NOT EXISTS idx_note_tags_tag_name ON note_tags (tag_name);
+`,
+	},
 }
 
 // SQLite implements persistent Store backed by an SQLite database.
@@ -1015,6 +1063,357 @@ WHERE meeting_id = ?;
 func (s *SQLite) DeleteMeetingSummary(meetingID string) error {
 	const query = `DELETE FROM meeting_summaries WHERE meeting_id = ?;`
 	_, err := s.db.Exec(query, meetingID)
+	return err
+}
+
+// SaveFolder creates or updates a folder in SQLite.
+func (s *SQLite) SaveFolder(f Folder) error {
+	if strings.TrimSpace(f.ID) == "" {
+		return errors.New("folder id is required")
+	}
+	if strings.TrimSpace(f.Name) == "" {
+		return errors.New("folder name is required")
+	}
+	now := time.Now().UTC()
+	if f.CreatedAt.IsZero() {
+		f.CreatedAt = now
+	}
+	f.UpdatedAt = now
+
+	const query = `
+INSERT INTO folders (id, name, parent_id, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+	name = excluded.name,
+	parent_id = excluded.parent_id,
+	updated_at = excluded.updated_at;
+`
+	_, err := s.db.Exec(query, f.ID, f.Name, f.ParentID, f.CreatedAt, f.UpdatedAt)
+	return err
+}
+
+// GetFolder retrieves a single folder by ID.
+func (s *SQLite) GetFolder(id string) (*Folder, error) {
+	const query = `
+SELECT id, name, parent_id, created_at, updated_at
+FROM folders
+WHERE id = ?;
+`
+	var f Folder
+	err := s.db.QueryRow(query, id).Scan(&f.ID, &f.Name, &f.ParentID, &f.CreatedAt, &f.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &f, nil
+}
+
+// ListFolders returns all folders sorted by name.
+func (s *SQLite) ListFolders() ([]Folder, error) {
+	const query = `
+SELECT id, name, parent_id, created_at, updated_at
+FROM folders
+ORDER BY name ASC;
+`
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Folder
+	for rows.Next() {
+		var f Folder
+		if err := rows.Scan(&f.ID, &f.Name, &f.ParentID, &f.CreatedAt, &f.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// DeleteFolder deletes a folder. Associated notes have their folder_id set to NULL via foreign key.
+func (s *SQLite) DeleteFolder(id string) error {
+	const query = `DELETE FROM folders WHERE id = ?;`
+	_, err := s.db.Exec(query, id)
+	return err
+}
+
+// SaveNote creates or updates a note and synchronizes its tags.
+func (s *SQLite) SaveNote(n Note) error {
+	if strings.TrimSpace(n.ID) == "" {
+		return errors.New("note id is required")
+	}
+	now := time.Now().UTC()
+	if n.CreatedAt.IsZero() {
+		n.CreatedAt = now
+	}
+	n.UpdatedAt = now
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var folderIDVal any
+	if strings.TrimSpace(n.FolderID) != "" {
+		folderIDVal = n.FolderID
+	}
+	var meetingIDVal any
+	if strings.TrimSpace(n.MeetingID) != "" {
+		meetingIDVal = n.MeetingID
+	}
+
+	const query = `
+INSERT INTO notes (id, folder_id, title, content, meeting_id, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+	folder_id = excluded.folder_id,
+	title = excluded.title,
+	content = excluded.content,
+	meeting_id = excluded.meeting_id,
+	updated_at = excluded.updated_at;
+`
+	if _, err := tx.Exec(query, n.ID, folderIDVal, n.Title, n.Content, meetingIDVal, n.CreatedAt, n.UpdatedAt); err != nil {
+		return err
+	}
+
+	if n.Tags != nil {
+		if _, err := tx.Exec(`DELETE FROM note_tags WHERE note_id = ?;`, n.ID); err != nil {
+			return err
+		}
+		for _, t := range n.Tags {
+			clean := strings.ToLower(strings.TrimSpace(t))
+			if clean == "" {
+				continue
+			}
+			if _, err := tx.Exec(`INSERT OR IGNORE INTO tags (name, created_at) VALUES (?, ?);`, clean, now); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`INSERT OR IGNORE INTO note_tags (note_id, tag_name) VALUES (?, ?);`, n.ID, clean); err != nil {
+				return err
+			}
+		}
+	}
+
+	return tx.Commit()
+}
+
+// GetNote retrieves a single note by ID and includes its tags.
+func (s *SQLite) GetNote(id string) (*Note, error) {
+	const query = `
+SELECT id, COALESCE(folder_id, ''), title, content, COALESCE(meeting_id, ''), created_at, updated_at
+FROM notes
+WHERE id = ?;
+`
+	var n Note
+	err := s.db.QueryRow(query, id).Scan(
+		&n.ID,
+		&n.FolderID,
+		&n.Title,
+		&n.Content,
+		&n.MeetingID,
+		&n.CreatedAt,
+		&n.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	tags, err := s.getNoteTagsTx(s.db, n.ID)
+	if err != nil {
+		return nil, err
+	}
+	n.Tags = tags
+	return &n, nil
+}
+
+type queryable interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
+func (s *SQLite) getNoteTagsTx(q queryable, noteID string) ([]string, error) {
+	const tagQuery = `SELECT tag_name FROM note_tags WHERE note_id = ? ORDER BY tag_name ASC;`
+	rows, err := q.Query(tagQuery, noteID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tags []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		tags = append(tags, t)
+	}
+	if tags == nil {
+		tags = []string{}
+	}
+	return tags, rows.Err()
+}
+
+// ListNotes retrieves notes matching the specified filter criteria.
+func (s *SQLite) ListNotes(filter NoteFilter) ([]Note, error) {
+	var (
+		clauses []string
+		args    []any
+	)
+
+	targetTag := strings.ToLower(strings.TrimSpace(filter.Tag))
+	query := `
+SELECT DISTINCT n.id, COALESCE(n.folder_id, ''), n.title, n.content, COALESCE(n.meeting_id, ''), n.created_at, n.updated_at
+FROM notes n
+`
+	if targetTag != "" {
+		query += ` JOIN note_tags nt ON n.id = nt.note_id`
+		clauses = append(clauses, "nt.tag_name = ?")
+		args = append(args, targetTag)
+	}
+
+	if filter.FolderID != "" {
+		clauses = append(clauses, "n.folder_id = ?")
+		args = append(args, filter.FolderID)
+	}
+	if filter.MeetingID != "" {
+		clauses = append(clauses, "n.meeting_id = ?")
+		args = append(args, filter.MeetingID)
+	}
+
+	if len(clauses) > 0 {
+		query += " WHERE " + strings.Join(clauses, " AND ")
+	}
+	query += " ORDER BY n.updated_at DESC"
+
+	if filter.Limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, filter.Limit)
+	}
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var notes []Note
+	for rows.Next() {
+		var n Note
+		if err := rows.Scan(
+			&n.ID,
+			&n.FolderID,
+			&n.Title,
+			&n.Content,
+			&n.MeetingID,
+			&n.CreatedAt,
+			&n.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		notes = append(notes, n)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	for i := range notes {
+		tags, err := s.getNoteTagsTx(s.db, notes[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		notes[i].Tags = tags
+	}
+
+	return notes, nil
+}
+
+// DeleteNote removes a note and all its tag associations.
+func (s *SQLite) DeleteNote(id string) error {
+	const query = `DELETE FROM notes WHERE id = ?;`
+	_, err := s.db.Exec(query, id)
+	return err
+}
+
+// ListTags returns all known tags along with their count of associated notes.
+func (s *SQLite) ListTags() ([]Tag, error) {
+	const query = `
+SELECT t.name, t.created_at, COUNT(nt.note_id) as note_count
+FROM tags t
+LEFT JOIN note_tags nt ON t.name = nt.tag_name
+GROUP BY t.name
+ORDER BY t.name ASC;
+`
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tags []Tag
+	for rows.Next() {
+		var t Tag
+		if err := rows.Scan(&t.Name, &t.CreatedAt, &t.NoteCount); err != nil {
+			return nil, err
+		}
+		tags = append(tags, t)
+	}
+	return tags, rows.Err()
+}
+
+// SetNoteTags sets the tag list for a note.
+func (s *SQLite) SetNoteTags(noteID string, tags []string) error {
+	if strings.TrimSpace(noteID) == "" {
+		return errors.New("note id is required")
+	}
+
+	now := time.Now().UTC()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.Exec(`DELETE FROM note_tags WHERE note_id = ?;`, noteID); err != nil {
+		return err
+	}
+
+	for _, t := range tags {
+		clean := strings.ToLower(strings.TrimSpace(t))
+		if clean == "" {
+			continue
+		}
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO tags (name, created_at) VALUES (?, ?);`, clean, now); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO note_tags (note_id, tag_name) VALUES (?, ?);`, noteID, clean); err != nil {
+			return err
+		}
+	}
+
+	if _, err := tx.Exec(`UPDATE notes SET updated_at = ? WHERE id = ?;`, now, noteID); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// GetNoteTags returns all tags attached to a given note.
+func (s *SQLite) GetNoteTags(noteID string) ([]string, error) {
+	return s.getNoteTagsTx(s.db, noteID)
+}
+
+// DeleteTag deletes a tag definition and removes it from all notes.
+func (s *SQLite) DeleteTag(name string) error {
+	clean := strings.ToLower(strings.TrimSpace(name))
+	const query = `DELETE FROM tags WHERE name = ?;`
+	_, err := s.db.Exec(query, clean)
 	return err
 }
 

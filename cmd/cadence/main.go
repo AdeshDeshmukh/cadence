@@ -65,6 +65,9 @@ Commands:
   permissions [list|grant|revoke|check] Manage per-tool permission policies (allow, deny, ask)
   policy [show|set|evaluate] Manage action confirmation policies (always_ask, auto_approve_safe, etc.)
   meeting [subcommand] Continuous meeting recording and capture (start, stop, pause, resume, status, list, show, diarize, speaker, turns, summarize, summary, delete)
+  note [subcommand]    Knowledge base notes: create, list, show, from-meeting, delete
+  folder [subcommand]  Knowledge base folders: create, list, delete
+  tag [subcommand]     Knowledge base tags: list, delete
   context [show|set|clear] Show or manage developer/code editor context (file, language, selection)
   terminal [status|hook] Inspect terminal/shell context or generate shell integration hooks
   app                Show detected active foreground application and category
@@ -288,6 +291,27 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "meeting":
 		if err := cmdMeeting(ctx, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "note", "notes":
+		if err := cmdNote(ctx, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "folder", "folders":
+		if err := cmdFolder(ctx, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "tag", "tags":
+		if err := cmdTag(ctx, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -4916,4 +4940,475 @@ func cmdMeetingUsage(out io.Writer) {
 	fmt.Fprintln(out, "  summarize <id>       Generate meeting summary, decisions, and action items")
 	fmt.Fprintln(out, "  summary <id>         Display structured summary for a meeting")
 	fmt.Fprintln(out, "  delete <id>          Delete a meeting record and its audio segments")
+}
+
+func cmdNote(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		cmdNoteUsage(out)
+		return nil
+	}
+
+	action := args[0]
+	rest := args[1:]
+
+	switch action {
+	case "create", "new", "add":
+		return cmdNoteCreate(ctx, client, rest, out)
+	case "list", "ls":
+		return cmdNoteList(ctx, client, rest, out)
+	case "show", "get":
+		return cmdNoteShow(ctx, client, rest, out)
+	case "delete", "rm":
+		return cmdNoteDelete(ctx, client, rest, out)
+	case "from-meeting":
+		return cmdNoteFromMeeting(ctx, client, rest, out)
+	case "help", "-h", "--help":
+		cmdNoteUsage(out)
+		return nil
+	default:
+		return fmt.Errorf("unknown note subcommand: %s (supported: create, list, show, delete, from-meeting)", action)
+	}
+}
+
+func cmdNoteCreate(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	title := ""
+	folder := ""
+	var tags []string
+	var contentParts []string
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--title" && i+1 < len(args):
+			title = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--title="):
+			title = strings.TrimPrefix(arg, "--title=")
+		case arg == "--folder" && i+1 < len(args):
+			folder = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--folder="):
+			folder = strings.TrimPrefix(arg, "--folder=")
+		case arg == "--tags" && i+1 < len(args):
+			for _, t := range strings.Split(args[i+1], ",") {
+				if ct := strings.TrimSpace(t); ct != "" {
+					tags = append(tags, ct)
+				}
+			}
+			i++
+		case strings.HasPrefix(arg, "--tags="):
+			for _, t := range strings.Split(strings.TrimPrefix(arg, "--tags="), ",") {
+				if ct := strings.TrimSpace(t); ct != "" {
+					tags = append(tags, ct)
+				}
+			}
+		default:
+			contentParts = append(contentParts, arg)
+		}
+	}
+
+	content := strings.Join(contentParts, " ")
+	if strings.TrimSpace(content) == "" && strings.TrimSpace(title) == "" {
+		return errors.New("note content or title is required (usage: cadence note create [--title T] [--folder F] [--tags t1,t2] [content])")
+	}
+
+	params := map[string]any{
+		"title":   title,
+		"content": content,
+		"folder":  folder,
+		"tags":    tags,
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	resp, err := client.Call(callCtx, "note_save", params)
+	if err != nil {
+		return fmt.Errorf("failed to create note: %w", err)
+	}
+
+	resMap, ok := resp.(map[string]any)
+	if !ok {
+		return fmt.Errorf("unexpected note_save response: %v", resp)
+	}
+	note, _ := resMap["note"].(map[string]any)
+	id, _ := note["id"].(string)
+	noteTitle, _ := note["title"].(string)
+
+	fmt.Fprintf(out, "Note created: %s (%s)\n", noteTitle, id)
+	return nil
+}
+
+func cmdNoteList(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	folder := ""
+	tag := ""
+	limit := 50
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--folder" && i+1 < len(args):
+			folder = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--folder="):
+			folder = strings.TrimPrefix(arg, "--folder=")
+		case arg == "--tag" && i+1 < len(args):
+			tag = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--tag="):
+			tag = strings.TrimPrefix(arg, "--tag=")
+		case arg == "--limit" && i+1 < len(args):
+			if parsed, err := strconv.Atoi(args[i+1]); err == nil && parsed > 0 {
+				limit = parsed
+			}
+			i++
+		}
+	}
+
+	params := map[string]any{
+		"folder": folder,
+		"tag":    tag,
+		"limit":  limit,
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	resp, err := client.Call(callCtx, "note_list", params)
+	if err != nil {
+		return fmt.Errorf("failed to list notes: %w", err)
+	}
+
+	resMap, ok := resp.(map[string]any)
+	if !ok {
+		return fmt.Errorf("unexpected note_list response: %v", resp)
+	}
+
+	notes, _ := resMap["notes"].([]any)
+	if len(notes) == 0 {
+		fmt.Fprintln(out, "No notes found.")
+		return nil
+	}
+
+	fmt.Fprintf(out, "%-16s  %-12s  %-20s  %s\n", "ID", "FOLDER", "TAGS", "TITLE")
+	fmt.Fprintln(out, strings.Repeat("-", 70))
+	for _, raw := range notes {
+		n, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, _ := n["id"].(string)
+		title, _ := n["title"].(string)
+		folderID, _ := n["folder_id"].(string)
+		if folderID == "" {
+			folderID = "-"
+		}
+		var tagStrs []string
+		if tagsSlice, ok := n["tags"].([]any); ok {
+			for _, t := range tagsSlice {
+				if s, ok := t.(string); ok && s != "" {
+					tagStrs = append(tagStrs, s)
+				}
+			}
+		}
+		tagsDisplay := "-"
+		if len(tagStrs) > 0 {
+			tagsDisplay = strings.Join(tagStrs, ", ")
+		}
+		if len(tagsDisplay) > 20 {
+			tagsDisplay = tagsDisplay[:17] + "..."
+		}
+		if len(title) > 30 {
+			title = title[:27] + "..."
+		}
+		fmt.Fprintf(out, "%-16s  %-12s  %-20s  %s\n", id, folderID, tagsDisplay, title)
+	}
+
+	return nil
+}
+
+func cmdNoteShow(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("missing note id (usage: cadence note show <id>)")
+	}
+	id := args[0]
+
+	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	resp, err := client.Call(callCtx, "note_get", map[string]any{"id": id})
+	if err != nil {
+		return fmt.Errorf("failed to get note: %w", err)
+	}
+
+	resMap, ok := resp.(map[string]any)
+	if !ok {
+		return fmt.Errorf("unexpected note_get response: %v", resp)
+	}
+	note, _ := resMap["note"].(map[string]any)
+	if note == nil {
+		return fmt.Errorf("note not found: %s", id)
+	}
+
+	title, _ := note["title"].(string)
+	content, _ := note["content"].(string)
+	folderID, _ := note["folder_id"].(string)
+	meetingID, _ := note["meeting_id"].(string)
+	updatedAtStr, _ := note["updated_at"].(string)
+
+	var tagStrs []string
+	if tagsSlice, ok := note["tags"].([]any); ok {
+		for _, t := range tagsSlice {
+			if s, ok := t.(string); ok && s != "" {
+				tagStrs = append(tagStrs, s)
+			}
+		}
+	}
+
+	fmt.Fprintf(out, "Title:      %s\n", title)
+	fmt.Fprintf(out, "ID:         %s\n", id)
+	if folderID != "" {
+		fmt.Fprintf(out, "Folder ID:  %s\n", folderID)
+	}
+	if meetingID != "" {
+		fmt.Fprintf(out, "Meeting ID: %s\n", meetingID)
+	}
+	if len(tagStrs) > 0 {
+		fmt.Fprintf(out, "Tags:       %s\n", strings.Join(tagStrs, ", "))
+	}
+	if updatedAtStr != "" {
+		fmt.Fprintf(out, "Updated:    %s\n", updatedAtStr)
+	}
+	fmt.Fprintf(out, "\n---\n\n%s\n", content)
+	return nil
+}
+
+func cmdNoteDelete(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("missing note id (usage: cadence note delete <id>)")
+	}
+	id := args[0]
+
+	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	_, err := client.Call(callCtx, "note_delete", map[string]any{"id": id})
+	if err != nil {
+		return fmt.Errorf("failed to delete note: %w", err)
+	}
+
+	fmt.Fprintf(out, "Note %s deleted.\n", id)
+	return nil
+}
+
+func cmdNoteFromMeeting(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("missing meeting id (usage: cadence note from-meeting <meeting-id> [--folder <folder>])")
+	}
+	meetingID := args[0]
+	folder := ""
+	if len(args) > 2 && args[1] == "--folder" {
+		folder = args[2]
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	resp, err := client.Call(callCtx, "note_from_meeting", map[string]any{
+		"meeting_id": meetingID,
+		"folder":     folder,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create note from meeting: %w", err)
+	}
+
+	resMap, ok := resp.(map[string]any)
+	if !ok {
+		return fmt.Errorf("unexpected note_from_meeting response: %v", resp)
+	}
+	note, _ := resMap["note"].(map[string]any)
+	id, _ := note["id"].(string)
+	title, _ := note["title"].(string)
+
+	fmt.Fprintf(out, "Meeting note created: %s (%s)\n", title, id)
+	return nil
+}
+
+func cmdNoteUsage(out io.Writer) {
+	fmt.Fprintln(out, "Usage: cadence note <subcommand> [arguments]")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Subcommands:")
+	fmt.Fprintln(out, "  create [flags] [content]  Create a new note in the knowledge base")
+	fmt.Fprintln(out, "  list [flags]              List notes with optional --folder, --tag, --limit")
+	fmt.Fprintln(out, "  show <id>                 Display note metadata and markdown content")
+	fmt.Fprintln(out, "  delete <id>               Delete a note from the knowledge base")
+	fmt.Fprintln(out, "  from-meeting <id>         Create a note from a meeting transcript and summary")
+}
+
+func cmdFolder(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		cmdFolderUsage(out)
+		return nil
+	}
+
+	action := args[0]
+	rest := args[1:]
+
+	switch action {
+	case "create", "new", "add":
+		if len(rest) == 0 {
+			return errors.New("missing folder name (usage: cadence folder create <name> [--parent <id>])")
+		}
+		name := rest[0]
+		parentID := ""
+		if len(rest) > 2 && rest[1] == "--parent" {
+			parentID = rest[2]
+		}
+
+		callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+
+		resp, err := client.Call(callCtx, "folder_save", map[string]any{
+			"name":      name,
+			"parent_id": parentID,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to create folder: %w", err)
+		}
+		resMap, _ := resp.(map[string]any)
+		f, _ := resMap["folder"].(map[string]any)
+		id, _ := f["id"].(string)
+		fmt.Fprintf(out, "Folder created: %s (%s)\n", name, id)
+		return nil
+
+	case "list", "ls":
+		callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+
+		resp, err := client.Call(callCtx, "folder_list", nil)
+		if err != nil {
+			return fmt.Errorf("failed to list folders: %w", err)
+		}
+		resMap, _ := resp.(map[string]any)
+		folders, _ := resMap["folders"].([]any)
+		if len(folders) == 0 {
+			fmt.Fprintln(out, "No folders found.")
+			return nil
+		}
+
+		fmt.Fprintf(out, "%-16s  %s\n", "ID", "NAME")
+		fmt.Fprintln(out, strings.Repeat("-", 40))
+		for _, raw := range folders {
+			f, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			id, _ := f["id"].(string)
+			name, _ := f["name"].(string)
+			fmt.Fprintf(out, "%-16s  %s\n", id, name)
+		}
+		return nil
+
+	case "delete", "rm":
+		if len(rest) == 0 {
+			return errors.New("missing folder id (usage: cadence folder delete <id>)")
+		}
+		id := rest[0]
+		callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+
+		_, err := client.Call(callCtx, "folder_delete", map[string]any{"id": id})
+		if err != nil {
+			return fmt.Errorf("failed to delete folder: %w", err)
+		}
+		fmt.Fprintf(out, "Folder %s deleted.\n", id)
+		return nil
+
+	case "help", "-h", "--help":
+		cmdFolderUsage(out)
+		return nil
+	default:
+		return fmt.Errorf("unknown folder subcommand: %s (supported: create, list, delete)", action)
+	}
+}
+
+func cmdFolderUsage(out io.Writer) {
+	fmt.Fprintln(out, "Usage: cadence folder <subcommand> [arguments]")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Subcommands:")
+	fmt.Fprintln(out, "  create <name> [--parent <id>] Create a new folder")
+	fmt.Fprintln(out, "  list                         List all folders")
+	fmt.Fprintln(out, "  delete <id>                  Delete a folder (unlinks contained notes)")
+}
+
+func cmdTag(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		cmdTagUsage(out)
+		return nil
+	}
+
+	action := args[0]
+	rest := args[1:]
+
+	switch action {
+	case "list", "ls":
+		callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+
+		resp, err := client.Call(callCtx, "tag_list", nil)
+		if err != nil {
+			return fmt.Errorf("failed to list tags: %w", err)
+		}
+		resMap, _ := resp.(map[string]any)
+		tags, _ := resMap["tags"].([]any)
+		if len(tags) == 0 {
+			fmt.Fprintln(out, "No tags found.")
+			return nil
+		}
+
+		fmt.Fprintf(out, "%-20s  %s\n", "TAG", "NOTES")
+		fmt.Fprintln(out, strings.Repeat("-", 30))
+		for _, raw := range tags {
+			t, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			name, _ := t["name"].(string)
+			count := int(0)
+			if c, ok := t["note_count"].(float64); ok {
+				count = int(c)
+			}
+			fmt.Fprintf(out, "%-20s  %d\n", name, count)
+		}
+		return nil
+
+	case "delete", "rm":
+		if len(rest) == 0 {
+			return errors.New("missing tag name (usage: cadence tag delete <name>)")
+		}
+		name := rest[0]
+		callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+
+		_, err := client.Call(callCtx, "tag_delete", map[string]any{"name": name})
+		if err != nil {
+			return fmt.Errorf("failed to delete tag: %w", err)
+		}
+		fmt.Fprintf(out, "Tag %s deleted.\n", name)
+		return nil
+
+	case "help", "-h", "--help":
+		cmdTagUsage(out)
+		return nil
+	default:
+		return fmt.Errorf("unknown tag subcommand: %s (supported: list, delete)", action)
+	}
+}
+
+func cmdTagUsage(out io.Writer) {
+	fmt.Fprintln(out, "Usage: cadence tag <subcommand> [arguments]")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Subcommands:")
+	fmt.Fprintln(out, "  list        List all tags and their associated note counts")
+	fmt.Fprintln(out, "  delete <tag> Delete a tag from the knowledge base")
 }

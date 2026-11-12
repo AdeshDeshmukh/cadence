@@ -26,6 +26,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/edit"
 	"github.com/AdeshDeshmukh/cadence/internal/hotkey"
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
+	"github.com/AdeshDeshmukh/cadence/internal/knowledge"
 	"github.com/AdeshDeshmukh/cadence/internal/meeting"
 	"github.com/AdeshDeshmukh/cadence/internal/paste"
 	"github.com/AdeshDeshmukh/cadence/internal/pipeline"
@@ -106,6 +107,7 @@ type App struct {
 	actionPolicy     *agent.ConfirmationPolicy
 	meetingMgr       *meeting.Manager
 	diarizer         diarize.Diarizer
+	knowledgeMgr     *knowledge.Manager
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -261,6 +263,11 @@ func WithMeetingManager(m *meeting.Manager) Option {
 // WithDiarizer sets a custom speaker diarization engine.
 func WithDiarizer(d diarize.Diarizer) Option {
 	return func(a *App) { a.diarizer = d }
+}
+
+// WithKnowledgeManager sets a custom personal knowledge base manager.
+func WithKnowledgeManager(km *knowledge.Manager) Option {
+	return func(a *App) { a.knowledgeMgr = km }
 }
 
 // NewApp instantiates a fully configured Cadence daemon application.
@@ -505,6 +512,10 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 			meeting.WithSummarizer(sum),
 			meeting.WithSampleRate(cfg.Audio.SampleRate),
 		)
+	}
+
+	if a.knowledgeMgr == nil {
+		a.knowledgeMgr = knowledge.NewManager(a.store)
 	}
 
 	if a.kernel == nil {
@@ -2837,6 +2848,256 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 		return map[string]any{
 			"ok":      true,
 			"summary": summaryVal,
+		}, nil
+
+	case "note_save", "note_create":
+		if a.knowledgeMgr == nil {
+			return nil, errors.New("knowledge manager not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		id, _ := params["id"].(string)
+		title, _ := params["title"].(string)
+		content, _ := params["content"].(string)
+		folder, _ := params["folder"].(string)
+		if folder == "" {
+			folder, _ = params["folder_id"].(string)
+		}
+		meetingID, _ := params["meeting_id"].(string)
+
+		var tags []string
+		if tagsSlice, ok := params["tags"].([]any); ok {
+			for _, t := range tagsSlice {
+				if s, ok := t.(string); ok && s != "" {
+					tags = append(tags, s)
+				}
+			}
+		} else if tagsStrSlice, ok := params["tags"].([]string); ok {
+			tags = tagsStrSlice
+		}
+
+		note, err := a.knowledgeMgr.CreateNote(ctx, knowledge.CreateNoteOptions{
+			ID:        id,
+			Title:     title,
+			Content:   content,
+			Folder:    folder,
+			Tags:      tags,
+			MeetingID: meetingID,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok":   true,
+			"note": note,
+		}, nil
+
+	case "note_get":
+		if a.knowledgeMgr == nil {
+			return nil, errors.New("knowledge manager not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		id, _ := params["id"].(string)
+		if strings.TrimSpace(id) == "" {
+			return nil, errors.New("missing id parameter")
+		}
+		note, err := a.knowledgeMgr.GetNote(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		var noteVal any
+		if note != nil {
+			noteVal = note
+		}
+		return map[string]any{
+			"ok":   true,
+			"note": noteVal,
+		}, nil
+
+	case "note_list":
+		if a.knowledgeMgr == nil {
+			return nil, errors.New("knowledge manager not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		filter := storage.NoteFilter{}
+		if f, ok := params["folder_id"].(string); ok {
+			filter.FolderID = f
+		} else if f, ok := params["folder"].(string); ok {
+			filter.FolderID = f
+		}
+		if t, ok := params["tag"].(string); ok {
+			filter.Tag = t
+		}
+		if m, ok := params["meeting_id"].(string); ok {
+			filter.MeetingID = m
+		}
+		if l, ok := params["limit"].(float64); ok {
+			filter.Limit = int(l)
+		} else if l, ok := params["limit"].(int); ok {
+			filter.Limit = l
+		}
+
+		notes, err := a.knowledgeMgr.ListNotes(ctx, filter)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok":    true,
+			"notes": notes,
+			"count": len(notes),
+		}, nil
+
+	case "note_delete":
+		if a.knowledgeMgr == nil {
+			return nil, errors.New("knowledge manager not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		id, _ := params["id"].(string)
+		if strings.TrimSpace(id) == "" {
+			return nil, errors.New("missing id parameter")
+		}
+		if err := a.knowledgeMgr.DeleteNote(ctx, id); err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok": true,
+			"id": id,
+		}, nil
+
+	case "note_from_meeting":
+		if a.knowledgeMgr == nil {
+			return nil, errors.New("knowledge manager not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		meetingID, _ := params["meeting_id"].(string)
+		if meetingID == "" {
+			meetingID, _ = params["id"].(string)
+		}
+		if strings.TrimSpace(meetingID) == "" {
+			return nil, errors.New("missing meeting_id parameter")
+		}
+		folder, _ := params["folder"].(string)
+		if folder == "" {
+			folder, _ = params["folder_id"].(string)
+		}
+		note, err := a.knowledgeMgr.CreateNoteFromMeeting(ctx, meetingID, folder)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok":   true,
+			"note": note,
+		}, nil
+
+	case "folder_save", "folder_create":
+		if a.knowledgeMgr == nil {
+			return nil, errors.New("knowledge manager not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		name, _ := params["name"].(string)
+		parentID, _ := params["parent_id"].(string)
+		folder, err := a.knowledgeMgr.CreateFolder(ctx, name, parentID)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok":     true,
+			"folder": folder,
+		}, nil
+
+	case "folder_list":
+		if a.knowledgeMgr == nil {
+			return nil, errors.New("knowledge manager not configured")
+		}
+		folders, err := a.knowledgeMgr.ListFolders(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok":      true,
+			"folders": folders,
+			"count":   len(folders),
+		}, nil
+
+	case "folder_delete":
+		if a.knowledgeMgr == nil {
+			return nil, errors.New("knowledge manager not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		id, _ := params["id"].(string)
+		if strings.TrimSpace(id) == "" {
+			return nil, errors.New("missing id parameter")
+		}
+		if err := a.knowledgeMgr.DeleteFolder(ctx, id); err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok": true,
+			"id": id,
+		}, nil
+
+	case "tag_list":
+		if a.knowledgeMgr == nil {
+			return nil, errors.New("knowledge manager not configured")
+		}
+		tags, err := a.knowledgeMgr.ListTags(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok":    true,
+			"tags":  tags,
+			"count": len(tags),
+		}, nil
+
+	case "tag_delete":
+		if a.knowledgeMgr == nil {
+			return nil, errors.New("knowledge manager not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		name, _ := params["name"].(string)
+		if name == "" {
+			name, _ = params["tag"].(string)
+		}
+		if strings.TrimSpace(name) == "" {
+			return nil, errors.New("missing name parameter")
+		}
+		if err := a.knowledgeMgr.DeleteTag(ctx, name); err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok":   true,
+			"name": name,
+		}, nil
+
+	case "note_tag_set", "note_tags_set":
+		if a.knowledgeMgr == nil {
+			return nil, errors.New("knowledge manager not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		noteID, _ := params["note_id"].(string)
+		if noteID == "" {
+			noteID, _ = params["id"].(string)
+		}
+		if strings.TrimSpace(noteID) == "" {
+			return nil, errors.New("missing note_id parameter")
+		}
+		var tags []string
+		if tagsSlice, ok := params["tags"].([]any); ok {
+			for _, t := range tagsSlice {
+				if s, ok := t.(string); ok && s != "" {
+					tags = append(tags, s)
+				}
+			}
+		} else if tagsStrSlice, ok := params["tags"].([]string); ok {
+			tags = tagsStrSlice
+		}
+		if err := a.knowledgeMgr.SetNoteTags(ctx, noteID, tags); err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok":      true,
+			"note_id": noteID,
+			"tags":    tags,
 		}, nil
 
 	default:

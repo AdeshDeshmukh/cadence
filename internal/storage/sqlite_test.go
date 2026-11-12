@@ -837,3 +837,135 @@ func TestSQLite_MeetingSummaries(t *testing.T) {
 		t.Fatalf("expected nil summary after DeleteMeeting cascade, got %+v", cascaded)
 	}
 }
+
+func TestSQLite_KnowledgeBase(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer s.Close()
+
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// 1. Folders CRUD
+	f1 := Folder{
+		ID:        "f-work",
+		Name:      "Work Projects",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	f2 := Folder{
+		ID:        "f-personal",
+		Name:      "Personal Ideas",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := s.SaveFolder(f1); err != nil {
+		t.Fatalf("SaveFolder f1: %v", err)
+	}
+	if err := s.SaveFolder(f2); err != nil {
+		t.Fatalf("SaveFolder f2: %v", err)
+	}
+
+	gotF1, err := s.GetFolder("f-work")
+	if err != nil || gotF1 == nil || gotF1.Name != "Work Projects" {
+		t.Fatalf("GetFolder failed: %v, got %+v", err, gotF1)
+	}
+
+	folders, err := s.ListFolders()
+	if err != nil || len(folders) != 2 {
+		t.Fatalf("ListFolders failed: %v, got %+v", err, folders)
+	}
+
+	// 2. Notes CRUD & Tagging
+	n1 := Note{
+		ID:        "note-1",
+		FolderID:  "f-work",
+		Title:     "Architecture Review",
+		Content:   "Drafting the v2 architecture specifications.",
+		Tags:      []string{"golang", "architecture"},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	n2 := Note{
+		ID:        "note-2",
+		FolderID:  "f-personal",
+		Title:     "Grocery List",
+		Content:   "- Apples\n- Milk",
+		Tags:      []string{"errands"},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := s.SaveNote(n1); err != nil {
+		t.Fatalf("SaveNote n1: %v", err)
+	}
+	if err := s.SaveNote(n2); err != nil {
+		t.Fatalf("SaveNote n2: %v", err)
+	}
+
+	gotN1, err := s.GetNote("note-1")
+	if err != nil || gotN1 == nil {
+		t.Fatalf("GetNote n1: %v", err)
+	}
+	if gotN1.Title != "Architecture Review" || len(gotN1.Tags) != 2 {
+		t.Errorf("unexpected note 1: %+v", gotN1)
+	}
+
+	// 3. List notes with filters
+	workNotes, err := s.ListNotes(NoteFilter{FolderID: "f-work"})
+	if err != nil || len(workNotes) != 1 || workNotes[0].ID != "note-1" {
+		t.Fatalf("ListNotes by folder failed: %v, got %+v", err, workNotes)
+	}
+
+	taggedNotes, err := s.ListNotes(NoteFilter{Tag: "golang"})
+	if err != nil || len(taggedNotes) != 1 || taggedNotes[0].ID != "note-1" {
+		t.Fatalf("ListNotes by tag failed: %v, got %+v", err, taggedNotes)
+	}
+
+	// 4. Tags inspection & counts
+	tags, err := s.ListTags()
+	if err != nil || len(tags) != 3 {
+		t.Fatalf("ListTags failed: %v, got %+v", err, tags)
+	}
+	for _, tag := range tags {
+		if tag.Name == "golang" && tag.NoteCount != 1 {
+			t.Errorf("expected golang note count 1, got %d", tag.NoteCount)
+		}
+	}
+
+	// 5. Update note tags
+	if err := s.SetNoteTags("note-1", []string{"golang", "distributed-systems"}); err != nil {
+		t.Fatalf("SetNoteTags: %v", err)
+	}
+	updatedN1, err := s.GetNote("note-1")
+	if err != nil || len(updatedN1.Tags) != 2 || updatedN1.Tags[0] != "distributed-systems" {
+		t.Fatalf("unexpected updated tags: %+v", updatedN1.Tags)
+	}
+
+	// 6. Delete folder detaches note
+	if err := s.DeleteFolder("f-work"); err != nil {
+		t.Fatalf("DeleteFolder: %v", err)
+	}
+	detachedN1, err := s.GetNote("note-1")
+	if err != nil || detachedN1.FolderID != "" {
+		t.Fatalf("expected folder_id to be cleared after folder deletion, got %q", detachedN1.FolderID)
+	}
+
+	// 7. Delete note
+	if err := s.DeleteNote("note-2"); err != nil {
+		t.Fatalf("DeleteNote: %v", err)
+	}
+	delN2, err := s.GetNote("note-2")
+	if err != nil || delN2 != nil {
+		t.Fatalf("expected nil note-2, got %+v", delN2)
+	}
+
+	// 8. Delete tag
+	if err := s.DeleteTag("distributed-systems"); err != nil {
+		t.Fatalf("DeleteTag: %v", err)
+	}
+	n1AfterTagDel, err := s.GetNote("note-1")
+	if err != nil || len(n1AfterTagDel.Tags) != 1 || n1AfterTagDel.Tags[0] != "golang" {
+		t.Fatalf("expected only golang tag remaining, got %+v", n1AfterTagDel.Tags)
+	}
+}

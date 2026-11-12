@@ -19,6 +19,10 @@ type Memory struct {
 	segments    map[string][]MeetingSegment
 	speakers    map[string]map[string]MeetingSpeaker
 	summaries   map[string]MeetingSummary
+	folders     map[string]Folder
+	notes       map[string]Note
+	noteTags    map[string]map[string]struct{}
+	tags        map[string]time.Time
 }
 
 func NewMemory() *Memory {
@@ -31,6 +35,10 @@ func NewMemory() *Memory {
 		segments:   map[string][]MeetingSegment{},
 		speakers:   map[string]map[string]MeetingSpeaker{},
 		summaries:  map[string]MeetingSummary{},
+		folders:    map[string]Folder{},
+		notes:      map[string]Note{},
+		noteTags:   map[string]map[string]struct{}{},
+		tags:       map[string]time.Time{},
 	}
 }
 
@@ -408,5 +416,291 @@ func (m *Memory) DeleteMeetingSummary(meetingID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.summaries, meetingID)
+	return nil
+}
+
+// SaveFolder creates or updates a folder in memory.
+func (m *Memory) SaveFolder(f Folder) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if strings.TrimSpace(f.ID) == "" {
+		return errors.New("folder id is required")
+	}
+	if strings.TrimSpace(f.Name) == "" {
+		return errors.New("folder name is required")
+	}
+	now := time.Now()
+	if f.CreatedAt.IsZero() {
+		f.CreatedAt = now
+	}
+	f.UpdatedAt = now
+	m.folders[f.ID] = f
+	return nil
+}
+
+// GetFolder retrieves a folder by id.
+func (m *Memory) GetFolder(id string) (*Folder, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	f, ok := m.folders[id]
+	if !ok {
+		return nil, nil
+	}
+	res := f
+	return &res, nil
+}
+
+// ListFolders lists all folders sorted alphabetically by name.
+func (m *Memory) ListFolders() ([]Folder, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]Folder, 0, len(m.folders))
+	for _, f := range m.folders {
+		out = append(out, f)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
+}
+
+// DeleteFolder deletes a folder and detaches associated notes.
+func (m *Memory) DeleteFolder(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.folders, id)
+	for k, n := range m.notes {
+		if n.FolderID == id {
+			n.FolderID = ""
+			m.notes[k] = n
+		}
+	}
+	return nil
+}
+
+// SaveNote creates or updates a note in memory.
+func (m *Memory) SaveNote(n Note) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if strings.TrimSpace(n.ID) == "" {
+		return errors.New("note id is required")
+	}
+	now := time.Now()
+	if n.CreatedAt.IsZero() {
+		n.CreatedAt = now
+	}
+	n.UpdatedAt = now
+
+	// If tags were provided in struct, sync them
+	if n.Tags != nil {
+		tagSet := make(map[string]struct{})
+		for _, t := range n.Tags {
+			clean := strings.ToLower(strings.TrimSpace(t))
+			if clean != "" {
+				tagSet[clean] = struct{}{}
+				if _, exists := m.tags[clean]; !exists {
+					m.tags[clean] = now
+				}
+			}
+		}
+		m.noteTags[n.ID] = tagSet
+	} else if existingTags, ok := m.noteTags[n.ID]; ok {
+		// Populate tags from existing map
+		tags := make([]string, 0, len(existingTags))
+		for t := range existingTags {
+			tags = append(tags, t)
+		}
+		sort.Strings(tags)
+		n.Tags = tags
+	}
+
+	m.notes[n.ID] = n
+	return nil
+}
+
+// GetNote retrieves a single note by id with its tags.
+func (m *Memory) GetNote(id string) (*Note, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	n, ok := m.notes[id]
+	if !ok {
+		return nil, nil
+	}
+	res := n
+	if tagSet, ok := m.noteTags[id]; ok {
+		tags := make([]string, 0, len(tagSet))
+		for t := range tagSet {
+			tags = append(tags, t)
+		}
+		sort.Strings(tags)
+		res.Tags = tags
+	} else {
+		res.Tags = []string{}
+	}
+	return &res, nil
+}
+
+// ListNotes retrieves notes matching the given filter.
+func (m *Memory) ListNotes(filter NoteFilter) ([]Note, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	targetTag := strings.ToLower(strings.TrimSpace(filter.Tag))
+	out := make([]Note, 0, len(m.notes))
+
+	for id, n := range m.notes {
+		if filter.FolderID != "" && n.FolderID != filter.FolderID {
+			continue
+		}
+		if filter.MeetingID != "" && n.MeetingID != filter.MeetingID {
+			continue
+		}
+		if targetTag != "" {
+			tagSet := m.noteTags[id]
+			if tagSet == nil {
+				continue
+			}
+			if _, ok := tagSet[targetTag]; !ok {
+				continue
+			}
+		}
+
+		item := n
+		if tagSet, ok := m.noteTags[id]; ok {
+			tags := make([]string, 0, len(tagSet))
+			for t := range tagSet {
+				tags = append(tags, t)
+			}
+			sort.Strings(tags)
+			item.Tags = tags
+		} else {
+			item.Tags = []string{}
+		}
+		out = append(out, item)
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+	})
+
+	if filter.Limit > 0 && filter.Limit < len(out) {
+		out = out[:filter.Limit]
+	}
+
+	return out, nil
+}
+
+// DeleteNote removes a note and its tag associations.
+func (m *Memory) DeleteNote(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.notes, id)
+	delete(m.noteTags, id)
+	return nil
+}
+
+// ListTags lists all tags with note count.
+func (m *Memory) ListTags() ([]Tag, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	counts := make(map[string]int)
+	for _, tagSet := range m.noteTags {
+		for t := range tagSet {
+			counts[t]++
+		}
+	}
+
+	out := make([]Tag, 0, len(m.tags))
+	for name, createdAt := range m.tags {
+		out = append(out, Tag{
+			Name:      name,
+			NoteCount: counts[name],
+			CreatedAt: createdAt,
+		})
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Name < out[j].Name
+	})
+
+	return out, nil
+}
+
+// SetNoteTags associates a set of tags with a note.
+func (m *Memory) SetNoteTags(noteID string, tags []string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if strings.TrimSpace(noteID) == "" {
+		return errors.New("note id is required")
+	}
+
+	now := time.Now()
+	tagSet := make(map[string]struct{})
+	cleanTags := make([]string, 0, len(tags))
+
+	for _, t := range tags {
+		clean := strings.ToLower(strings.TrimSpace(t))
+		if clean != "" {
+			tagSet[clean] = struct{}{}
+			cleanTags = append(cleanTags, clean)
+			if _, exists := m.tags[clean]; !exists {
+				m.tags[clean] = now
+			}
+		}
+	}
+
+	m.noteTags[noteID] = tagSet
+	if n, ok := m.notes[noteID]; ok {
+		sort.Strings(cleanTags)
+		n.Tags = cleanTags
+		n.UpdatedAt = now
+		m.notes[noteID] = n
+	}
+
+	return nil
+}
+
+// GetNoteTags returns tags associated with a note.
+func (m *Memory) GetNoteTags(noteID string) ([]string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	tagSet, ok := m.noteTags[noteID]
+	if !ok {
+		return []string{}, nil
+	}
+	out := make([]string, 0, len(tagSet))
+	for t := range tagSet {
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// DeleteTag removes a tag from the system and all notes.
+func (m *Memory) DeleteTag(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	clean := strings.ToLower(strings.TrimSpace(name))
+	delete(m.tags, clean)
+
+	for noteID, tagSet := range m.noteTags {
+		if _, ok := tagSet[clean]; ok {
+			delete(tagSet, clean)
+			if n, ok := m.notes[noteID]; ok {
+				newTags := make([]string, 0, len(tagSet))
+				for t := range tagSet {
+					newTags = append(newTags, t)
+				}
+				sort.Strings(newTags)
+				n.Tags = newTags
+				m.notes[noteID] = n
+			}
+		}
+	}
+
 	return nil
 }

@@ -715,6 +715,90 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 				},
 			},
 		}, nil
+	case "note_save":
+		params, _ := req.Params.(map[string]any)
+		title, _ := params["title"].(string)
+		if title == "" {
+			title = "Untitled Note"
+		}
+		return map[string]any{
+			"ok": true,
+			"note": map[string]any{
+				"id":        "note-mock-1",
+				"title":     title,
+				"folder_id": "f-mock-1",
+				"tags":      []any{"v2", "arch"},
+			},
+		}, nil
+	case "note_get":
+		return map[string]any{
+			"ok": true,
+			"note": map[string]any{
+				"id":         "note-mock-1",
+				"title":      "System Design",
+				"content":    "# System Design\nDetailed notes.",
+				"folder_id":  "f-mock-1",
+				"tags":       []any{"v2", "arch"},
+				"updated_at": "2026-11-12 09:00:00",
+			},
+		}, nil
+	case "note_list":
+		return map[string]any{
+			"ok":    true,
+			"count": 1,
+			"notes": []any{
+				map[string]any{
+					"id":        "note-mock-1",
+					"title":     "System Design",
+					"folder_id": "f-mock-1",
+					"tags":      []any{"v2", "arch"},
+				},
+			},
+		}, nil
+	case "note_delete":
+		return map[string]any{"ok": true, "id": "note-mock-1"}, nil
+	case "note_from_meeting":
+		return map[string]any{
+			"ok": true,
+			"note": map[string]any{
+				"id":    "note-mtg-mock",
+				"title": "Meeting Sync Note",
+			},
+		}, nil
+	case "folder_save":
+		params, _ := req.Params.(map[string]any)
+		name, _ := params["name"].(string)
+		return map[string]any{
+			"ok": true,
+			"folder": map[string]any{
+				"id":   "f-mock-1",
+				"name": name,
+			},
+		}, nil
+	case "folder_list":
+		return map[string]any{
+			"ok":    true,
+			"count": 1,
+			"folders": []any{
+				map[string]any{
+					"id":   "f-mock-1",
+					"name": "Specs",
+				},
+			},
+		}, nil
+	case "folder_delete":
+		return map[string]any{"ok": true, "id": "f-mock-1"}, nil
+	case "tag_list":
+		return map[string]any{
+			"ok":    true,
+			"count": 2,
+			"tags": []any{
+				map[string]any{"name": "arch", "note_count": float64(3)},
+				map[string]any{"name": "v2", "note_count": float64(1)},
+			},
+		}, nil
+	case "tag_delete":
+		return map[string]any{"ok": true, "name": "v2"}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -2773,5 +2857,127 @@ func TestCLI_Meeting(t *testing.T) {
 	}
 	if err := cmdMeeting(ctx, client, []string{"unknown_action"}, &out); err == nil {
 		t.Fatal("expected error for unknown meeting subcommand")
+	}
+}
+
+func TestCLI_KnowledgeBase(t *testing.T) {
+	sock := filepath.Join(os.TempDir(), fmt.Sprintf("cad_kb_%d.sock", time.Now().UnixNano()))
+	stop := startMockDaemon(t, sock)
+	defer stop()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sock,
+	}
+	ctx := context.Background()
+
+	// 1. Folder create
+	var out bytes.Buffer
+	if err := cmdFolder(ctx, client, []string{"create", "Specs"}, &out); err != nil {
+		t.Fatalf("cmdFolder create failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Folder created: Specs (f-mock-1)") {
+		t.Fatalf("unexpected folder create output: %s", out.String())
+	}
+
+	// 2. Folder list
+	out.Reset()
+	if err := cmdFolder(ctx, client, []string{"list"}, &out); err != nil {
+		t.Fatalf("cmdFolder list failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "f-mock-1") || !strings.Contains(out.String(), "Specs") {
+		t.Fatalf("unexpected folder list output: %s", out.String())
+	}
+
+	// 3. Folder delete
+	out.Reset()
+	if err := cmdFolder(ctx, client, []string{"delete", "f-mock-1"}, &out); err != nil {
+		t.Fatalf("cmdFolder delete failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Folder f-mock-1 deleted.") {
+		t.Fatalf("unexpected folder delete output: %s", out.String())
+	}
+
+	// 4. Note create
+	out.Reset()
+	if err := cmdNote(ctx, client, []string{"create", "--title", "System Design", "--tags", "v2,arch", "--folder", "Specs", "Detailed specifications"}, &out); err != nil {
+		t.Fatalf("cmdNote create failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Note created: System Design (note-mock-1)") {
+		t.Fatalf("unexpected note create output: %s", out.String())
+	}
+
+	// 5. Note list
+	out.Reset()
+	if err := cmdNote(ctx, client, []string{"list", "--tag", "arch"}, &out); err != nil {
+		t.Fatalf("cmdNote list failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "note-mock-1") || !strings.Contains(out.String(), "System Design") {
+		t.Fatalf("unexpected note list output: %s", out.String())
+	}
+
+	// 6. Note show
+	out.Reset()
+	if err := cmdNote(ctx, client, []string{"show", "note-mock-1"}, &out); err != nil {
+		t.Fatalf("cmdNote show failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Title:      System Design") || !strings.Contains(out.String(), "Detailed notes.") {
+		t.Fatalf("unexpected note show output: %s", out.String())
+	}
+
+	// 7. Note from-meeting
+	out.Reset()
+	if err := cmdNote(ctx, client, []string{"from-meeting", "mtg-mock-1"}, &out); err != nil {
+		t.Fatalf("cmdNote from-meeting failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Meeting note created: Meeting Sync Note (note-mtg-mock)") {
+		t.Fatalf("unexpected note from-meeting output: %s", out.String())
+	}
+
+	// 8. Note delete
+	out.Reset()
+	if err := cmdNote(ctx, client, []string{"delete", "note-mock-1"}, &out); err != nil {
+		t.Fatalf("cmdNote delete failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Note note-mock-1 deleted.") {
+		t.Fatalf("unexpected note delete output: %s", out.String())
+	}
+
+	// 9. Tag list
+	out.Reset()
+	if err := cmdTag(ctx, client, []string{"list"}, &out); err != nil {
+		t.Fatalf("cmdTag list failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "arch") || !strings.Contains(out.String(), "v2") {
+		t.Fatalf("unexpected tag list output: %s", out.String())
+	}
+
+	// 10. Tag delete
+	out.Reset()
+	if err := cmdTag(ctx, client, []string{"delete", "v2"}, &out); err != nil {
+		t.Fatalf("cmdTag delete failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Tag v2 deleted.") {
+		t.Fatalf("unexpected tag delete output: %s", out.String())
+	}
+
+	// 11. Error validations
+	if err := cmdFolder(ctx, client, []string{"create"}, &out); err == nil {
+		t.Fatal("expected error on folder create without name")
+	}
+	if err := cmdFolder(ctx, client, []string{"delete"}, &out); err == nil {
+		t.Fatal("expected error on folder delete without id")
+	}
+	if err := cmdNote(ctx, client, []string{"create"}, &out); err == nil {
+		t.Fatal("expected error on note create without content")
+	}
+	if err := cmdNote(ctx, client, []string{"show"}, &out); err == nil {
+		t.Fatal("expected error on note show without id")
+	}
+	if err := cmdNote(ctx, client, []string{"from-meeting"}, &out); err == nil {
+		t.Fatal("expected error on note from-meeting without id")
+	}
+	if err := cmdTag(ctx, client, []string{"delete"}, &out); err == nil {
+		t.Fatal("expected error on tag delete without name")
 	}
 }
