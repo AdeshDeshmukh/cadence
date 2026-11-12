@@ -24,6 +24,7 @@ type Memory struct {
 	notes       map[string]Note
 	noteTags    map[string]map[string]struct{}
 	tags        map[string]time.Time
+	embeddings  map[string]EmbeddingRecord
 }
 
 func NewMemory() *Memory {
@@ -40,6 +41,7 @@ func NewMemory() *Memory {
 		notes:      map[string]Note{},
 		noteTags:   map[string]map[string]struct{}{},
 		tags:       map[string]time.Time{},
+		embeddings: map[string]EmbeddingRecord{},
 	}
 }
 
@@ -63,6 +65,19 @@ func (m *Memory) ListTranscripts(limit int) ([]Transcript, error) {
 		limit = len(out)
 	}
 	return out[:limit], nil
+}
+
+func (m *Memory) GetTranscript(id string) (*Transcript, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, t := range m.transcripts {
+		if t.ID == id {
+			cp := t
+			return &cp, nil
+		}
+	}
+	return nil, errors.New("transcript not found")
 }
 
 func (m *Memory) SetVocabulary(e VocabularyEntry) error {
@@ -861,4 +876,74 @@ func extractSnippet(text string, query string, maxLen int) string {
 		snippet = snippet + "..."
 	}
 	return snippet
+}
+
+func embeddingKey(targetType, targetID, model string) string {
+	return fmt.Sprintf("%s:%s:%s", targetType, targetID, model)
+}
+
+func (m *Memory) SaveEmbedding(rec EmbeddingRecord) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.embeddings == nil {
+		m.embeddings = make(map[string]EmbeddingRecord)
+	}
+	if rec.UpdatedAt.IsZero() {
+		rec.UpdatedAt = time.Now()
+	}
+	key := embeddingKey(rec.TargetType, rec.TargetID, rec.Model)
+	cp := append([]float32(nil), rec.Embedding...)
+	rec.Embedding = cp
+	m.embeddings[key] = rec
+	return nil
+}
+
+func (m *Memory) GetEmbedding(targetType, targetID, model string) (*EmbeddingRecord, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	key := embeddingKey(targetType, targetID, model)
+	rec, ok := m.embeddings[key]
+	if !ok {
+		return nil, errors.New("embedding not found")
+	}
+	cp := rec
+	cp.Embedding = append([]float32(nil), rec.Embedding...)
+	return &cp, nil
+}
+
+func (m *Memory) ListEmbeddings(targetType, model string) ([]EmbeddingRecord, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var results []EmbeddingRecord
+	for _, rec := range m.embeddings {
+		if targetType != "" && rec.TargetType != targetType {
+			continue
+		}
+		if model != "" && rec.Model != model {
+			continue
+		}
+		cp := rec
+		cp.Embedding = append([]float32(nil), rec.Embedding...)
+		results = append(results, cp)
+	}
+	return results, nil
+}
+
+func (m *Memory) DeleteEmbedding(targetType, targetID, model string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if model != "" {
+		delete(m.embeddings, embeddingKey(targetType, targetID, model))
+		return nil
+	}
+	for k, rec := range m.embeddings {
+		if rec.TargetType == targetType && rec.TargetID == targetID {
+			delete(m.embeddings, k)
+		}
+	}
+	return nil
 }

@@ -68,7 +68,9 @@ Commands:
   note [subcommand]    Knowledge base notes: create, list, show, from-meeting, delete
   folder [subcommand]  Knowledge base folders: create, list, delete
   tag [subcommand]     Knowledge base tags: list, delete
-  search <query>       Full-text search across notes, transcripts, and meetings
+  search <query>       Full-text or semantic search across notes, transcripts, and meetings (--semantic)
+  related <id>         Retrieve semantically related transcripts and notes for a given ID
+  index-embeddings     Generate vector embeddings for all stored transcripts, notes, and meetings
   context [show|set|clear] Show or manage developer/code editor context (file, language, selection)
   terminal [status|hook] Inspect terminal/shell context or generate shell integration hooks
   app                Show detected active foreground application and category
@@ -320,6 +322,20 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "search", "find":
 		if err := cmdSearch(ctx, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "related":
+		if err := cmdRelated(ctx, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "index-embeddings", "reindex":
+		if err := cmdIndexEmbeddings(ctx, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -5423,16 +5439,29 @@ func cmdTagUsage(out io.Writer) {
 
 func cmdSearch(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("search query is required (usage: cadence search <query> [--type notes|transcripts|meetings] [--limit N])")
+		return errors.New("search query is required (usage: cadence search <query> [--semantic] [--type notes|transcripts|meetings] [--limit N])")
 	}
 
 	var queryParts []string
 	searchType := ""
 	limit := 20
+	semantic := false
+	minScore := 0.0
 
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
+		case arg == "--semantic" || arg == "-s":
+			semantic = true
+		case (arg == "--min-score" || arg == "-m") && i+1 < len(args):
+			if parsed, err := strconv.ParseFloat(args[i+1], 64); err == nil {
+				minScore = parsed
+			}
+			i++
+		case strings.HasPrefix(arg, "--min-score="):
+			if parsed, err := strconv.ParseFloat(strings.TrimPrefix(arg, "--min-score="), 64); err == nil {
+				minScore = parsed
+			}
 		case (arg == "--type" || arg == "-t") && i+1 < len(args):
 			searchType = args[i+1]
 			i++
@@ -5447,6 +5476,8 @@ func cmdSearch(ctx context.Context, client ipc.Client, args []string, out io.Wri
 			if parsed, err := strconv.Atoi(strings.TrimPrefix(arg, "--limit=")); err == nil && parsed > 0 {
 				limit = parsed
 			}
+		case arg == "--index" || arg == "index":
+			return cmdIndexEmbeddings(ctx, client, args[i+1:], out)
 		default:
 			queryParts = append(queryParts, arg)
 		}
@@ -5454,7 +5485,7 @@ func cmdSearch(ctx context.Context, client ipc.Client, args []string, out io.Wri
 
 	query := strings.Join(queryParts, " ")
 	if strings.TrimSpace(query) == "" {
-		return errors.New("search query is required (usage: cadence search <query> [--type notes|transcripts|meetings] [--limit N])")
+		return errors.New("search query is required (usage: cadence search <query> [--semantic] [--type notes|transcripts|meetings] [--limit N])")
 	}
 
 	switch strings.ToLower(searchType) {
@@ -5472,6 +5503,12 @@ func cmdSearch(ctx context.Context, client ipc.Client, args []string, out io.Wri
 	}
 	if searchType != "" {
 		params["type"] = searchType
+	}
+	if semantic {
+		params["semantic"] = true
+		if minScore > 0 {
+			params["min_score"] = minScore
+		}
 	}
 
 	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -5493,7 +5530,11 @@ func cmdSearch(ctx context.Context, client ipc.Client, args []string, out io.Wri
 		return nil
 	}
 
-	fmt.Fprintf(out, "Search Results for %q (%d found):\n\n", query, len(results))
+	modeLabel := "Search"
+	if semantic {
+		modeLabel = "Semantic Search"
+	}
+	fmt.Fprintf(out, "%s Results for %q (%d found):\n\n", modeLabel, query, len(results))
 	for _, raw := range results {
 		r, ok := raw.(map[string]any)
 		if !ok {
@@ -5503,14 +5544,145 @@ func cmdSearch(ctx context.Context, client ipc.Client, args []string, out io.Wri
 		resType, _ := r["type"].(string)
 		title, _ := r["title"].(string)
 		snippet, _ := r["snippet"].(string)
+		score, hasScore := r["score"].(float64)
 
 		typeBadge := strings.ToUpper(resType)
-		fmt.Fprintf(out, "[%s] %s (%s)\n", typeBadge, title, id)
+		if hasScore && score > 0 {
+			pct := int(score * 100)
+			fmt.Fprintf(out, "[%s] [%d%% match] %s (%s)\n", typeBadge, pct, title, id)
+		} else {
+			fmt.Fprintf(out, "[%s] %s (%s)\n", typeBadge, title, id)
+		}
 		if snippet != "" {
 			fmt.Fprintf(out, "       %s\n", snippet)
 		}
 		fmt.Fprintln(out, "")
 	}
 
+	return nil
+}
+
+func cmdRelated(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("target id is required (usage: cadence related <id> [--type transcript|note|meeting] [--limit N])")
+	}
+
+	targetID := ""
+	targetType := "transcript"
+	limit := 5
+	minScore := 0.15
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case (arg == "--type" || arg == "-t") && i+1 < len(args):
+			targetType = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--type="):
+			targetType = strings.TrimPrefix(arg, "--type=")
+		case (arg == "--limit" || arg == "-n") && i+1 < len(args):
+			if parsed, err := strconv.Atoi(args[i+1]); err == nil && parsed > 0 {
+				limit = parsed
+			}
+			i++
+		case strings.HasPrefix(arg, "--limit="):
+			if parsed, err := strconv.Atoi(strings.TrimPrefix(arg, "--limit=")); err == nil && parsed > 0 {
+				limit = parsed
+			}
+		case (arg == "--min-score" || arg == "-m") && i+1 < len(args):
+			if parsed, err := strconv.ParseFloat(args[i+1], 64); err == nil {
+				minScore = parsed
+			}
+			i++
+		case strings.HasPrefix(arg, "--min-score="):
+			if parsed, err := strconv.ParseFloat(strings.TrimPrefix(arg, "--min-score="), 64); err == nil {
+				minScore = parsed
+			}
+		default:
+			if targetID == "" {
+				targetID = arg
+			}
+		}
+	}
+
+	if targetID == "" {
+		return errors.New("target id is required (usage: cadence related <id> [--type transcript|note|meeting] [--limit N])")
+	}
+
+	switch strings.ToLower(targetType) {
+	case "notes", "note":
+		targetType = "note"
+	case "transcripts", "transcript":
+		targetType = "transcript"
+	case "meetings", "meeting":
+		targetType = "meeting"
+	}
+
+	params := map[string]any{
+		"id":        targetID,
+		"type":      targetType,
+		"limit":     limit,
+		"min_score": minScore,
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	resp, err := client.Call(callCtx, "find_related", params)
+	if err != nil {
+		return fmt.Errorf("find related failed: %w", err)
+	}
+
+	resMap, ok := resp.(map[string]any)
+	if !ok {
+		return fmt.Errorf("unexpected response: %v", resp)
+	}
+
+	results, _ := resMap["results"].([]any)
+	if len(results) == 0 {
+		fmt.Fprintf(out, "No related items found for %s (%s).\n", targetID, targetType)
+		return nil
+	}
+
+	fmt.Fprintf(out, "Related Items for %s (%s) (%d found):\n\n", targetID, targetType, len(results))
+	for _, raw := range results {
+		r, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, _ := r["id"].(string)
+		resType, _ := r["type"].(string)
+		title, _ := r["title"].(string)
+		snippet, _ := r["snippet"].(string)
+		score, _ := r["score"].(float64)
+
+		pct := int(score * 100)
+		fmt.Fprintf(out, "[%s] [%d%% match] %s (%s)\n", strings.ToUpper(resType), pct, title, id)
+		if snippet != "" {
+			fmt.Fprintf(out, "       %s\n", snippet)
+		}
+		fmt.Fprintln(out, "")
+	}
+
+	return nil
+}
+
+func cmdIndexEmbeddings(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	resp, err := client.Call(callCtx, "index_embeddings", map[string]any{})
+	if err != nil {
+		return fmt.Errorf("index embeddings failed: %w", err)
+	}
+
+	resMap, ok := resp.(map[string]any)
+	if !ok {
+		return fmt.Errorf("unexpected index embeddings response: %v", resp)
+	}
+
+	indexed, _ := resMap["indexed"]
+	model, _ := resMap["model"].(string)
+	fmt.Fprintf(out, "Successfully indexed %v items using model %s.\n", indexed, model)
 	return nil
 }

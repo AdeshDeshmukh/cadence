@@ -32,6 +32,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/pipeline"
 	"github.com/AdeshDeshmukh/cadence/internal/polish"
 	"github.com/AdeshDeshmukh/cadence/internal/postprocess"
+	"github.com/AdeshDeshmukh/cadence/internal/search"
 	"github.com/AdeshDeshmukh/cadence/internal/selection"
 	"github.com/AdeshDeshmukh/cadence/internal/storage"
 	"github.com/AdeshDeshmukh/cadence/internal/system"
@@ -108,6 +109,7 @@ type App struct {
 	meetingMgr       *meeting.Manager
 	diarizer         diarize.Diarizer
 	knowledgeMgr     *knowledge.Manager
+	semanticEngine   *search.SemanticEngine
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -268,6 +270,11 @@ func WithDiarizer(d diarize.Diarizer) Option {
 // WithKnowledgeManager sets a custom personal knowledge base manager.
 func WithKnowledgeManager(km *knowledge.Manager) Option {
 	return func(a *App) { a.knowledgeMgr = km }
+}
+
+// WithSemanticEngine sets a custom semantic vector search engine.
+func WithSemanticEngine(se *search.SemanticEngine) Option {
+	return func(a *App) { a.semanticEngine = se }
 }
 
 // NewApp instantiates a fully configured Cadence daemon application.
@@ -516,6 +523,10 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 
 	if a.knowledgeMgr == nil {
 		a.knowledgeMgr = knowledge.NewManager(a.store)
+	}
+
+	if a.semanticEngine == nil && a.store != nil {
+		a.semanticEngine = search.NewSemanticEngine(a.store, search.NewLocalHashEmbedder(384))
 	}
 
 	if a.kernel == nil {
@@ -3105,6 +3116,12 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			return nil, errors.New("store not configured")
 		}
 		params, _ := req.Params.(map[string]any)
+		if isSem, ok := params["semantic"].(bool); ok && isSem {
+			reqCopy := req
+			reqCopy.Method = "semantic_search"
+			return a.Handle(ctx, reqCopy)
+		}
+
 		query, _ := params["query"].(string)
 		if query == "" {
 			query, _ = params["q"].(string)
@@ -3143,6 +3160,118 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			"query":   query,
 			"results": results,
 			"count":   len(results),
+		}, nil
+
+	case "semantic_search":
+		if a.semanticEngine == nil {
+			return nil, errors.New("semantic engine not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		query, _ := params["query"].(string)
+		if query == "" {
+			query, _ = params["q"].(string)
+		}
+		if strings.TrimSpace(query) == "" {
+			return nil, errors.New("missing query parameter")
+		}
+
+		opts := search.SemanticSearchOptions{}
+		if t, ok := params["type"].(string); ok && t != "" {
+			opts.Types = []storage.SearchResultType{storage.SearchResultType(t)}
+		} else if typesRaw, ok := params["types"].([]any); ok {
+			for _, item := range typesRaw {
+				if s, ok := item.(string); ok && s != "" {
+					opts.Types = append(opts.Types, storage.SearchResultType(s))
+				}
+			}
+		} else if typesSlice, ok := params["types"].([]string); ok {
+			for _, s := range typesSlice {
+				opts.Types = append(opts.Types, storage.SearchResultType(s))
+			}
+		}
+
+		if l, ok := params["limit"].(float64); ok {
+			opts.Limit = int(l)
+		} else if l, ok := params["limit"].(int); ok {
+			opts.Limit = l
+		}
+
+		if score, ok := params["min_score"].(float64); ok {
+			opts.MinScore = score
+		}
+
+		results, err := a.semanticEngine.Search(ctx, query, opts)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok":      true,
+			"query":   query,
+			"model":   a.semanticEngine.Embedder().ModelName(),
+			"results": results,
+			"count":   len(results),
+		}, nil
+
+	case "find_related", "related":
+		if a.semanticEngine == nil {
+			return nil, errors.New("semantic engine not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		targetID, _ := params["id"].(string)
+		if targetID == "" {
+			targetID, _ = params["target_id"].(string)
+		}
+		if targetID == "" {
+			targetID, _ = params["transcript_id"].(string)
+		}
+		if targetID == "" {
+			return nil, errors.New("missing id parameter")
+		}
+
+		targetType := storage.SearchResultTranscript
+		if t, ok := params["type"].(string); ok && t != "" {
+			targetType = storage.SearchResultType(t)
+		} else if t, ok := params["target_type"].(string); ok && t != "" {
+			targetType = storage.SearchResultType(t)
+		}
+
+		limit := 5
+		if l, ok := params["limit"].(float64); ok {
+			limit = int(l)
+		} else if l, ok := params["limit"].(int); ok {
+			limit = l
+		}
+
+		minScore := 0.15
+		if ms, ok := params["min_score"].(float64); ok {
+			minScore = ms
+		}
+
+		results, err := a.semanticEngine.FindRelated(ctx, targetType, targetID, limit, minScore)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok":          true,
+			"target_type": string(targetType),
+			"target_id":   targetID,
+			"model":       a.semanticEngine.Embedder().ModelName(),
+			"results":     results,
+			"count":       len(results),
+		}, nil
+
+	case "index_embeddings":
+		if a.semanticEngine == nil {
+			return nil, errors.New("semantic engine not configured")
+		}
+		indexed, err := a.semanticEngine.IndexAll(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok":      true,
+			"indexed": indexed,
+			"model":   a.semanticEngine.Embedder().ModelName(),
 		}, nil
 
 	default:

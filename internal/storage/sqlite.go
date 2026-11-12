@@ -2,9 +2,11 @@ package storage
 
 import (
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -267,6 +269,34 @@ END;
 INSERT INTO notes_fts(id, title, content) SELECT id, title, content FROM notes;
 INSERT INTO transcripts_fts(id, text, raw_text) SELECT id, text, raw_text FROM transcripts;
 INSERT INTO meeting_segments_fts(id, meeting_id, speaker, text) SELECT id, meeting_id, speaker, text FROM meeting_segments;
+`,
+	},
+	{
+		version: 10,
+		name:    "create_embeddings_table",
+		up: `
+CREATE TABLE IF NOT EXISTS embeddings (
+	target_type TEXT NOT NULL,
+	target_id TEXT NOT NULL,
+	model TEXT NOT NULL,
+	embedding BLOB NOT NULL,
+	updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (target_type, target_id, model)
+);
+
+CREATE INDEX IF NOT EXISTS idx_embeddings_type_model ON embeddings(target_type, model);
+
+CREATE TRIGGER IF NOT EXISTS notes_embeddings_ad AFTER DELETE ON notes BEGIN
+	DELETE FROM embeddings WHERE target_type = 'note' AND target_id = old.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS transcripts_embeddings_ad AFTER DELETE ON transcripts BEGIN
+	DELETE FROM embeddings WHERE target_type = 'transcript' AND target_id = old.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS meeting_segments_embeddings_ad AFTER DELETE ON meeting_segments BEGIN
+	DELETE FROM embeddings WHERE target_type = 'meeting_segment' AND target_id = old.id;
+END;
 `,
 	},
 }
@@ -1676,6 +1706,109 @@ func buildFTSQuery(raw string) string {
 		return `"` + raw + `"`
 	}
 	return strings.Join(tokens, " ")
+}
+
+// Float32SliceToBytes serializes a slice of float32 into little-endian binary bytes.
+func Float32SliceToBytes(vec []float32) []byte {
+	buf := make([]byte, len(vec)*4)
+	for i, f := range vec {
+		binary.LittleEndian.PutUint32(buf[i*4:], math.Float32bits(f))
+	}
+	return buf
+}
+
+// BytesToFloat32Slice deserializes little-endian binary bytes into a slice of float32.
+func BytesToFloat32Slice(b []byte) []float32 {
+	if len(b)%4 != 0 {
+		return nil
+	}
+	vec := make([]float32, len(b)/4)
+	for i := range vec {
+		vec[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:]))
+	}
+	return vec
+}
+
+// SaveEmbedding stores or updates an embedding vector for a target entity.
+func (s *SQLite) SaveEmbedding(rec EmbeddingRecord) error {
+	blob := Float32SliceToBytes(rec.Embedding)
+	query := `
+INSERT INTO embeddings(target_type, target_id, model, embedding, updated_at)
+VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+ON CONFLICT(target_type, target_id, model) DO UPDATE SET
+	embedding = excluded.embedding,
+	updated_at = CURRENT_TIMESTAMP;
+`
+	_, err := s.db.Exec(query, rec.TargetType, rec.TargetID, rec.Model, blob)
+	return err
+}
+
+// GetEmbedding fetches a single embedding record by target type, ID, and model.
+func (s *SQLite) GetEmbedding(targetType, targetID, model string) (*EmbeddingRecord, error) {
+	query := `SELECT target_type, target_id, model, embedding, updated_at FROM embeddings WHERE target_type = ? AND target_id = ? AND model = ?`
+	row := s.db.QueryRow(query, targetType, targetID, model)
+
+	var rec EmbeddingRecord
+	var blob []byte
+	var updatedAt time.Time
+	if err := row.Scan(&rec.TargetType, &rec.TargetID, &rec.Model, &blob, &updatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, errors.New("embedding not found")
+		}
+		return nil, err
+	}
+	rec.Embedding = BytesToFloat32Slice(blob)
+	rec.UpdatedAt = updatedAt
+	return &rec, nil
+}
+
+// ListEmbeddings lists stored embedding records, optionally filtered by target type and model.
+func (s *SQLite) ListEmbeddings(targetType, model string) ([]EmbeddingRecord, error) {
+	var query string
+	var args []any
+
+	if targetType != "" && model != "" {
+		query = `SELECT target_type, target_id, model, embedding, updated_at FROM embeddings WHERE target_type = ? AND model = ? ORDER BY updated_at DESC`
+		args = []any{targetType, model}
+	} else if targetType != "" {
+		query = `SELECT target_type, target_id, model, embedding, updated_at FROM embeddings WHERE target_type = ? ORDER BY updated_at DESC`
+		args = []any{targetType}
+	} else if model != "" {
+		query = `SELECT target_type, target_id, model, embedding, updated_at FROM embeddings WHERE model = ? ORDER BY updated_at DESC`
+		args = []any{model}
+	} else {
+		query = `SELECT target_type, target_id, model, embedding, updated_at FROM embeddings ORDER BY updated_at DESC`
+	}
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []EmbeddingRecord
+	for rows.Next() {
+		var rec EmbeddingRecord
+		var blob []byte
+		var updatedAt time.Time
+		if err := rows.Scan(&rec.TargetType, &rec.TargetID, &rec.Model, &blob, &updatedAt); err != nil {
+			return nil, err
+		}
+		rec.Embedding = BytesToFloat32Slice(blob)
+		rec.UpdatedAt = updatedAt
+		results = append(results, rec)
+	}
+	return results, rows.Err()
+}
+
+// DeleteEmbedding removes an embedding record. If model is empty, removes all models for the target.
+func (s *SQLite) DeleteEmbedding(targetType, targetID, model string) error {
+	if model != "" {
+		_, err := s.db.Exec(`DELETE FROM embeddings WHERE target_type = ? AND target_id = ? AND model = ?`, targetType, targetID, model)
+		return err
+	}
+	_, err := s.db.Exec(`DELETE FROM embeddings WHERE target_type = ? AND target_id = ?`, targetType, targetID)
+	return err
 }
 
 // Close releases the underlying SQLite database handle.

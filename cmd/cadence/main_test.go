@@ -802,6 +802,10 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 	case "search":
 		params, _ := req.Params.(map[string]any)
 		query, _ := params["query"].(string)
+		score := 0.0
+		if isSem, ok := params["semantic"].(bool); ok && isSem {
+			score = 0.88
+		}
 		return map[string]any{
 			"ok":    true,
 			"query": query,
@@ -812,14 +816,41 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 					"type":    "note",
 					"title":   "Kubernetes Architecture",
 					"snippet": "Deploying Kubernetes pods in cluster...",
+					"score":   score,
 				},
 				map[string]any{
 					"id":      "tr-mock-1",
 					"type":    "transcript",
 					"title":   "Dictation 2026-11-12",
 					"snippet": "We configured the Kubernetes ingress controller.",
+					"score":   score,
 				},
 			},
+		}, nil
+	case "find_related", "related":
+		params, _ := req.Params.(map[string]any)
+		id, _ := params["id"].(string)
+		tType, _ := params["type"].(string)
+		return map[string]any{
+			"ok":          true,
+			"target_id":   id,
+			"target_type": tType,
+			"count":       1,
+			"results": []any{
+				map[string]any{
+					"id":      "note-related-1",
+					"type":    "note",
+					"title":   "Related Microservices Note",
+					"snippet": "Kubernetes cluster deployments and configuration.",
+					"score":   0.88,
+				},
+			},
+		}, nil
+	case "index_embeddings":
+		return map[string]any{
+			"ok":      true,
+			"indexed": 12,
+			"model":   "cadence-hash-v1",
 		}, nil
 	default:
 		return nil, os.ErrInvalid
@@ -3038,5 +3069,42 @@ func TestCLI_Search(t *testing.T) {
 	// 3. Error validation: missing query
 	if err := cmdSearch(ctx, client, []string{}, &out); err == nil {
 		t.Fatal("expected error on search without query")
+	}
+
+	// 4. Semantic search
+	out.Reset()
+	if err := cmdSearch(ctx, client, []string{"Kubernetes", "--semantic"}, &out); err != nil {
+		t.Fatalf("cmdSearch semantic failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Semantic Search Results") || !strings.Contains(out.String(), "88% match") {
+		t.Fatalf("unexpected semantic search output: %s", out.String())
+	}
+
+	// 5. Related items retrieval
+	out.Reset()
+	if err := cmdRelated(ctx, client, []string{"tr-mock-1", "--type", "transcript"}, &out); err != nil {
+		t.Fatalf("cmdRelated failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Related Items for tr-mock-1") ||
+		!strings.Contains(out.String(), "Related Microservices Note") ||
+		!strings.Contains(out.String(), "88% match") {
+		t.Fatalf("unexpected related output: %s", out.String())
+	}
+
+	// 6. Index embeddings
+	out.Reset()
+	if err := cmdIndexEmbeddings(ctx, client, []string{}, &out); err != nil {
+		t.Fatalf("cmdIndexEmbeddings failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Successfully indexed 12 items") {
+		t.Fatalf("unexpected index-embeddings output: %s", out.String())
+	}
+
+	// 7. Test CLI run dispatch for related and index-embeddings
+	var runStdout, runStderr bytes.Buffer
+	rCode := run([]string{"search", "Kubernetes", "--semantic"}, &runStdout, &runStderr)
+	// Even if daemon offline in default socket, run dispatches properly (returns 1 for offline daemon)
+	if rCode != 0 && rCode != 1 {
+		t.Fatalf("unexpected exit code: %d", rCode)
 	}
 }

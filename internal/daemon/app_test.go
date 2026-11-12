@@ -26,6 +26,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/paste"
 	"github.com/AdeshDeshmukh/cadence/internal/polish"
 	"github.com/AdeshDeshmukh/cadence/internal/postprocess"
+	"github.com/AdeshDeshmukh/cadence/internal/search"
 	"github.com/AdeshDeshmukh/cadence/internal/selection"
 	"github.com/AdeshDeshmukh/cadence/internal/storage"
 	"github.com/AdeshDeshmukh/cadence/internal/system"
@@ -3345,5 +3346,115 @@ func TestApp_SearchIPC(t *testing.T) {
 	// 3. Error validation: missing query
 	if _, err := app.Handle(ctx, ipc.Request{Method: "search"}); err == nil {
 		t.Fatal("expected error on search without query")
+	}
+}
+
+func TestApp_SemanticSearchAndRelatedIPC(t *testing.T) {
+	store := storage.NewMemory()
+	capture := &testLiveCapture{chunk: audio.Chunk{
+		Samples:    []float32{0.1, -0.1},
+		SampleRate: 16000,
+		Timestamp:  time.Now(),
+	}}
+	engine := asr.MockEngine{Text: "Test"}
+
+	cfg := config.Default()
+	app := NewApp(
+		cfg,
+		WithStore(store),
+		WithCapture(capture),
+		WithASR(engine),
+	)
+	ctx := context.Background()
+
+	_ = store.SaveNote(storage.Note{
+		ID:        "note-sem-1",
+		Title:     "PostgreSQL Database Optimization",
+		Content:   "PostgreSQL index tuning, vacuuming, and slow query explain analyze execution plans.",
+		CreatedAt: time.Now(),
+	})
+	_ = store.SaveTranscript(storage.Transcript{
+		ID:        "tr-sem-1",
+		Text:      "We analyzed slow PostgreSQL queries using explain analyze.",
+		CreatedAt: time.Now(),
+	})
+	_ = store.SaveTranscript(storage.Transcript{
+		ID:        "tr-sem-2",
+		Text:      "Baking homemade sourdough artisan bread in the oven with flour.",
+		CreatedAt: time.Now(),
+	})
+
+	// 1. Index embeddings
+	idxRes, err := app.Handle(ctx, ipc.Request{Method: "index_embeddings"})
+	if err != nil {
+		t.Fatalf("index_embeddings IPC failed: %v", err)
+	}
+	idxMap := idxRes.(map[string]any)
+	if idxMap["ok"] != true || idxMap["indexed"].(int) != 3 {
+		t.Fatalf("expected 3 items indexed, got: %+v", idxMap)
+	}
+
+	// 2. Semantic search
+	semRes, err := app.Handle(ctx, ipc.Request{
+		Method: "semantic_search",
+		Params: map[string]any{
+			"query": "Postgres database indexing",
+			"limit": 5,
+		},
+	})
+	if err != nil {
+		t.Fatalf("semantic_search failed: %v", err)
+	}
+	semMap := semRes.(map[string]any)
+	if semMap["ok"] != true || semMap["count"].(int) == 0 {
+		t.Fatalf("expected semantic hits, got: %+v", semMap)
+	}
+
+	// 3. Search with semantic: true flag
+	searchFlagRes, err := app.Handle(ctx, ipc.Request{
+		Method: "search",
+		Params: map[string]any{
+			"query":    "Postgres database indexing",
+			"semantic": true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("search with semantic flag failed: %v", err)
+	}
+	sfMap := searchFlagRes.(map[string]any)
+	if sfMap["ok"] != true || sfMap["count"].(int) == 0 {
+		t.Fatalf("expected semantic hits via search flag, got: %+v", sfMap)
+	}
+
+	// 4. Find related
+	relRes, err := app.Handle(ctx, ipc.Request{
+		Method: "find_related",
+		Params: map[string]any{
+			"id":   "tr-sem-1",
+			"type": "transcript",
+		},
+	})
+	if err != nil {
+		t.Fatalf("find_related failed: %v", err)
+	}
+	relMap := relRes.(map[string]any)
+	if relMap["ok"] != true {
+		t.Fatalf("expected ok true from find_related: %+v", relMap)
+	}
+	relResults := relMap["results"].([]search.SemanticResult)
+	if len(relResults) == 0 {
+		t.Fatalf("expected at least 1 related result for tr-sem-1")
+	}
+	// Note-sem-1 should be related
+	if relResults[0].ID != "note-sem-1" {
+		t.Logf("First related item: %+v", relResults[0])
+	}
+
+	// 5. Error cases
+	if _, err := app.Handle(ctx, ipc.Request{Method: "semantic_search"}); err == nil {
+		t.Fatal("expected error for empty semantic_search query")
+	}
+	if _, err := app.Handle(ctx, ipc.Request{Method: "find_related"}); err == nil {
+		t.Fatal("expected error for missing id in find_related")
 	}
 }

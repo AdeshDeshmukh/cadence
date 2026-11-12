@@ -172,8 +172,18 @@ type SearchFilter struct {
 	Limit int                `json:"limit,omitempty"`
 }
 
+// EmbeddingRecord represents a stored vector embedding for a target entity.
+type EmbeddingRecord struct {
+	TargetType string    `json:"target_type"` // "transcript", "note", "meeting_segment"
+	TargetID   string    `json:"target_id"`
+	Model      string    `json:"model"`
+	Embedding  []float32 `json:"embedding"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
 type Store interface {
 	SaveTranscript(Transcript) error
+	GetTranscript(id string) (*Transcript, error)
 	ListTranscripts(int) ([]Transcript, error)
 	SetVocabulary(VocabularyEntry) error
 	Vocabulary() ([]VocabularyEntry, error)
@@ -224,4 +234,10 @@ type Store interface {
 
 	// Full-text search
 	Search(query string, filter SearchFilter) ([]SearchResult, error)
+
+	// Embeddings & Semantic Search
+	SaveEmbedding(EmbeddingRecord) error
+	GetEmbedding(targetType, targetID, model string) (*EmbeddingRecord, error)
+	ListEmbeddings(targetType, model string) ([]EmbeddingRecord, error)
+	DeleteEmbedding(targetType, targetID, model string) error
 }

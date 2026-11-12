@@ -287,3 +287,53 @@ func TestMemoryStore_Search(t *testing.T) {
 		t.Fatalf("expected 1 note hit, got %d", len(notesOnly))
 	}
 }
+
+func TestMemoryStore_Embeddings(t *testing.T) {
+	mem := storage.NewMemory()
+
+	// Get non-existent transcript
+	_, err := mem.GetTranscript("missing")
+	if err == nil {
+		t.Fatalf("expected error for missing transcript")
+	}
+
+	tr := storage.Transcript{
+		ID:        "tr-mem-get",
+		Text:      "Found text.",
+		CreatedAt: time.Now(),
+	}
+	_ = mem.SaveTranscript(tr)
+	found, err := mem.GetTranscript("tr-mem-get")
+	if err != nil || found.Text != "Found text." {
+		t.Fatalf("GetTranscript failed: %v, got: %+v", err, found)
+	}
+
+	// Embeddings Save, Get, List, Delete
+	rec1 := storage.EmbeddingRecord{
+		TargetType: "transcript",
+		TargetID:   "tr-mem-get",
+		Model:      "hash-v1",
+		Embedding:  []float32{0.1, 0.2, 0.3},
+	}
+	if err := mem.SaveEmbedding(rec1); err != nil {
+		t.Fatalf("SaveEmbedding failed: %v", err)
+	}
+
+	got, err := mem.GetEmbedding("transcript", "tr-mem-get", "hash-v1")
+	if err != nil || len(got.Embedding) != 3 {
+		t.Fatalf("GetEmbedding failed: %v", err)
+	}
+
+	list, err := mem.ListEmbeddings("transcript", "hash-v1")
+	if err != nil || len(list) != 1 {
+		t.Fatalf("ListEmbeddings failed: %v, got %d", err, len(list))
+	}
+
+	if err := mem.DeleteEmbedding("transcript", "tr-mem-get", "hash-v1"); err != nil {
+		t.Fatalf("DeleteEmbedding failed: %v", err)
+	}
+	_, err = mem.GetEmbedding("transcript", "tr-mem-get", "hash-v1")
+	if err == nil {
+		t.Fatalf("expected embedding to be deleted")
+	}
+}

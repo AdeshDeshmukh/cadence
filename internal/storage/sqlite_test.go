@@ -1080,3 +1080,121 @@ func TestSQLite_Search(t *testing.T) {
 		t.Fatalf("expected 0 hits for non-match, got: %+v, err: %v", noMatch, err)
 	}
 }
+
+func TestSQLite_Embeddings(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open(:memory:) failed: %v", err)
+	}
+	defer s.Close()
+
+	// Test float32 roundtrip
+	vecOriginal := []float32{0.123, -0.456, 1.0, 0.0, -1.0}
+	bytes := Float32SliceToBytes(vecOriginal)
+	vecRestored := BytesToFloat32Slice(bytes)
+	if len(vecRestored) != len(vecOriginal) {
+		t.Fatalf("expected len %d, got %d", len(vecOriginal), len(vecRestored))
+	}
+	for i := range vecOriginal {
+		if vecOriginal[i] != vecRestored[i] {
+			t.Fatalf("vec mismatch at %d: %v vs %v", i, vecOriginal[i], vecRestored[i])
+		}
+	}
+
+	// Test SaveEmbedding and GetEmbedding
+	rec1 := EmbeddingRecord{
+		TargetType: "transcript",
+		TargetID:   "tr-100",
+		Model:      "test-model",
+		Embedding:  []float32{0.5, 0.5, -0.5},
+	}
+	if err := s.SaveEmbedding(rec1); err != nil {
+		t.Fatalf("SaveEmbedding failed: %v", err)
+	}
+
+	got, err := s.GetEmbedding("transcript", "tr-100", "test-model")
+	if err != nil {
+		t.Fatalf("GetEmbedding failed: %v", err)
+	}
+	if got.TargetID != "tr-100" || got.Model != "test-model" || len(got.Embedding) != 3 {
+		t.Fatalf("unexpected embedding got: %+v", got)
+	}
+
+	// Upsert / update
+	rec1Updated := EmbeddingRecord{
+		TargetType: "transcript",
+		TargetID:   "tr-100",
+		Model:      "test-model",
+		Embedding:  []float32{0.9, 0.1, 0.0},
+	}
+	if err := s.SaveEmbedding(rec1Updated); err != nil {
+		t.Fatalf("update SaveEmbedding failed: %v", err)
+	}
+	gotUpdated, err := s.GetEmbedding("transcript", "tr-100", "test-model")
+	if err != nil {
+		t.Fatalf("GetEmbedding after update failed: %v", err)
+	}
+	if gotUpdated.Embedding[0] != 0.9 {
+		t.Fatalf("expected updated embedding 0.9, got %v", gotUpdated.Embedding[0])
+	}
+
+	// Add second record
+	rec2 := EmbeddingRecord{
+		TargetType: "note",
+		TargetID:   "note-200",
+		Model:      "test-model",
+		Embedding:  []float32{0.1, 0.2, 0.3},
+	}
+	if err := s.SaveEmbedding(rec2); err != nil {
+		t.Fatalf("SaveEmbedding rec2: %v", err)
+	}
+
+	// List by model
+	allModel, err := s.ListEmbeddings("", "test-model")
+	if err != nil || len(allModel) != 2 {
+		t.Fatalf("expected 2 embeddings for model, got: %d (err: %v)", len(allModel), err)
+	}
+
+	// List by target type
+	notesOnly, err := s.ListEmbeddings("note", "")
+	if err != nil || len(notesOnly) != 1 {
+		t.Fatalf("expected 1 note embedding, got: %d (err: %v)", len(notesOnly), err)
+	}
+
+	// Delete embedding
+	if err := s.DeleteEmbedding("transcript", "tr-100", "test-model"); err != nil {
+		t.Fatalf("DeleteEmbedding failed: %v", err)
+	}
+	_, err = s.GetEmbedding("transcript", "tr-100", "test-model")
+	if err == nil {
+		t.Fatalf("expected error for deleted embedding, got nil")
+	}
+
+	// Test cascade delete when parent transcript is deleted
+	tr := Transcript{
+		ID:        "tr-cascade",
+		Text:      "cascade test",
+		CreatedAt: time.Now(),
+	}
+	if err := s.SaveTranscript(tr); err != nil {
+		t.Fatalf("SaveTranscript: %v", err)
+	}
+	if err := s.SaveEmbedding(EmbeddingRecord{
+		TargetType: "transcript",
+		TargetID:   "tr-cascade",
+		Model:      "test-model",
+		Embedding:  []float32{1.0, 2.0},
+	}); err != nil {
+		t.Fatalf("SaveEmbedding for cascade test: %v", err)
+	}
+
+	// Delete from transcripts table
+	if _, err := s.db.Exec("DELETE FROM transcripts WHERE id = ?", "tr-cascade"); err != nil {
+		t.Fatalf("delete transcript: %v", err)
+	}
+	// Verify embedding trigger deleted it
+	_, err = s.GetEmbedding("transcript", "tr-cascade", "test-model")
+	if err == nil {
+		t.Fatalf("expected embedding to be cascade-deleted")
+	}
+}
