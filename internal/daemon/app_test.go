@@ -3131,3 +3131,152 @@ func TestApp_MeetingSummaryIPC(t *testing.T) {
 		t.Fatal("expected error on meeting_summary_get without id")
 	}
 }
+
+func TestApp_KnowledgeBaseIPC(t *testing.T) {
+	store := storage.NewMemory()
+	capture := &testLiveCapture{chunk: audio.Chunk{
+		Samples:    []float32{0.1, -0.1},
+		SampleRate: 16000,
+		Timestamp:  time.Now(),
+	}}
+	engine := asr.MockEngine{Text: "Test"}
+
+	cfg := config.Default()
+	app := NewApp(
+		cfg,
+		WithStore(store),
+		WithCapture(capture),
+		WithASR(engine),
+	)
+	ctx := context.Background()
+
+	// 1. folder_save
+	fRes, err := app.Handle(ctx, ipc.Request{
+		Method: "folder_save",
+		Params: map[string]any{
+			"name": "Design Docs",
+		},
+	})
+	if err != nil {
+		t.Fatalf("folder_save failed: %v", err)
+	}
+	fMap := fRes.(map[string]any)
+	folder := fMap["folder"].(*storage.Folder)
+	if folder.Name != "Design Docs" {
+		t.Errorf("expected folder name 'Design Docs', got %q", folder.Name)
+	}
+
+	// 2. folder_list
+	flRes, err := app.Handle(ctx, ipc.Request{Method: "folder_list"})
+	if err != nil {
+		t.Fatalf("folder_list failed: %v", err)
+	}
+	flMap := flRes.(map[string]any)
+	if flMap["count"] != 1 {
+		t.Errorf("expected 1 folder, got %v", flMap["count"])
+	}
+
+	// 3. note_save
+	nRes, err := app.Handle(ctx, ipc.Request{
+		Method: "note_save",
+		Params: map[string]any{
+			"title":   "V1 Architecture",
+			"content": "# V1 Architecture\n\nInitial draft of system design.",
+			"folder":  folder.ID,
+			"tags":    []any{"v1", "design"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("note_save failed: %v", err)
+	}
+	nMap := nRes.(map[string]any)
+	note := nMap["note"].(*storage.Note)
+	if note.Title != "V1 Architecture" || len(note.Tags) != 2 {
+		t.Fatalf("unexpected note saved: %+v", note)
+	}
+
+	// 4. note_get
+	ngRes, err := app.Handle(ctx, ipc.Request{
+		Method: "note_get",
+		Params: map[string]any{"id": note.ID},
+	})
+	if err != nil {
+		t.Fatalf("note_get failed: %v", err)
+	}
+	ngMap := ngRes.(map[string]any)
+	gotNote := ngMap["note"].(*storage.Note)
+	if gotNote.ID != note.ID {
+		t.Errorf("expected note ID %s, got %s", note.ID, gotNote.ID)
+	}
+
+	// 5. note_list
+	nlRes, err := app.Handle(ctx, ipc.Request{
+		Method: "note_list",
+		Params: map[string]any{"tag": "design"},
+	})
+	if err != nil {
+		t.Fatalf("note_list failed: %v", err)
+	}
+	nlMap := nlRes.(map[string]any)
+	if nlMap["count"] != 1 {
+		t.Errorf("expected 1 note in list, got %v", nlMap["count"])
+	}
+
+	// 6. tag_list
+	tlRes, err := app.Handle(ctx, ipc.Request{Method: "tag_list"})
+	if err != nil {
+		t.Fatalf("tag_list failed: %v", err)
+	}
+	tlMap := tlRes.(map[string]any)
+	if tlMap["count"] != 2 {
+		t.Errorf("expected 2 tags, got %v", tlMap["count"])
+	}
+
+	// 7. note_from_meeting
+	mtgID := "mtg-kb-test"
+	_ = store.SaveMeeting(storage.Meeting{
+		ID:        mtgID,
+		Title:     "Design Review",
+		State:     "stopped",
+		CreatedAt: time.Now(),
+	})
+	_ = store.SaveMeetingSegment(storage.MeetingSegment{
+		ID:           "seg-1",
+		MeetingID:    mtgID,
+		SegmentIndex: 0,
+		Text:         "Reviewed the design.",
+		Speaker:      "Alice",
+		CreatedAt:    time.Now(),
+	})
+	nfmRes, err := app.Handle(ctx, ipc.Request{
+		Method: "note_from_meeting",
+		Params: map[string]any{
+			"meeting_id": mtgID,
+			"folder":     "Meetings",
+		},
+	})
+	if err != nil {
+		t.Fatalf("note_from_meeting failed: %v", err)
+	}
+	nfmMap := nfmRes.(map[string]any)
+	mtgNote := nfmMap["note"].(*storage.Note)
+	if mtgNote.MeetingID != mtgID {
+		t.Errorf("expected meeting ID %s, got %s", mtgID, mtgNote.MeetingID)
+	}
+
+	// 8. note_delete
+	if _, err := app.Handle(ctx, ipc.Request{
+		Method: "note_delete",
+		Params: map[string]any{"id": note.ID},
+	}); err != nil {
+		t.Fatalf("note_delete failed: %v", err)
+	}
+
+	// 9. folder_delete
+	if _, err := app.Handle(ctx, ipc.Request{
+		Method: "folder_delete",
+		Params: map[string]any{"id": folder.ID},
+	}); err != nil {
+		t.Fatalf("folder_delete failed: %v", err)
+	}
+}
