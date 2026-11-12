@@ -852,6 +852,35 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 			"indexed": 12,
 			"model":   "cadence-hash-v1",
 		}, nil
+	case "export":
+		params, _ := req.Params.(map[string]any)
+		tType, _ := params["type"].(string)
+		id, _ := params["id"].(string)
+		format, _ := params["format"].(string)
+		return map[string]any{
+			"ok":      true,
+			"type":    tType,
+			"id":      id,
+			"format":  format,
+			"content": "# Exported Meeting: " + id + "\n\n**Alice:** Standup notes.\n",
+			"bytes":   45,
+		}, nil
+	case "import_file", "import":
+		params, _ := req.Params.(map[string]any)
+		p, _ := params["path"].(string)
+		title, _ := params["title"].(string)
+		if title == "" {
+			title = filepath.Base(p)
+		}
+		return map[string]any{
+			"ok": true,
+			"meeting": map[string]any{
+				"id":    "mtg-imp-mock",
+				"title": title,
+			},
+			"segments_count": 4,
+			"speakers_count": 2,
+		}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -3106,5 +3135,56 @@ func TestCLI_Search(t *testing.T) {
 	// Even if daemon offline in default socket, run dispatches properly (returns 1 for offline daemon)
 	if rCode != 0 && rCode != 1 {
 		t.Fatalf("unexpected exit code: %d", rCode)
+	}
+}
+
+func TestCLI_ExportAndImport(t *testing.T) {
+	sock := filepath.Join(os.TempDir(), fmt.Sprintf("cad_expimp_%d.sock", time.Now().UnixNano()))
+	stop := startMockDaemon(t, sock)
+	defer stop()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sock,
+	}
+	ctx := context.Background()
+
+	// 1. Export stdout
+	var out bytes.Buffer
+	if err := cmdExport(ctx, client, []string{"meeting", "mtg-001", "--format", "markdown"}, &out); err != nil {
+		t.Fatalf("cmdExport stdout failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Exported Meeting: mtg-001") || !strings.Contains(out.String(), "Alice") {
+		t.Fatalf("unexpected export stdout: %s", out.String())
+	}
+
+	// 2. Export with file output flag
+	out.Reset()
+	if err := cmdExport(ctx, client, []string{"meeting", "mtg-001", "--format", "srt", "--output", "/tmp/mtg.srt"}, &out); err != nil {
+		t.Fatalf("cmdExport with output flag failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Successfully exported meeting mtg-001 to /tmp/mtg.srt") {
+		t.Fatalf("unexpected export file output message: %s", out.String())
+	}
+
+	// 3. Export validation errors
+	if err := cmdExport(ctx, client, []string{}, &out); err == nil {
+		t.Fatal("expected error on export without args")
+	}
+
+	// 4. Import media/subtitles
+	out.Reset()
+	if err := cmdImport(ctx, client, []string{"/tmp/recording.mp4", "--title", "Team Sync"}, &out); err != nil {
+		t.Fatalf("cmdImport failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Successfully imported recording.mp4") ||
+		!strings.Contains(out.String(), "Team Sync") ||
+		!strings.Contains(out.String(), "Segments:") {
+		t.Fatalf("unexpected import output: %s", out.String())
+	}
+
+	// 5. Import validation errors
+	if err := cmdImport(ctx, client, []string{}, &out); err == nil {
+		t.Fatal("expected error on import without args")
 	}
 }

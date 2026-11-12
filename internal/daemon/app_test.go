@@ -3458,3 +3458,150 @@ func TestApp_SemanticSearchAndRelatedIPC(t *testing.T) {
 		t.Fatal("expected error for missing id in find_related")
 	}
 }
+
+func TestApp_ExportAndImportIPC(t *testing.T) {
+	store := storage.NewMemory()
+	capture := &testLiveCapture{chunk: audio.Chunk{
+		Samples:    []float32{0.1, -0.1},
+		SampleRate: 16000,
+		Timestamp:  time.Now(),
+	}}
+	engine := asr.MockEngine{Text: "Test"}
+
+	cfg := config.Default()
+	app := NewApp(
+		cfg,
+		WithStore(store),
+		WithCapture(capture),
+		WithASR(engine),
+	)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	mtgID := "mtg-ipc-exp"
+	_ = store.SaveMeeting(storage.Meeting{
+		ID:         mtgID,
+		Title:      "Quarterly Roadmap",
+		DurationMs: 60000,
+		CreatedAt:  now,
+	})
+	_ = store.SetMeetingSpeaker(storage.MeetingSpeaker{
+		MeetingID: mtgID,
+		SpeakerID: "SPEAKER_00",
+		Name:      "Alice",
+		UpdatedAt: now,
+	})
+	_ = store.SaveMeetingSegment(storage.MeetingSegment{
+		ID:           "seg-exp-1",
+		MeetingID:    mtgID,
+		SegmentIndex: 0,
+		StartMs:      1000,
+		EndMs:        4000,
+		Speaker:      "SPEAKER_00",
+		Text:         "Welcome to the quarterly roadmap review.",
+		CreatedAt:    now,
+	})
+	_ = store.SaveMeetingSummary(storage.MeetingSummary{
+		MeetingID: mtgID,
+		Overview:  "High level review of Q1 deliverables.",
+		Topics:    []string{"Roadmap goals", "Hiring plan"},
+		ActionItems: []storage.ActionItem{
+			{ID: "act-1", Description: "Finalize budget", Assignee: "Alice"},
+		},
+		Decisions: []string{"Approved new engine roadmap"},
+		CreatedAt: now,
+	})
+
+	// 1. Export Markdown
+	expMdRes, err := app.Handle(ctx, ipc.Request{
+		Method: "export",
+		Params: map[string]any{
+			"id":     mtgID,
+			"type":   "meeting",
+			"format": "markdown",
+		},
+	})
+	if err != nil {
+		t.Fatalf("export markdown IPC failed: %v", err)
+	}
+	mdMap := expMdRes.(map[string]any)
+	if mdMap["ok"] != true {
+		t.Fatalf("expected ok true in export: %+v", mdMap)
+	}
+	content := mdMap["content"].(string)
+	if !strings.Contains(content, "# Quarterly Roadmap") || !strings.Contains(content, "Alice") {
+		t.Fatalf("unexpected markdown content: %s", content)
+	}
+
+	// 2. Export SRT to file
+	tempDir := t.TempDir()
+	outSRTPath := filepath.Join(tempDir, "roadmap.srt")
+	expSrtRes, err := app.Handle(ctx, ipc.Request{
+		Method: "export",
+		Params: map[string]any{
+			"id":          mtgID,
+			"type":        "meeting",
+			"format":      "srt",
+			"output_path": outSRTPath,
+		},
+	})
+	if err != nil {
+		t.Fatalf("export srt IPC failed: %v", err)
+	}
+	srtMap := expSrtRes.(map[string]any)
+	if srtMap["ok"] != true {
+		t.Fatalf("expected ok in srt export: %+v", srtMap)
+	}
+	fileBytes, err := os.ReadFile(outSRTPath)
+	if err != nil || !strings.Contains(string(fileBytes), "00:00:01,000 --> 00:00:04,000") {
+		t.Fatalf("written SRT file invalid: %s (err: %v)", string(fileBytes), err)
+	}
+
+	// 3. Import SRT file via import_file IPC
+	impRes, err := app.Handle(ctx, ipc.Request{
+		Method: "import_file",
+		Params: map[string]any{
+			"path":  outSRTPath,
+			"title": "Imported Roadmap Subtitles",
+		},
+	})
+	if err != nil {
+		t.Fatalf("import_file failed: %v", err)
+	}
+	impMap := impRes.(map[string]any)
+	if impMap["ok"] != true || impMap["segments_count"].(int) != 1 {
+		t.Fatalf("unexpected import result: %+v", impMap)
+	}
+
+	// 4. Export Note
+	noteID := "note-exp-1"
+	_ = store.SaveNote(storage.Note{
+		ID:        noteID,
+		Title:     "API Guidelines",
+		Content:   "Standardize on REST and JSON-RPC.",
+		CreatedAt: now,
+	})
+	noteExpRes, err := app.Handle(ctx, ipc.Request{
+		Method: "export",
+		Params: map[string]any{
+			"id":     noteID,
+			"type":   "note",
+			"format": "markdown",
+		},
+	})
+	if err != nil {
+		t.Fatalf("export note failed: %v", err)
+	}
+	neMap := noteExpRes.(map[string]any)
+	if !strings.Contains(neMap["content"].(string), "API Guidelines") {
+		t.Fatalf("unexpected note export: %+v", neMap)
+	}
+
+	// 5. Error validations
+	if _, err := app.Handle(ctx, ipc.Request{Method: "export"}); err == nil {
+		t.Fatal("expected error on export without id")
+	}
+	if _, err := app.Handle(ctx, ipc.Request{Method: "import_file"}); err == nil {
+		t.Fatal("expected error on import without path")
+	}
+}
