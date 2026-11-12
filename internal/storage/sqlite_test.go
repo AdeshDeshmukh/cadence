@@ -969,3 +969,114 @@ func TestSQLite_KnowledgeBase(t *testing.T) {
 		t.Fatalf("expected only golang tag remaining, got %+v", n1AfterTagDel.Tags)
 	}
 }
+
+func TestSQLite_Search(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer s.Close()
+
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// 1. Populate Note
+	note := Note{
+		ID:        "note-search-1",
+		Title:     "Kubernetes Deployment",
+		Content:   "Deploying the microservices using Helm charts and ingress controllers.",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := s.SaveNote(note); err != nil {
+		t.Fatalf("SaveNote: %v", err)
+	}
+
+	// 2. Populate Transcript
+	tr := Transcript{
+		ID:          "tr-search-1",
+		RawText:     "kubernetes cluster provisioning",
+		Text:        "Kubernetes cluster provisioning was successful today.",
+		Language:    "en",
+		Mode:        "dictation",
+		Application: "terminal",
+		CreatedAt:   now.Add(1 * time.Second),
+	}
+	if err := s.SaveTranscript(tr); err != nil {
+		t.Fatalf("SaveTranscript: %v", err)
+	}
+
+	// 3. Populate Meeting & Segment
+	mtg := Meeting{
+		ID:        "mtg-search-1",
+		Title:     "Infrastructure Sync",
+		State:     "stopped",
+		CreatedAt: now.Add(2 * time.Second),
+	}
+	if err := s.SaveMeeting(mtg); err != nil {
+		t.Fatalf("SaveMeeting: %v", err)
+	}
+	seg := MeetingSegment{
+		ID:           "seg-search-1",
+		MeetingID:    mtg.ID,
+		SegmentIndex: 0,
+		Text:         "We discussed scaling our Kubernetes nodes.",
+		Speaker:      "Alice",
+		CreatedAt:    now.Add(2 * time.Second),
+	}
+	if err := s.SaveMeetingSegment(seg); err != nil {
+		t.Fatalf("SaveMeetingSegment: %v", err)
+	}
+
+	// Test 1: Global search for "Kubernetes"
+	res, err := s.Search("Kubernetes", SearchFilter{})
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+	if len(res) != 3 {
+		t.Fatalf("expected 3 search hits across note, transcript, meeting; got %d: %+v", len(res), res)
+	}
+
+	// Verify each type is represented
+	types := make(map[SearchResultType]bool)
+	for _, r := range res {
+		types[r.Type] = true
+		if r.Snippet == "" {
+			t.Errorf("expected snippet for %s (%s)", r.ID, r.Type)
+		}
+	}
+	if !types[SearchResultNote] || !types[SearchResultTranscript] || !types[SearchResultMeeting] {
+		t.Errorf("expected all 3 result types, got: %+v", types)
+	}
+
+	// Test 2: Filter by type = note
+	noteOnly, err := s.Search("Kubernetes", SearchFilter{
+		Types: []SearchResultType{SearchResultNote},
+	})
+	if err != nil {
+		t.Fatalf("Search notes only: %v", err)
+	}
+	if len(noteOnly) != 1 || noteOnly[0].ID != "note-search-1" {
+		t.Fatalf("expected 1 note hit, got: %+v", noteOnly)
+	}
+
+	// Test 3: Phrase match "Helm charts"
+	phraseRes, err := s.Search(`"Helm charts"`, SearchFilter{})
+	if err != nil {
+		t.Fatalf("Search phrase failed: %v", err)
+	}
+	if len(phraseRes) != 1 || phraseRes[0].ID != "note-search-1" {
+		t.Fatalf("expected 1 hit for phrase, got: %+v", phraseRes)
+	}
+
+	// Test 4: Empty query returns empty slice
+	emptyRes, err := s.Search("", SearchFilter{})
+	if err != nil || len(emptyRes) != 0 {
+		t.Fatalf("expected 0 hits for empty query, got: %+v, err: %v", emptyRes, err)
+	}
+
+	// Test 5: No match
+	noMatch, err := s.Search("nonexistent_keyword_xyz", SearchFilter{})
+	if err != nil || len(noMatch) != 0 {
+		t.Fatalf("expected 0 hits for non-match, got: %+v, err: %v", noMatch, err)
+	}
+}

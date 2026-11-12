@@ -3280,3 +3280,70 @@ func TestApp_KnowledgeBaseIPC(t *testing.T) {
 		t.Fatalf("folder_delete failed: %v", err)
 	}
 }
+
+func TestApp_SearchIPC(t *testing.T) {
+	store := storage.NewMemory()
+	capture := &testLiveCapture{chunk: audio.Chunk{
+		Samples:    []float32{0.1, -0.1},
+		SampleRate: 16000,
+		Timestamp:  time.Now(),
+	}}
+	engine := asr.MockEngine{Text: "Test"}
+
+	cfg := config.Default()
+	app := NewApp(
+		cfg,
+		WithStore(store),
+		WithCapture(capture),
+		WithASR(engine),
+	)
+	ctx := context.Background()
+
+	_ = store.SaveNote(storage.Note{
+		ID:        "note-ipc-1",
+		Title:     "GraphQL API Spec",
+		Content:   "Schema definition for GraphQL queries and mutations.",
+		CreatedAt: time.Now(),
+	})
+	_ = store.SaveTranscript(storage.Transcript{
+		ID:        "tr-ipc-1",
+		Text:      "We are building GraphQL resolvers.",
+		CreatedAt: time.Now(),
+	})
+
+	// 1. Search all
+	res, err := app.Handle(ctx, ipc.Request{
+		Method: "search",
+		Params: map[string]any{
+			"query": "GraphQL",
+		},
+	})
+	if err != nil {
+		t.Fatalf("search IPC failed: %v", err)
+	}
+	rMap := res.(map[string]any)
+	if rMap["ok"] != true || rMap["count"] != 2 {
+		t.Fatalf("expected 2 search results, got %+v", rMap)
+	}
+
+	// 2. Search note type only
+	resNotes, err := app.Handle(ctx, ipc.Request{
+		Method: "search",
+		Params: map[string]any{
+			"query": "GraphQL",
+			"type":  "note",
+		},
+	})
+	if err != nil {
+		t.Fatalf("search IPC notes only failed: %v", err)
+	}
+	rnMap := resNotes.(map[string]any)
+	if rnMap["count"] != 1 {
+		t.Fatalf("expected 1 note hit, got %v", rnMap["count"])
+	}
+
+	// 3. Error validation: missing query
+	if _, err := app.Handle(ctx, ipc.Request{Method: "search"}); err == nil {
+		t.Fatal("expected error on search without query")
+	}
+}

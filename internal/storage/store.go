@@ -147,6 +147,31 @@ type Tag struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// SearchResultType represents the kind of entity found in full-text search.
+type SearchResultType string
+
+const (
+	SearchResultNote       SearchResultType = "note"
+	SearchResultTranscript SearchResultType = "transcript"
+	SearchResultMeeting    SearchResultType = "meeting"
+)
+
+// SearchResult represents a matching hit from full-text search.
+type SearchResult struct {
+	ID        string           `json:"id"`
+	Type      SearchResultType `json:"type"`
+	Title     string           `json:"title"`
+	Snippet   string           `json:"snippet"`
+	Rank      float64          `json:"rank,omitempty"`
+	CreatedAt time.Time        `json:"created_at"`
+}
+
+// SearchFilter configures query scope and result limits.
+type SearchFilter struct {
+	Types []SearchResultType `json:"types,omitempty"`
+	Limit int                `json:"limit,omitempty"`
+}
+
 type Store interface {
 	SaveTranscript(Transcript) error
 	ListTranscripts(int) ([]Transcript, error)
@@ -196,4 +221,7 @@ type Store interface {
 	SetNoteTags(noteID string, tags []string) error
 	GetNoteTags(noteID string) ([]string, error)
 	DeleteTag(name string) error
+
+	// Full-text search
+	Search(query string, filter SearchFilter) ([]SearchResult, error)
 }

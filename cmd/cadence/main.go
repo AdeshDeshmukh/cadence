@@ -68,6 +68,7 @@ Commands:
   note [subcommand]    Knowledge base notes: create, list, show, from-meeting, delete
   folder [subcommand]  Knowledge base folders: create, list, delete
   tag [subcommand]     Knowledge base tags: list, delete
+  search <query>       Full-text search across notes, transcripts, and meetings
   context [show|set|clear] Show or manage developer/code editor context (file, language, selection)
   terminal [status|hook] Inspect terminal/shell context or generate shell integration hooks
   app                Show detected active foreground application and category
@@ -312,6 +313,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "tag", "tags":
 		if err := cmdTag(ctx, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "search", "find":
+		if err := cmdSearch(ctx, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -5411,4 +5419,98 @@ func cmdTagUsage(out io.Writer) {
 	fmt.Fprintln(out, "Subcommands:")
 	fmt.Fprintln(out, "  list        List all tags and their associated note counts")
 	fmt.Fprintln(out, "  delete <tag> Delete a tag from the knowledge base")
+}
+
+func cmdSearch(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("search query is required (usage: cadence search <query> [--type notes|transcripts|meetings] [--limit N])")
+	}
+
+	var queryParts []string
+	searchType := ""
+	limit := 20
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case (arg == "--type" || arg == "-t") && i+1 < len(args):
+			searchType = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--type="):
+			searchType = strings.TrimPrefix(arg, "--type=")
+		case (arg == "--limit" || arg == "-n") && i+1 < len(args):
+			if parsed, err := strconv.Atoi(args[i+1]); err == nil && parsed > 0 {
+				limit = parsed
+			}
+			i++
+		case strings.HasPrefix(arg, "--limit="):
+			if parsed, err := strconv.Atoi(strings.TrimPrefix(arg, "--limit=")); err == nil && parsed > 0 {
+				limit = parsed
+			}
+		default:
+			queryParts = append(queryParts, arg)
+		}
+	}
+
+	query := strings.Join(queryParts, " ")
+	if strings.TrimSpace(query) == "" {
+		return errors.New("search query is required (usage: cadence search <query> [--type notes|transcripts|meetings] [--limit N])")
+	}
+
+	switch strings.ToLower(searchType) {
+	case "notes", "note":
+		searchType = "note"
+	case "transcripts", "transcript":
+		searchType = "transcript"
+	case "meetings", "meeting":
+		searchType = "meeting"
+	}
+
+	params := map[string]any{
+		"query": query,
+		"limit": limit,
+	}
+	if searchType != "" {
+		params["type"] = searchType
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	resp, err := client.Call(callCtx, "search", params)
+	if err != nil {
+		return fmt.Errorf("search failed: %w", err)
+	}
+
+	resMap, ok := resp.(map[string]any)
+	if !ok {
+		return fmt.Errorf("unexpected search response: %v", resp)
+	}
+
+	results, _ := resMap["results"].([]any)
+	if len(results) == 0 {
+		fmt.Fprintf(out, "No results found for %q.\n", query)
+		return nil
+	}
+
+	fmt.Fprintf(out, "Search Results for %q (%d found):\n\n", query, len(results))
+	for _, raw := range results {
+		r, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, _ := r["id"].(string)
+		resType, _ := r["type"].(string)
+		title, _ := r["title"].(string)
+		snippet, _ := r["snippet"].(string)
+
+		typeBadge := strings.ToUpper(resType)
+		fmt.Fprintf(out, "[%s] %s (%s)\n", typeBadge, title, id)
+		if snippet != "" {
+			fmt.Fprintf(out, "       %s\n", snippet)
+		}
+		fmt.Fprintln(out, "")
+	}
+
+	return nil
 }

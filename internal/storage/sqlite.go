@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -205,6 +206,67 @@ CREATE TABLE IF NOT EXISTS note_tags (
 
 CREATE INDEX IF NOT EXISTS idx_note_tags_note_id ON note_tags (note_id);
 CREATE INDEX IF NOT EXISTS idx_note_tags_tag_name ON note_tags (tag_name);
+`,
+	},
+	{
+		version: 9,
+		name:    "create_fts5_indexes",
+		up: `
+CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
+	id UNINDEXED,
+	title,
+	content
+);
+
+CREATE TRIGGER IF NOT EXISTS notes_ai AFTER INSERT ON notes BEGIN
+	INSERT INTO notes_fts(id, title, content) VALUES (new.id, new.title, new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS notes_ad AFTER DELETE ON notes BEGIN
+	DELETE FROM notes_fts WHERE id = old.id;
+END;
+CREATE TRIGGER IF NOT EXISTS notes_au AFTER UPDATE ON notes BEGIN
+	DELETE FROM notes_fts WHERE id = old.id;
+	INSERT INTO notes_fts(id, title, content) VALUES (new.id, new.title, new.content);
+END;
+
+CREATE VIRTUAL TABLE IF NOT EXISTS transcripts_fts USING fts5(
+	id UNINDEXED,
+	text,
+	raw_text
+);
+
+CREATE TRIGGER IF NOT EXISTS transcripts_ai AFTER INSERT ON transcripts BEGIN
+	INSERT INTO transcripts_fts(id, text, raw_text) VALUES (new.id, new.text, new.raw_text);
+END;
+CREATE TRIGGER IF NOT EXISTS transcripts_ad AFTER DELETE ON transcripts BEGIN
+	DELETE FROM transcripts_fts WHERE id = old.id;
+END;
+CREATE TRIGGER IF NOT EXISTS transcripts_au AFTER UPDATE ON transcripts BEGIN
+	DELETE FROM transcripts_fts WHERE id = old.id;
+	INSERT INTO transcripts_fts(id, text, raw_text) VALUES (new.id, new.text, new.raw_text);
+END;
+
+CREATE VIRTUAL TABLE IF NOT EXISTS meeting_segments_fts USING fts5(
+	id UNINDEXED,
+	meeting_id UNINDEXED,
+	speaker,
+	text
+);
+
+CREATE TRIGGER IF NOT EXISTS meeting_segments_ai AFTER INSERT ON meeting_segments BEGIN
+	INSERT INTO meeting_segments_fts(id, meeting_id, speaker, text) VALUES (new.id, new.meeting_id, new.speaker, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS meeting_segments_ad AFTER DELETE ON meeting_segments BEGIN
+	DELETE FROM meeting_segments_fts WHERE id = old.id;
+END;
+CREATE TRIGGER IF NOT EXISTS meeting_segments_au AFTER UPDATE ON meeting_segments BEGIN
+	DELETE FROM meeting_segments_fts WHERE id = old.id;
+	INSERT INTO meeting_segments_fts(id, meeting_id, speaker, text) VALUES (new.id, new.meeting_id, new.speaker, new.text);
+END;
+
+INSERT INTO notes_fts(id, title, content) SELECT id, title, content FROM notes;
+INSERT INTO transcripts_fts(id, text, raw_text) SELECT id, text, raw_text FROM transcripts;
+INSERT INTO meeting_segments_fts(id, meeting_id, speaker, text) SELECT id, meeting_id, speaker, text FROM meeting_segments;
 `,
 	},
 }
@@ -1415,6 +1477,205 @@ func (s *SQLite) DeleteTag(name string) error {
 	const query = `DELETE FROM tags WHERE name = ?;`
 	_, err := s.db.Exec(query, clean)
 	return err
+}
+
+// Search executes full-text search across notes, transcripts, and meetings using SQLite FTS5.
+func (s *SQLite) Search(query string, filter SearchFilter) ([]SearchResult, error) {
+	cleanQuery := strings.TrimSpace(query)
+	if cleanQuery == "" {
+		return []SearchResult{}, nil
+	}
+
+	searchAll := len(filter.Types) == 0
+	typesSet := make(map[SearchResultType]bool)
+	for _, t := range filter.Types {
+		typesSet[t] = true
+	}
+
+	limit := 50
+	if filter.Limit > 0 {
+		limit = filter.Limit
+	}
+
+	ftsQuery := buildFTSQuery(cleanQuery)
+	var results []SearchResult
+
+	// 1. Notes FTS
+	if searchAll || typesSet[SearchResultNote] {
+		const notesSQL = `
+SELECT n.id, n.title, snippet(notes_fts, 2, '', '', '...', 25) AS snip, n.created_at, bm25(notes_fts) AS rank
+FROM notes_fts
+JOIN notes n ON notes_fts.id = n.id
+WHERE notes_fts MATCH ?
+ORDER BY rank ASC
+LIMIT ?;
+`
+		rows, err := s.db.Query(notesSQL, ftsQuery, limit)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var r SearchResult
+				r.Type = SearchResultNote
+				if err := rows.Scan(&r.ID, &r.Title, &r.Snippet, &r.CreatedAt, &r.Rank); err == nil {
+					results = append(results, r)
+				}
+			}
+		} else {
+			likeSQL := `
+SELECT id, title, content, created_at
+FROM notes
+WHERE title LIKE ? OR content LIKE ?
+ORDER BY updated_at DESC
+LIMIT ?;
+`
+			likePattern := "%" + cleanQuery + "%"
+			if lRows, lErr := s.db.Query(likeSQL, likePattern, likePattern, limit); lErr == nil {
+				defer lRows.Close()
+				for lRows.Next() {
+					var r SearchResult
+					var content string
+					r.Type = SearchResultNote
+					if err := lRows.Scan(&r.ID, &r.Title, &content, &r.CreatedAt); err == nil {
+						r.Snippet = extractSnippet(content, cleanQuery, 120)
+						results = append(results, r)
+					}
+				}
+			}
+		}
+	}
+
+	// 2. Transcripts FTS
+	if searchAll || typesSet[SearchResultTranscript] {
+		const transcriptsSQL = `
+SELECT t.id, t.created_at, snippet(transcripts_fts, 1, '', '', '...', 25) AS snip, bm25(transcripts_fts) AS rank
+FROM transcripts_fts
+JOIN transcripts t ON transcripts_fts.id = t.id
+WHERE transcripts_fts MATCH ?
+ORDER BY rank ASC
+LIMIT ?;
+`
+		rows, err := s.db.Query(transcriptsSQL, ftsQuery, limit)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var r SearchResult
+				r.Type = SearchResultTranscript
+				if err := rows.Scan(&r.ID, &r.CreatedAt, &r.Snippet, &r.Rank); err == nil {
+					r.Title = fmt.Sprintf("Dictation %s", r.CreatedAt.Format("2006-01-02 15:04"))
+					results = append(results, r)
+				}
+			}
+		} else {
+			likeSQL := `
+SELECT id, text, created_at
+FROM transcripts
+WHERE text LIKE ? OR raw_text LIKE ?
+ORDER BY created_at DESC
+LIMIT ?;
+`
+			likePattern := "%" + cleanQuery + "%"
+			if lRows, lErr := s.db.Query(likeSQL, likePattern, likePattern, limit); lErr == nil {
+				defer lRows.Close()
+				for lRows.Next() {
+					var r SearchResult
+					var text string
+					r.Type = SearchResultTranscript
+					if err := lRows.Scan(&r.ID, &text, &r.CreatedAt); err == nil {
+						r.Title = fmt.Sprintf("Dictation %s", r.CreatedAt.Format("2006-01-02 15:04"))
+						r.Snippet = extractSnippet(text, cleanQuery, 120)
+						results = append(results, r)
+					}
+				}
+			}
+		}
+	}
+
+	// 3. Meeting segments FTS
+	if searchAll || typesSet[SearchResultMeeting] {
+		const mtgSQL = `
+SELECT m.id, m.title, snippet(meeting_segments_fts, 3, '', '', '...', 25) AS snip, m.created_at, MIN(bm25(meeting_segments_fts)) AS rank
+FROM meeting_segments_fts
+JOIN meetings m ON meeting_segments_fts.meeting_id = m.id
+WHERE meeting_segments_fts MATCH ?
+GROUP BY m.id
+ORDER BY rank ASC
+LIMIT ?;
+`
+		rows, err := s.db.Query(mtgSQL, ftsQuery, limit)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var r SearchResult
+				r.Type = SearchResultMeeting
+				if err := rows.Scan(&r.ID, &r.Title, &r.Snippet, &r.CreatedAt, &r.Rank); err == nil {
+					results = append(results, r)
+				}
+			}
+		} else {
+			likeSQL := `
+SELECT m.id, m.title, m.created_at, ms.text
+FROM meetings m
+JOIN meeting_segments ms ON m.id = ms.meeting_id
+WHERE m.title LIKE ? OR ms.text LIKE ?
+GROUP BY m.id
+ORDER BY m.created_at DESC
+LIMIT ?;
+`
+			likePattern := "%" + cleanQuery + "%"
+			if lRows, lErr := s.db.Query(likeSQL, likePattern, likePattern, limit); lErr == nil {
+				defer lRows.Close()
+				for lRows.Next() {
+					var r SearchResult
+					var text string
+					r.Type = SearchResultMeeting
+					if err := lRows.Scan(&r.ID, &r.Title, &r.CreatedAt, &text); err == nil {
+						r.Snippet = extractSnippet(text, cleanQuery, 120)
+						results = append(results, r)
+					}
+				}
+			}
+		}
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Rank != 0 && results[j].Rank != 0 {
+			return results[i].Rank < results[j].Rank
+		}
+		return results[i].CreatedAt.After(results[j].CreatedAt)
+	})
+
+	if limit > 0 && limit < len(results) {
+		results = results[:limit]
+	}
+
+	return results, nil
+}
+
+func buildFTSQuery(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if strings.Contains(raw, `"`) || strings.Contains(raw, " OR ") || strings.Contains(raw, " AND ") || strings.Contains(raw, " NOT ") {
+		return raw
+	}
+	words := strings.Fields(raw)
+	if len(words) == 0 {
+		return raw
+	}
+	var tokens []string
+	for _, w := range words {
+		clean := strings.Map(func(r rune) rune {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+				return r
+			}
+			return -1
+		}, w)
+		if clean != "" {
+			tokens = append(tokens, clean+"*")
+		}
+	}
+	if len(tokens) == 0 {
+		return `"` + raw + `"`
+	}
+	return strings.Join(tokens, " ")
 }
 
 // Close releases the underlying SQLite database handle.
