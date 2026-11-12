@@ -881,6 +881,43 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 			"segments_count": 4,
 			"speakers_count": 2,
 		}, nil
+	case "plugin_validate":
+		return map[string]any{
+			"ok": true,
+			"manifest": map[string]any{
+				"id":         "com.mock.plugin",
+				"name":       "Mock Plugin",
+				"version":    "1.0.0",
+				"entrypoint": "./bin/plugin",
+			},
+		}, nil
+	case "plugin_manifest":
+		return map[string]any{
+			"ok": true,
+			"manifest": map[string]any{
+				"id":          "com.mock.plugin",
+				"name":        "Mock Plugin",
+				"version":     "1.0.0",
+				"description": "Mock plugin for testing",
+				"entrypoint":  "./bin/plugin",
+				"tools": []any{
+					map[string]any{"name": "mock_tool", "description": "Does mock work"},
+				},
+			},
+		}, nil
+	case "plugin_list":
+		return map[string]any{
+			"ok": true,
+			"plugins": []any{
+				map[string]any{
+					"id":          "com.mock.plugin",
+					"name":        "Mock Plugin",
+					"version":     "1.0.0",
+					"description": "Mock plugin for testing",
+				},
+			},
+			"count": 1,
+		}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -3186,5 +3223,71 @@ func TestCLI_ExportAndImport(t *testing.T) {
 	// 5. Import validation errors
 	if err := cmdImport(ctx, client, []string{}, &out); err == nil {
 		t.Fatal("expected error on import without args")
+	}
+}
+
+func TestCLI_Plugin(t *testing.T) {
+	sock := filepath.Join(os.TempDir(), fmt.Sprintf("cad_plugin_%d.sock", time.Now().UnixNano()))
+	stop := startMockDaemon(t, sock)
+	defer stop()
+
+	client := ipc.Client{
+		Network: "unix",
+		Address: sock,
+	}
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	pluginDir := filepath.Join(tempDir, "my-plugin")
+
+	// 1. Plugin init / scaffold
+	var out bytes.Buffer
+	if err := cmdPlugin(ctx, client, []string{"init", pluginDir, "--id", "com.test.my-plugin", "--name", "My Plugin"}, &out); err != nil {
+		t.Fatalf("cmdPlugin init failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Initialized new Cadence plugin scaffold") ||
+		!strings.Contains(out.String(), "com.test.my-plugin") {
+		t.Fatalf("unexpected plugin init output: %s", out.String())
+	}
+
+	// 2. Plugin validate
+	out.Reset()
+	if err := cmdPlugin(ctx, client, []string{"validate", pluginDir}, &out); err != nil {
+		t.Fatalf("cmdPlugin validate failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Plugin manifest is valid") ||
+		!strings.Contains(out.String(), "ID:") {
+		t.Fatalf("unexpected plugin validate output: %s", out.String())
+	}
+
+	// 3. Plugin info
+	out.Reset()
+	if err := cmdPlugin(ctx, client, []string{"info", pluginDir}, &out); err != nil {
+		t.Fatalf("cmdPlugin info failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Plugin:") || !strings.Contains(out.String(), "Version:") {
+		t.Fatalf("unexpected plugin info output: %s", out.String())
+	}
+
+	// 4. Plugin list
+	out.Reset()
+	if err := cmdPlugin(ctx, client, []string{"list"}, &out); err != nil {
+		t.Fatalf("cmdPlugin list failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Installed Plugins") || !strings.Contains(out.String(), "Mock Plugin") {
+		t.Fatalf("unexpected plugin list output: %s", out.String())
+	}
+
+	// 5. Plugin help
+	out.Reset()
+	if err := cmdPlugin(ctx, client, []string{"help"}, &out); err != nil {
+		t.Fatalf("cmdPlugin help failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "cadence plugin - Manage Cadence plugins") {
+		t.Fatalf("unexpected plugin help output: %s", out.String())
+	}
+
+	// 6. Unknown subcommand
+	if err := cmdPlugin(ctx, client, []string{"unknown_cmd_xyz"}, &out); err == nil {
+		t.Fatal("expected error for unknown plugin subcommand")
 	}
 }

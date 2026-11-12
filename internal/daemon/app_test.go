@@ -3605,3 +3605,95 @@ func TestApp_ExportAndImportIPC(t *testing.T) {
 		t.Fatal("expected error on import without path")
 	}
 }
+
+func TestApp_PluginIPC(t *testing.T) {
+	cfg := config.Default()
+	app := NewApp(cfg)
+	ctx := context.Background()
+	tempDir := t.TempDir()
+
+	// 1. Scaffold plugin
+	scaffoldRes, err := app.Handle(ctx, ipc.Request{
+		Method: "plugin_init_scaffold",
+		Params: map[string]any{
+			"dir":         tempDir,
+			"id":          "com.example.test-plugin",
+			"name":        "Test Plugin",
+			"description": "Scaffolded plugin for test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("plugin_init_scaffold failed: %v", err)
+	}
+	scMap := scaffoldRes.(map[string]any)
+	if scMap["ok"] != true || scMap["id"] != "com.example.test-plugin" {
+		t.Fatalf("unexpected scaffold result: %+v", scMap)
+	}
+
+	manifestFile := filepath.Join(tempDir, "plugin.yaml")
+	if _, err := os.Stat(manifestFile); err != nil {
+		t.Fatalf("plugin.yaml not written to %s", manifestFile)
+	}
+
+	// 2. Validate manifest via IPC
+	valRes, err := app.Handle(ctx, ipc.Request{
+		Method: "plugin_validate",
+		Params: map[string]any{
+			"path": manifestFile,
+		},
+	})
+	if err != nil {
+		t.Fatalf("plugin_validate failed: %v", err)
+	}
+	valMap := valRes.(map[string]any)
+	if valMap["ok"] != true {
+		t.Fatalf("expected valid manifest, got: %+v", valMap)
+	}
+
+	// 3. Register plugin via IPC
+	regRes, err := app.Handle(ctx, ipc.Request{
+		Method: "plugin_register",
+		Params: map[string]any{
+			"path": manifestFile,
+		},
+	})
+	if err != nil {
+		t.Fatalf("plugin_register failed: %v", err)
+	}
+	regMap := regRes.(map[string]any)
+	if regMap["ok"] != true || regMap["id"] != "com.example.test-plugin" {
+		t.Fatalf("unexpected register result: %+v", regMap)
+	}
+
+	// 4. List plugins
+	listRes, err := app.Handle(ctx, ipc.Request{
+		Method: "plugin_list",
+	})
+	if err != nil {
+		t.Fatalf("plugin_list failed: %v", err)
+	}
+	listMap := listRes.(map[string]any)
+	if listMap["ok"] != true || listMap["count"].(int) != 1 {
+		t.Fatalf("unexpected plugin list: %+v", listMap)
+	}
+
+	// 5. Manifest lookup by ID
+	manRes, err := app.Handle(ctx, ipc.Request{
+		Method: "plugin_manifest",
+		Params: map[string]any{
+			"id": "com.example.test-plugin",
+		},
+	})
+	if err != nil {
+		t.Fatalf("plugin_manifest failed: %v", err)
+	}
+	manMap := manRes.(map[string]any)
+	if manMap["ok"] != true {
+		t.Fatalf("unexpected manifest lookup: %+v", manMap)
+	}
+
+	// 6. Error validations
+	if _, err := app.Handle(ctx, ipc.Request{Method: "plugin_validate"}); err == nil {
+		t.Fatal("expected error on validate without path or data")
+	}
+}

@@ -22,6 +22,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/edit"
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
 	"github.com/AdeshDeshmukh/cadence/internal/paste"
+	"github.com/AdeshDeshmukh/cadence/internal/plugins"
 	"github.com/AdeshDeshmukh/cadence/internal/polish"
 	"github.com/AdeshDeshmukh/cadence/internal/postprocess"
 	"github.com/AdeshDeshmukh/cadence/internal/selection"
@@ -73,6 +74,7 @@ Commands:
   index-embeddings     Generate vector embeddings for all stored transcripts, notes, and meetings
   export <type> <id>   Export meeting, transcript, or note (markdown, srt, vtt, json, txt)
   import <file>        Import media file (audio/video) or subtitles (.srt, .vtt, .json)
+  plugin [subcommand]  Manage plugins, manifests, and developer SDK scaffolding (validate, info, list, init)
   context [show|set|clear] Show or manage developer/code editor context (file, language, selection)
   terminal [status|hook] Inspect terminal/shell context or generate shell integration hooks
   app                Show detected active foreground application and category
@@ -352,6 +354,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "import":
 		if err := cmdImport(ctx, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "plugin", "plugins":
+		if err := cmdPlugin(ctx, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -5835,5 +5844,261 @@ func cmdImport(ctx context.Context, client ipc.Client, args []string, out io.Wri
 	fmt.Fprintf(out, "  Meeting ID: %s\n", mtgID)
 	fmt.Fprintf(out, "  Title:      %s\n", mtgTitle)
 	fmt.Fprintf(out, "  Segments:   %v\n", segCount)
+	return nil
+}
+
+func printPluginUsage(out io.Writer) {
+	fmt.Fprintln(out, "cadence plugin - Manage Cadence plugins and developer SDK scaffolding")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Usage:")
+	fmt.Fprintln(out, "  cadence plugin validate [path]         Validate plugin.yaml or plugin.json manifest")
+	fmt.Fprintln(out, "  cadence plugin info <path|id>          Display plugin capabilities, tools, and permissions")
+	fmt.Fprintln(out, "  cadence plugin list                    List registered plugins from the daemon")
+	fmt.Fprintln(out, "  cadence plugin init [dir] [--id <id>]  Scaffold a new plugin directory with plugin.yaml")
+}
+
+func cmdPlugin(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		printPluginUsage(out)
+		return nil
+	}
+
+	sub := strings.ToLower(args[0])
+	subArgs := args[1:]
+
+	switch sub {
+	case "validate":
+		return cmdPluginValidate(ctx, client, subArgs, out)
+	case "info", "show":
+		return cmdPluginInfo(ctx, client, subArgs, out)
+	case "list", "ls":
+		return cmdPluginList(ctx, client, subArgs, out)
+	case "init", "create":
+		return cmdPluginInit(ctx, client, subArgs, out)
+	case "help", "--help", "-h":
+		printPluginUsage(out)
+		return nil
+	default:
+		return fmt.Errorf("unknown plugin subcommand: %s (run 'cadence plugin help' for usage)", sub)
+	}
+}
+
+func cmdPluginValidate(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	path := "."
+	if len(args) > 0 {
+		path = args[0]
+	}
+
+	// Try daemon IPC first if available
+	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	resp, err := client.Call(callCtx, "plugin_validate", map[string]any{"path": path})
+	if err == nil {
+		if resMap, ok := resp.(map[string]any); ok {
+			if okVal, _ := resMap["ok"].(bool); okVal {
+				mRaw, _ := resMap["manifest"].(map[string]any)
+				id, _ := mRaw["id"].(string)
+				name, _ := mRaw["name"].(string)
+				ver, _ := mRaw["version"].(string)
+				entry, _ := mRaw["entrypoint"].(string)
+				fmt.Fprintln(out, "Plugin manifest is valid:")
+				fmt.Fprintf(out, "  ID:         %s\n", id)
+				fmt.Fprintf(out, "  Name:       %s\n", name)
+				fmt.Fprintf(out, "  Version:    %s\n", ver)
+				fmt.Fprintf(out, "  Entrypoint: %s\n", entry)
+				return nil
+			} else if errMsg, _ := resMap["error"].(string); errMsg != "" {
+				return errors.New(errMsg)
+			}
+		}
+	}
+
+	// Fallback to offline local validation
+	m, err := plugins.LoadManifest(path)
+	if err != nil {
+		return fmt.Errorf("validation failed: %w", err)
+	}
+
+	fmt.Fprintln(out, "Plugin manifest is valid:")
+	fmt.Fprintf(out, "  ID:         %s\n", m.ID)
+	fmt.Fprintf(out, "  Name:       %s\n", m.Name)
+	fmt.Fprintf(out, "  Version:    %s\n", m.Version)
+	fmt.Fprintf(out, "  Entrypoint: %s\n", m.Entrypoint)
+	if len(m.Capabilities) > 0 {
+		var caps []string
+		for _, c := range m.Capabilities {
+			caps = append(caps, string(c))
+		}
+		fmt.Fprintf(out, "  Capabilities: %s\n", strings.Join(caps, ", "))
+	}
+	return nil
+}
+
+func cmdPluginInfo(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: cadence plugin info <path|id>")
+	}
+	target := args[0]
+
+	// Try daemon IPC first
+	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	resp, err := client.Call(callCtx, "plugin_manifest", map[string]any{"id": target, "path": target})
+	if err == nil {
+		if resMap, ok := resp.(map[string]any); ok && resMap["ok"] == true {
+			mRaw, _ := resMap["manifest"].(map[string]any)
+			data, _ := json.Marshal(mRaw)
+			var m plugins.Manifest
+			if json.Unmarshal(data, &m) == nil {
+				printManifestDetails(m, out)
+				return nil
+			}
+		}
+	}
+
+	// Fallback to offline load
+	m, err := plugins.LoadManifest(target)
+	if err != nil {
+		return fmt.Errorf("load plugin info: %w", err)
+	}
+	printManifestDetails(*m, out)
+	return nil
+}
+
+func printManifestDetails(m plugins.Manifest, out io.Writer) {
+	fmt.Fprintf(out, "Plugin: %s (%s)\n", m.Name, m.ID)
+	fmt.Fprintf(out, "  Version:     %s\n", m.Version)
+	fmt.Fprintf(out, "  Description: %s\n", m.Description)
+	if m.Author != "" {
+		fmt.Fprintf(out, "  Author:      %s\n", m.Author)
+	}
+	if m.License != "" {
+		fmt.Fprintf(out, "  License:     %s\n", m.License)
+	}
+	fmt.Fprintf(out, "  Entrypoint:  %s\n", m.Entrypoint)
+
+	if len(m.Capabilities) > 0 {
+		var caps []string
+		for _, c := range m.Capabilities {
+			caps = append(caps, string(c))
+		}
+		fmt.Fprintf(out, "  Capabilities: %s\n", strings.Join(caps, ", "))
+	}
+
+	if len(m.Tools) > 0 {
+		fmt.Fprintf(out, "  Tools (%d):\n", len(m.Tools))
+		for _, t := range m.Tools {
+			fmt.Fprintf(out, "    - %s: %s\n", t.Name, t.Description)
+		}
+	}
+
+	if len(m.Commands) > 0 {
+		fmt.Fprintf(out, "  Commands (%d):\n", len(m.Commands))
+		for _, c := range m.Commands {
+			fmt.Fprintf(out, "    - %s: %s\n", c.Name, c.Description)
+		}
+	}
+}
+
+func cmdPluginList(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	resp, err := client.Call(callCtx, "plugin_list", map[string]any{})
+	if err != nil {
+		return fmt.Errorf("plugin list failed: %w", err)
+	}
+
+	resMap, ok := resp.(map[string]any)
+	if !ok {
+		return fmt.Errorf("unexpected plugin_list response: %v", resp)
+	}
+
+	list, _ := resMap["plugins"].([]any)
+	if len(list) == 0 {
+		fmt.Fprintln(out, "No plugins currently installed or registered.")
+		return nil
+	}
+
+	fmt.Fprintf(out, "Installed Plugins (%d):\n\n", len(list))
+	for _, raw := range list {
+		p, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, _ := p["id"].(string)
+		name, _ := p["name"].(string)
+		ver, _ := p["version"].(string)
+		desc, _ := p["description"].(string)
+		fmt.Fprintf(out, "- %s (%s) v%s\n", name, id, ver)
+		if desc != "" {
+			fmt.Fprintf(out, "    %s\n", desc)
+		}
+	}
+	return nil
+}
+
+func cmdPluginInit(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	dir := "."
+	id := ""
+	name := ""
+	desc := ""
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case (arg == "--id" || arg == "-i") && i+1 < len(args):
+			id = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--id="):
+			id = strings.TrimPrefix(arg, "--id=")
+		case (arg == "--name" || arg == "-n") && i+1 < len(args):
+			name = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--name="):
+			name = strings.TrimPrefix(arg, "--name=")
+		case (arg == "--desc" || arg == "-d") && i+1 < len(args):
+			desc = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--desc="):
+			desc = strings.TrimPrefix(arg, "--desc=")
+		default:
+			if !strings.HasPrefix(arg, "-") && dir == "." {
+				dir = arg
+			}
+		}
+	}
+
+	if id == "" {
+		base := filepath.Base(dir)
+		if base == "." || base == "/" {
+			id = "com.example.my-plugin"
+		} else {
+			id = "com.example." + base
+		}
+	}
+	if name == "" {
+		name = strings.Title(strings.ReplaceAll(filepath.Base(id), "-", " "))
+	}
+
+	tmpl := plugins.GenerateManifestTemplate(id, name, desc)
+	yamlBytes, err := tmpl.SerializeYAML()
+	if err != nil {
+		return fmt.Errorf("serialize template: %w", err)
+	}
+
+	_ = os.MkdirAll(dir, 0755)
+	targetFile := filepath.Join(dir, "plugin.yaml")
+	if err := os.WriteFile(targetFile, yamlBytes, 0644); err != nil {
+		return fmt.Errorf("write plugin.yaml: %w", err)
+	}
+
+	fmt.Fprintf(out, "Initialized new Cadence plugin scaffold in %s:\n", targetFile)
+	fmt.Fprintf(out, "  ID:         %s\n", tmpl.ID)
+	fmt.Fprintf(out, "  Name:       %s\n", tmpl.Name)
+	fmt.Fprintf(out, "  Version:    %s\n", tmpl.Version)
+	fmt.Fprintf(out, "  Entrypoint: %s\n", tmpl.Entrypoint)
 	return nil
 }
