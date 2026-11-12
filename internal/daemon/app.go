@@ -31,6 +31,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/meeting"
 	"github.com/AdeshDeshmukh/cadence/internal/paste"
 	"github.com/AdeshDeshmukh/cadence/internal/pipeline"
+	"github.com/AdeshDeshmukh/cadence/internal/plugins"
 	"github.com/AdeshDeshmukh/cadence/internal/polish"
 	"github.com/AdeshDeshmukh/cadence/internal/postprocess"
 	"github.com/AdeshDeshmukh/cadence/internal/search"
@@ -112,6 +113,7 @@ type App struct {
 	knowledgeMgr     *knowledge.Manager
 	semanticEngine   *search.SemanticEngine
 	importEngine     *impexp.ImportEngine
+	pluginRegistry   *plugins.Registry
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -282,6 +284,11 @@ func WithSemanticEngine(se *search.SemanticEngine) Option {
 // WithImportEngine sets a custom media and subtitle import engine.
 func WithImportEngine(ie *impexp.ImportEngine) Option {
 	return func(a *App) { a.importEngine = ie }
+}
+
+// WithPluginRegistry sets a custom plugin registry.
+func WithPluginRegistry(r *plugins.Registry) Option {
+	return func(a *App) { a.pluginRegistry = r }
 }
 
 // NewApp instantiates a fully configured Cadence daemon application.
@@ -538,6 +545,10 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 
 	if a.importEngine == nil && a.store != nil {
 		a.importEngine = impexp.NewImportEngine(a.store, a.asr, nil)
+	}
+
+	if a.pluginRegistry == nil {
+		a.pluginRegistry = plugins.NewRegistry()
 	}
 
 	if a.kernel == nil {
@@ -3424,6 +3435,130 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			"meeting":        bundle.Meeting,
 			"segments_count": len(bundle.Segments),
 			"speakers_count": len(bundle.Speakers),
+		}, nil
+
+	case "plugin_validate":
+		params, _ := req.Params.(map[string]any)
+		path, _ := params["path"].(string)
+		dataStr, _ := params["manifest_data"].(string)
+		if dataStr == "" {
+			dataStr, _ = params["data"].(string)
+		}
+
+		var m *plugins.Manifest
+		var valErr error
+
+		if dataStr != "" {
+			m, valErr = plugins.ParseManifest([]byte(dataStr))
+		} else if path != "" {
+			m, valErr = plugins.LoadManifest(path)
+		} else {
+			return nil, errors.New("missing path or manifest_data parameter")
+		}
+
+		if valErr != nil {
+			return map[string]any{
+				"ok":    false,
+				"error": valErr.Error(),
+			}, nil
+		}
+		return map[string]any{
+			"ok":       true,
+			"manifest": m,
+		}, nil
+
+	case "plugin_manifest":
+		params, _ := req.Params.(map[string]any)
+		id, _ := params["id"].(string)
+		path, _ := params["path"].(string)
+
+		if id != "" && a.pluginRegistry != nil {
+			if m, ok := a.pluginRegistry.Get(id); ok {
+				return map[string]any{
+					"ok":       true,
+					"manifest": m,
+				}, nil
+			}
+		}
+		if path != "" {
+			m, err := plugins.LoadManifest(path)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{
+				"ok":       true,
+				"manifest": m,
+			}, nil
+		}
+		return nil, errors.New("plugin not found")
+
+	case "plugin_list":
+		if a.pluginRegistry == nil {
+			return map[string]any{"ok": true, "plugins": []*plugins.Manifest{}, "count": 0}, nil
+		}
+		list := a.pluginRegistry.List()
+		return map[string]any{
+			"ok":      true,
+			"plugins": list,
+			"count":   len(list),
+		}, nil
+
+	case "plugin_register":
+		if a.pluginRegistry == nil {
+			return nil, errors.New("plugin registry not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		path, _ := params["path"].(string)
+		dataStr, _ := params["manifest_data"].(string)
+
+		var m *plugins.Manifest
+		var err error
+		if dataStr != "" {
+			m, err = plugins.ParseManifest([]byte(dataStr))
+		} else if path != "" {
+			m, err = plugins.LoadManifest(path)
+		} else {
+			return nil, errors.New("missing path or manifest_data")
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		if err := a.pluginRegistry.Register(m); err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok": true,
+			"id": m.ID,
+		}, nil
+
+	case "plugin_init_scaffold":
+		params, _ := req.Params.(map[string]any)
+		dir, _ := params["dir"].(string)
+		if dir == "" {
+			dir = "."
+		}
+		id, _ := params["id"].(string)
+		name, _ := params["name"].(string)
+		desc, _ := params["description"].(string)
+
+		tmpl := plugins.GenerateManifestTemplate(id, name, desc)
+		yamlBytes, err := tmpl.SerializeYAML()
+		if err != nil {
+			return nil, err
+		}
+
+		_ = os.MkdirAll(dir, 0755)
+		targetFile := filepath.Join(dir, "plugin.yaml")
+		if err := os.WriteFile(targetFile, yamlBytes, 0644); err != nil {
+			return nil, fmt.Errorf("write plugin.yaml: %w", err)
+		}
+
+		return map[string]any{
+			"ok":       true,
+			"path":     targetFile,
+			"id":       tmpl.ID,
+			"manifest": tmpl,
 		}, nil
 
 	default:
