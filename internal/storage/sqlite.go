@@ -299,6 +299,24 @@ CREATE TRIGGER IF NOT EXISTS meeting_segments_embeddings_ad AFTER DELETE ON meet
 END;
 `,
 	},
+	{
+		version: 11,
+		name:    "create_plugins_table",
+		up: `
+CREATE TABLE IF NOT EXISTS plugins (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL,
+	version TEXT NOT NULL,
+	install_dir TEXT NOT NULL,
+	enabled BOOLEAN NOT NULL DEFAULT 1,
+	manifest_json TEXT NOT NULL,
+	installed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_plugins_enabled ON plugins(enabled);
+`,
+	},
 }
 
 // SQLite implements persistent Store backed by an SQLite database.
@@ -1809,6 +1827,124 @@ func (s *SQLite) DeleteEmbedding(targetType, targetID, model string) error {
 	}
 	_, err := s.db.Exec(`DELETE FROM embeddings WHERE target_type = ? AND target_id = ?`, targetType, targetID)
 	return err
+}
+
+// SavePlugin inserts or updates a plugin record.
+func (s *SQLite) SavePlugin(rec PluginRecord) error {
+	if rec.ID == "" {
+		return errors.New("plugin id cannot be empty")
+	}
+	if rec.InstalledAt.IsZero() {
+		rec.InstalledAt = time.Now().UTC()
+	}
+	rec.UpdatedAt = time.Now().UTC()
+
+	const query = `
+INSERT INTO plugins (id, name, version, install_dir, enabled, manifest_json, installed_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+	name = excluded.name,
+	version = excluded.version,
+	install_dir = excluded.install_dir,
+	enabled = excluded.enabled,
+	manifest_json = excluded.manifest_json,
+	updated_at = excluded.updated_at;
+`
+	_, err := s.db.Exec(query, rec.ID, rec.Name, rec.Version, rec.InstallDir, rec.Enabled, rec.ManifestJSON, rec.InstalledAt, rec.UpdatedAt)
+	return err
+}
+
+// GetPlugin retrieves a plugin record by ID.
+func (s *SQLite) GetPlugin(id string) (*PluginRecord, error) {
+	const query = `
+SELECT id, name, version, install_dir, enabled, manifest_json, installed_at, updated_at
+FROM plugins
+WHERE id = ?;
+`
+	var rec PluginRecord
+	err := s.db.QueryRow(query, id).Scan(
+		&rec.ID,
+		&rec.Name,
+		&rec.Version,
+		&rec.InstallDir,
+		&rec.Enabled,
+		&rec.ManifestJSON,
+		&rec.InstalledAt,
+		&rec.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errors.New("plugin not found: " + id)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &rec, nil
+}
+
+// ListPlugins returns all installed plugins ordered by installed_at ASC.
+func (s *SQLite) ListPlugins() ([]PluginRecord, error) {
+	const query = `
+SELECT id, name, version, install_dir, enabled, manifest_json, installed_at, updated_at
+FROM plugins
+ORDER BY installed_at ASC;
+`
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []PluginRecord
+	for rows.Next() {
+		var rec PluginRecord
+		if err := rows.Scan(
+			&rec.ID,
+			&rec.Name,
+			&rec.Version,
+			&rec.InstallDir,
+			&rec.Enabled,
+			&rec.ManifestJSON,
+			&rec.InstalledAt,
+			&rec.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		list = append(list, rec)
+	}
+	return list, rows.Err()
+}
+
+// DeletePlugin deletes a plugin record by ID.
+func (s *SQLite) DeletePlugin(id string) error {
+	res, err := s.db.Exec(`DELETE FROM plugins WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return errors.New("plugin not found: " + id)
+	}
+	return nil
+}
+
+// SetPluginEnabled toggles a plugin's enabled status.
+func (s *SQLite) SetPluginEnabled(id string, enabled bool) error {
+	now := time.Now().UTC()
+	res, err := s.db.Exec(`UPDATE plugins SET enabled = ?, updated_at = ? WHERE id = ?`, enabled, now, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return errors.New("plugin not found: " + id)
+	}
+	return nil
 }
 
 // Close releases the underlying SQLite database handle.

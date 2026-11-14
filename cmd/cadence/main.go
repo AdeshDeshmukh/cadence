@@ -74,7 +74,7 @@ Commands:
   index-embeddings     Generate vector embeddings for all stored transcripts, notes, and meetings
   export <type> <id>   Export meeting, transcript, or note (markdown, srt, vtt, json, txt)
   import <file>        Import media file (audio/video) or subtitles (.srt, .vtt, .json)
-  plugin [subcommand]  Manage plugins, manifests, and developer SDK scaffolding (validate, info, list, init)
+  plugin [subcommand]  Manage plugins, manifests, lifecycle, and sandbox (install, activate, deactivate, list, status)
   context [show|set|clear] Show or manage developer/code editor context (file, language, selection)
   terminal [status|hook] Inspect terminal/shell context or generate shell integration hooks
   app                Show detected active foreground application and category
@@ -5848,12 +5848,17 @@ func cmdImport(ctx context.Context, client ipc.Client, args []string, out io.Wri
 }
 
 func printPluginUsage(out io.Writer) {
-	fmt.Fprintln(out, "cadence plugin - Manage Cadence plugins and developer SDK scaffolding")
+	fmt.Fprintln(out, "cadence plugin - Manage Cadence plugins, manifests, lifecycle, and sandboxing")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Usage:")
+	fmt.Fprintln(out, "  cadence plugin install <path>          Install and register a plugin directory or manifest")
+	fmt.Fprintln(out, "  cadence plugin activate <id>           Activate and launch plugin subprocess in sandbox")
+	fmt.Fprintln(out, "  cadence plugin deactivate <id>         Deactivate and stop plugin subprocess")
+	fmt.Fprintln(out, "  cadence plugin uninstall <id>          Uninstall plugin and remove stored files")
+	fmt.Fprintln(out, "  cadence plugin status [id]             Show runtime status and process info of a plugin")
+	fmt.Fprintln(out, "  cadence plugin list                    List installed plugins with runtime status")
 	fmt.Fprintln(out, "  cadence plugin validate [path]         Validate plugin.yaml or plugin.json manifest")
 	fmt.Fprintln(out, "  cadence plugin info <path|id>          Display plugin capabilities, tools, and permissions")
-	fmt.Fprintln(out, "  cadence plugin list                    List registered plugins from the daemon")
 	fmt.Fprintln(out, "  cadence plugin init [dir] [--id <id>]  Scaffold a new plugin directory with plugin.yaml")
 }
 
@@ -5867,6 +5872,16 @@ func cmdPlugin(ctx context.Context, client ipc.Client, args []string, out io.Wri
 	subArgs := args[1:]
 
 	switch sub {
+	case "install", "add":
+		return cmdPluginInstall(ctx, client, subArgs, out)
+	case "activate", "start", "enable":
+		return cmdPluginActivate(ctx, client, subArgs, out)
+	case "deactivate", "stop", "disable":
+		return cmdPluginDeactivate(ctx, client, subArgs, out)
+	case "uninstall", "remove", "rm":
+		return cmdPluginUninstall(ctx, client, subArgs, out)
+	case "status":
+		return cmdPluginStatus(ctx, client, subArgs, out)
 	case "validate":
 		return cmdPluginValidate(ctx, client, subArgs, out)
 	case "info", "show":
@@ -6032,11 +6047,176 @@ func cmdPluginList(ctx context.Context, client ipc.Client, args []string, out io
 		name, _ := p["name"].(string)
 		ver, _ := p["version"].(string)
 		desc, _ := p["description"].(string)
-		fmt.Fprintf(out, "- %s (%s) v%s\n", name, id, ver)
+		state, _ := p["state"].(string)
+		if state == "" {
+			state = "installed"
+		}
+		pid := 0
+		if pFloat, ok := p["pid"].(float64); ok {
+			pid = int(pFloat)
+		} else if pInt, ok := p["pid"].(int); ok {
+			pid = pInt
+		}
+
+		if pid > 0 {
+			fmt.Fprintf(out, "- %s (%s) v%s [%s, pid %d]\n", name, id, ver, state, pid)
+		} else {
+			fmt.Fprintf(out, "- %s (%s) v%s [%s]\n", name, id, ver, state)
+		}
 		if desc != "" {
 			fmt.Fprintf(out, "    %s\n", desc)
 		}
 	}
+	return nil
+}
+
+func cmdPluginInstall(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: cadence plugin install <path>")
+	}
+	path := args[0]
+
+	callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	resp, err := client.Call(callCtx, "plugin_install", map[string]any{"path": path})
+	if err != nil {
+		return fmt.Errorf("plugin install failed: %w", err)
+	}
+
+	resMap, ok := resp.(map[string]any)
+	if !ok {
+		return fmt.Errorf("unexpected plugin install response: %v", resp)
+	}
+
+	pluginMap, _ := resMap["plugin"].(map[string]any)
+	id, _ := pluginMap["id"].(string)
+	name, _ := pluginMap["name"].(string)
+	ver, _ := pluginMap["version"].(string)
+	installDir, _ := pluginMap["install_dir"].(string)
+
+	fmt.Fprintf(out, "Plugin %s (%s) v%s installed successfully.\n", name, id, ver)
+	if installDir != "" {
+		fmt.Fprintf(out, "  Install directory: %s\n", installDir)
+	}
+	fmt.Fprintf(out, "  Run 'cadence plugin activate %s' to start.\n", id)
+	return nil
+}
+
+func cmdPluginActivate(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: cadence plugin activate <id>")
+	}
+	id := args[0]
+
+	callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	resp, err := client.Call(callCtx, "plugin_activate", map[string]any{"id": id})
+	if err != nil {
+		return fmt.Errorf("plugin activate failed: %w", err)
+	}
+
+	resMap, _ := resp.(map[string]any)
+	pluginMap, _ := resMap["plugin"].(map[string]any)
+	pid := 0
+	if pFloat, ok := pluginMap["pid"].(float64); ok {
+		pid = int(pFloat)
+	} else if pInt, ok := pluginMap["pid"].(int); ok {
+		pid = pInt
+	}
+
+	if pid > 0 {
+		fmt.Fprintf(out, "Activated plugin %s (PID: %d, State: active).\n", id, pid)
+	} else {
+		fmt.Fprintf(out, "Activated plugin %s (State: active).\n", id)
+	}
+	return nil
+}
+
+func cmdPluginDeactivate(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: cadence plugin deactivate <id>")
+	}
+	id := args[0]
+
+	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	_, err := client.Call(callCtx, "plugin_deactivate", map[string]any{"id": id})
+	if err != nil {
+		return fmt.Errorf("plugin deactivate failed: %w", err)
+	}
+
+	fmt.Fprintf(out, "Deactivated plugin %s.\n", id)
+	return nil
+}
+
+func cmdPluginUninstall(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: cadence plugin uninstall <id>")
+	}
+	id := args[0]
+
+	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	_, err := client.Call(callCtx, "plugin_uninstall", map[string]any{"id": id})
+	if err != nil {
+		return fmt.Errorf("plugin uninstall failed: %w", err)
+	}
+
+	fmt.Fprintf(out, "Uninstalled plugin %s and removed associated files.\n", id)
+	return nil
+}
+
+func cmdPluginStatus(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return cmdPluginList(ctx, client, args, out)
+	}
+	id := args[0]
+
+	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	resp, err := client.Call(callCtx, "plugin_status", map[string]any{"id": id})
+	if err != nil {
+		return fmt.Errorf("plugin status failed: %w", err)
+	}
+
+	resMap, _ := resp.(map[string]any)
+	p, ok := resMap["plugin"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("unexpected plugin status response: %v", resp)
+	}
+
+	name, _ := p["name"].(string)
+	ver, _ := p["version"].(string)
+	state, _ := p["state"].(string)
+	installDir, _ := p["install_dir"].(string)
+	enabled, _ := p["enabled"].(bool)
+	errStr, _ := p["error"].(string)
+	pid := 0
+	if pFloat, ok := p["pid"].(float64); ok {
+		pid = int(pFloat)
+	} else if pInt, ok := p["pid"].(int); ok {
+		pid = pInt
+	}
+
+	fmt.Fprintf(out, "Plugin Status: %s (%s)\n", name, id)
+	fmt.Fprintf(out, "  State:       %s\n", state)
+	fmt.Fprintf(out, "  Version:     %s\n", ver)
+	if pid > 0 {
+		fmt.Fprintf(out, "  PID:         %d\n", pid)
+	}
+	fmt.Fprintf(out, "  Enabled:     %v\n", enabled)
+	if installDir != "" {
+		fmt.Fprintf(out, "  Install Dir: %s\n", installDir)
+	}
+	if errStr != "" {
+		fmt.Fprintf(out, "  Error:       %s\n", errStr)
+	}
+
 	return nil
 }
 

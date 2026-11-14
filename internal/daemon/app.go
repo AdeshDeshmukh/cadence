@@ -114,6 +114,7 @@ type App struct {
 	semanticEngine   *search.SemanticEngine
 	importEngine     *impexp.ImportEngine
 	pluginRegistry   *plugins.Registry
+	pluginManager    *plugins.Manager
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -289,6 +290,11 @@ func WithImportEngine(ie *impexp.ImportEngine) Option {
 // WithPluginRegistry sets a custom plugin registry.
 func WithPluginRegistry(r *plugins.Registry) Option {
 	return func(a *App) { a.pluginRegistry = r }
+}
+
+// WithPluginManager sets a custom plugin manager.
+func WithPluginManager(m *plugins.Manager) Option {
+	return func(a *App) { a.pluginManager = m }
 }
 
 // NewApp instantiates a fully configured Cadence daemon application.
@@ -551,6 +557,17 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 		a.pluginRegistry = plugins.NewRegistry()
 	}
 
+	if a.pluginManager == nil && a.store != nil {
+		pluginsDir := ""
+		if cfg.Storage.DBPath != "" {
+			pluginsDir = filepath.Join(filepath.Dir(cfg.Storage.DBPath), "plugins")
+		} else {
+			home, _ := os.UserHomeDir()
+			pluginsDir = filepath.Join(home, ".config", "cadence", "plugins")
+		}
+		a.pluginManager = plugins.NewManager(a.store, a.pluginRegistry, pluginsDir)
+	}
+
 	if a.kernel == nil {
 		a.kernel = pipeline.NewKernel(
 			a.capture, a.asr, a.paster, a.process, a.store,
@@ -616,6 +633,10 @@ func (a *App) Start(ctx context.Context) error {
 
 		a.wg.Add(1)
 		go a.eventLoop(events)
+	}
+
+	if a.pluginManager != nil {
+		_ = a.pluginManager.LoadAll(a.ctx)
 	}
 
 	return nil
@@ -3493,6 +3514,17 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 		return nil, errors.New("plugin not found")
 
 	case "plugin_list":
+		if a.pluginManager != nil {
+			statuses, err := a.pluginManager.List()
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{
+				"ok":      true,
+				"plugins": statuses,
+				"count":   len(statuses),
+			}, nil
+		}
 		if a.pluginRegistry == nil {
 			return map[string]any{"ok": true, "plugins": []*plugins.Manifest{}, "count": 0}, nil
 		}
@@ -3501,6 +3533,94 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			"ok":      true,
 			"plugins": list,
 			"count":   len(list),
+		}, nil
+
+	case "plugin_install":
+		if a.pluginManager == nil {
+			return nil, errors.New("plugin manager not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		path, _ := params["path"].(string)
+		if path == "" {
+			return nil, errors.New("missing path parameter")
+		}
+		status, err := a.pluginManager.Install(path)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok":     true,
+			"plugin": status,
+		}, nil
+
+	case "plugin_uninstall":
+		if a.pluginManager == nil {
+			return nil, errors.New("plugin manager not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		id, _ := params["id"].(string)
+		if id == "" {
+			return nil, errors.New("missing id parameter")
+		}
+		if err := a.pluginManager.Uninstall(id); err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok": true,
+			"id": id,
+		}, nil
+
+	case "plugin_activate":
+		if a.pluginManager == nil {
+			return nil, errors.New("plugin manager not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		id, _ := params["id"].(string)
+		if id == "" {
+			return nil, errors.New("missing id parameter")
+		}
+		status, err := a.pluginManager.Activate(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok":     true,
+			"plugin": status,
+		}, nil
+
+	case "plugin_deactivate":
+		if a.pluginManager == nil {
+			return nil, errors.New("plugin manager not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		id, _ := params["id"].(string)
+		if id == "" {
+			return nil, errors.New("missing id parameter")
+		}
+		if err := a.pluginManager.Deactivate(id); err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok": true,
+			"id": id,
+		}, nil
+
+	case "plugin_status":
+		if a.pluginManager == nil {
+			return nil, errors.New("plugin manager not configured")
+		}
+		params, _ := req.Params.(map[string]any)
+		id, _ := params["id"].(string)
+		if id == "" {
+			return nil, errors.New("missing id parameter")
+		}
+		status, err := a.pluginManager.GetStatus(id)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok":     true,
+			"plugin": status,
 		}, nil
 
 	case "plugin_register":

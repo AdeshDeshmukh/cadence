@@ -1198,3 +1198,78 @@ func TestSQLite_Embeddings(t *testing.T) {
 		t.Fatalf("expected embedding to be cascade-deleted")
 	}
 }
+
+func TestSQLite_Plugins(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open(:memory:) failed: %v", err)
+	}
+	defer s.Close()
+
+	now := time.Now().Truncate(time.Second)
+	p1 := PluginRecord{
+		ID:           "plugin-alpha",
+		Name:         "Plugin Alpha",
+		Version:      "1.0.0",
+		InstallDir:   "/tmp/plugins/alpha",
+		Enabled:      true,
+		ManifestJSON: `{"id":"plugin-alpha"}`,
+		InstalledAt:  now.Add(-time.Hour),
+	}
+	p2 := PluginRecord{
+		ID:           "plugin-beta",
+		Name:         "Plugin Beta",
+		Version:      "2.0.0",
+		InstallDir:   "/tmp/plugins/beta",
+		Enabled:      false,
+		ManifestJSON: `{"id":"plugin-beta"}`,
+		InstalledAt:  now,
+	}
+
+	if err := s.SavePlugin(p1); err != nil {
+		t.Fatalf("SavePlugin p1: %v", err)
+	}
+	if err := s.SavePlugin(p2); err != nil {
+		t.Fatalf("SavePlugin p2: %v", err)
+	}
+
+	got, err := s.GetPlugin("plugin-alpha")
+	if err != nil {
+		t.Fatalf("GetPlugin: %v", err)
+	}
+	if got.Name != "Plugin Alpha" || !got.Enabled || got.Version != "1.0.0" {
+		t.Fatalf("unexpected plugin got: %+v", got)
+	}
+
+	list, err := s.ListPlugins()
+	if err != nil {
+		t.Fatalf("ListPlugins: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("expected 2 plugins, got %d", len(list))
+	}
+	if list[0].ID != "plugin-alpha" || list[1].ID != "plugin-beta" {
+		t.Fatalf("unexpected list order: %s, %s", list[0].ID, list[1].ID)
+	}
+
+	// Update enabled status
+	if err := s.SetPluginEnabled("plugin-beta", true); err != nil {
+		t.Fatalf("SetPluginEnabled: %v", err)
+	}
+	gotBeta, err := s.GetPlugin("plugin-beta")
+	if err != nil || !gotBeta.Enabled {
+		t.Fatalf("expected plugin-beta to be enabled: %+v", gotBeta)
+	}
+
+	// Delete plugin
+	if err := s.DeletePlugin("plugin-alpha"); err != nil {
+		t.Fatalf("DeletePlugin: %v", err)
+	}
+	_, err = s.GetPlugin("plugin-alpha")
+	if err == nil {
+		t.Fatalf("expected error for deleted plugin, got nil")
+	}
+	if err := s.DeletePlugin("plugin-alpha"); err == nil {
+		t.Fatalf("expected error when deleting non-existent plugin")
+	}
+}

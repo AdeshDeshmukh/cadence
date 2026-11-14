@@ -24,6 +24,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
 	"github.com/AdeshDeshmukh/cadence/internal/meeting"
 	"github.com/AdeshDeshmukh/cadence/internal/paste"
+	"github.com/AdeshDeshmukh/cadence/internal/plugins"
 	"github.com/AdeshDeshmukh/cadence/internal/polish"
 	"github.com/AdeshDeshmukh/cadence/internal/postprocess"
 	"github.com/AdeshDeshmukh/cadence/internal/search"
@@ -3695,5 +3696,128 @@ func TestApp_PluginIPC(t *testing.T) {
 	// 6. Error validations
 	if _, err := app.Handle(ctx, ipc.Request{Method: "plugin_validate"}); err == nil {
 		t.Fatal("expected error on validate without path or data")
+	}
+}
+
+func TestApp_PluginLifecycleIPC(t *testing.T) {
+	tempDir := t.TempDir()
+	pluginsHome := filepath.Join(tempDir, "plugins_home")
+	srcDir := filepath.Join(tempDir, "sample_plugin")
+	_ = os.MkdirAll(srcDir, 0755)
+
+	scriptContent := `#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *"\"type\":\"init\""*)
+      echo '{"type":"init_ack","payload":{"ok":true}}'
+      ;;
+    *"\"type\":\"ping\""*)
+      echo '{"type":"pong"}'
+      ;;
+    *)
+      echo '{"type":"pong"}'
+      ;;
+  esac
+done
+`
+	scriptPath := filepath.Join(srcDir, "entry.sh")
+	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+		t.Fatalf("write entry.sh: %v", err)
+	}
+
+	manifestYAML := `
+id: sample.echo.plugin
+name: Sample Echo Plugin
+version: 1.0.0
+description: Sample plugin for daemon IPC lifecycle testing
+entrypoint: ./entry.sh
+capabilities:
+  - command
+`
+	if err := os.WriteFile(filepath.Join(srcDir, "plugin.yaml"), []byte(manifestYAML), 0644); err != nil {
+		t.Fatalf("write plugin.yaml: %v", err)
+	}
+
+	memStore := storage.NewMemory()
+	reg := plugins.NewRegistry()
+	mgr := plugins.NewManager(memStore, reg, pluginsHome)
+
+	cfg := config.Default()
+	app := NewApp(cfg, WithStore(memStore), WithPluginRegistry(reg), WithPluginManager(mgr))
+	ctx := context.Background()
+
+	// 1. Install
+	instRes, err := app.Handle(ctx, ipc.Request{
+		Method: "plugin_install",
+		Params: map[string]any{"path": srcDir},
+	})
+	if err != nil {
+		t.Fatalf("plugin_install failed: %v", err)
+	}
+	instMap := instRes.(map[string]any)
+	if instMap["ok"] != true {
+		t.Fatalf("expected ok true, got: %+v", instMap)
+	}
+
+	// 2. Status
+	stRes, err := app.Handle(ctx, ipc.Request{
+		Method: "plugin_status",
+		Params: map[string]any{"id": "sample.echo.plugin"},
+	})
+	if err != nil {
+		t.Fatalf("plugin_status failed: %v", err)
+	}
+	stMap := stRes.(map[string]any)
+	if stMap["ok"] != true {
+		t.Fatalf("expected ok true in status: %+v", stMap)
+	}
+
+	// 3. List
+	listRes, err := app.Handle(ctx, ipc.Request{Method: "plugin_list"})
+	if err != nil {
+		t.Fatalf("plugin_list failed: %v", err)
+	}
+	listMap := listRes.(map[string]any)
+	if listMap["count"].(int) != 1 {
+		t.Fatalf("expected 1 plugin in list, got: %+v", listMap)
+	}
+
+	// 4. Activate
+	actRes, err := app.Handle(ctx, ipc.Request{
+		Method: "plugin_activate",
+		Params: map[string]any{"id": "sample.echo.plugin"},
+	})
+	if err != nil {
+		t.Fatalf("plugin_activate failed: %v", err)
+	}
+	actMap := actRes.(map[string]any)
+	if actMap["ok"] != true {
+		t.Fatalf("expected ok true in activate: %+v", actMap)
+	}
+
+	// 5. Deactivate
+	deactRes, err := app.Handle(ctx, ipc.Request{
+		Method: "plugin_deactivate",
+		Params: map[string]any{"id": "sample.echo.plugin"},
+	})
+	if err != nil {
+		t.Fatalf("plugin_deactivate failed: %v", err)
+	}
+	deactMap := deactRes.(map[string]any)
+	if deactMap["ok"] != true {
+		t.Fatalf("expected ok true in deactivate: %+v", deactMap)
+	}
+
+	// 6. Uninstall
+	uninstRes, err := app.Handle(ctx, ipc.Request{
+		Method: "plugin_uninstall",
+		Params: map[string]any{"id": "sample.echo.plugin"},
+	})
+	if err != nil {
+		t.Fatalf("plugin_uninstall failed: %v", err)
+	}
+	uninstMap := uninstRes.(map[string]any)
+	if uninstMap["ok"] != true {
+		t.Fatalf("expected ok true in uninstall: %+v", uninstMap)
 	}
 }

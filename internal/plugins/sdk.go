@@ -284,9 +284,17 @@ func (c *HostClient) SendCall(ctx context.Context, req Message) (Message, error)
 			var resp Message
 			if err := json.Unmarshal(c.in.Bytes(), &resp); err == nil {
 				c.mu.Lock()
-				if ch, ok := c.pending[resp.ID]; ok {
-					ch <- resp
-					delete(c.pending, resp.ID)
+				if resp.ID != "" {
+					if ch, ok := c.pending[resp.ID]; ok {
+						ch <- resp
+						delete(c.pending, resp.ID)
+					}
+				} else {
+					for k, ch := range c.pending {
+						ch <- resp
+						delete(c.pending, k)
+						break
+					}
 				}
 				c.mu.Unlock()
 			}

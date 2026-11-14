@@ -918,6 +918,50 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 			},
 			"count": 1,
 		}, nil
+	case "plugin_install":
+		return map[string]any{
+			"ok": true,
+			"plugin": map[string]any{
+				"id":          "com.mock.plugin",
+				"name":        "Mock Plugin",
+				"version":     "1.0.0",
+				"install_dir": "/tmp/plugins/com.mock.plugin",
+				"state":       "installed",
+				"enabled":     true,
+			},
+		}, nil
+	case "plugin_activate":
+		return map[string]any{
+			"ok": true,
+			"plugin": map[string]any{
+				"id":    "com.mock.plugin",
+				"state": "active",
+				"pid":   4242,
+			},
+		}, nil
+	case "plugin_deactivate":
+		return map[string]any{
+			"ok": true,
+			"id": "com.mock.plugin",
+		}, nil
+	case "plugin_uninstall":
+		return map[string]any{
+			"ok": true,
+			"id": "com.mock.plugin",
+		}, nil
+	case "plugin_status":
+		return map[string]any{
+			"ok": true,
+			"plugin": map[string]any{
+				"id":          "com.mock.plugin",
+				"name":        "Mock Plugin",
+				"version":     "1.0.0",
+				"state":       "active",
+				"pid":         4242,
+				"install_dir": "/tmp/plugins/com.mock.plugin",
+				"enabled":     true,
+			},
+		}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -3277,7 +3321,52 @@ func TestCLI_Plugin(t *testing.T) {
 		t.Fatalf("unexpected plugin list output: %s", out.String())
 	}
 
-	// 5. Plugin help
+	// 5. Plugin install
+	out.Reset()
+	if err := cmdPlugin(ctx, client, []string{"install", pluginDir}, &out); err != nil {
+		t.Fatalf("cmdPlugin install failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "installed successfully") {
+		t.Fatalf("unexpected plugin install output: %s", out.String())
+	}
+
+	// 6. Plugin activate
+	out.Reset()
+	if err := cmdPlugin(ctx, client, []string{"activate", "com.mock.plugin"}, &out); err != nil {
+		t.Fatalf("cmdPlugin activate failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Activated plugin") || !strings.Contains(out.String(), "PID: 4242") {
+		t.Fatalf("unexpected plugin activate output: %s", out.String())
+	}
+
+	// 7. Plugin status
+	out.Reset()
+	if err := cmdPlugin(ctx, client, []string{"status", "com.mock.plugin"}, &out); err != nil {
+		t.Fatalf("cmdPlugin status failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Plugin Status:") || !strings.Contains(out.String(), "State:       active") {
+		t.Fatalf("unexpected plugin status output: %s", out.String())
+	}
+
+	// 8. Plugin deactivate
+	out.Reset()
+	if err := cmdPlugin(ctx, client, []string{"deactivate", "com.mock.plugin"}, &out); err != nil {
+		t.Fatalf("cmdPlugin deactivate failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Deactivated plugin") {
+		t.Fatalf("unexpected plugin deactivate output: %s", out.String())
+	}
+
+	// 9. Plugin uninstall
+	out.Reset()
+	if err := cmdPlugin(ctx, client, []string{"uninstall", "com.mock.plugin"}, &out); err != nil {
+		t.Fatalf("cmdPlugin uninstall failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Uninstalled plugin") {
+		t.Fatalf("unexpected plugin uninstall output: %s", out.String())
+	}
+
+	// 10. Plugin help
 	out.Reset()
 	if err := cmdPlugin(ctx, client, []string{"help"}, &out); err != nil {
 		t.Fatalf("cmdPlugin help failed: %v", err)
@@ -3286,7 +3375,7 @@ func TestCLI_Plugin(t *testing.T) {
 		t.Fatalf("unexpected plugin help output: %s", out.String())
 	}
 
-	// 6. Unknown subcommand
+	// 11. Unknown subcommand
 	if err := cmdPlugin(ctx, client, []string{"unknown_cmd_xyz"}, &out); err == nil {
 		t.Fatal("expected error for unknown plugin subcommand")
 	}
