@@ -25,6 +25,7 @@ type Memory struct {
 	noteTags    map[string]map[string]struct{}
 	tags        map[string]time.Time
 	embeddings  map[string]EmbeddingRecord
+	plugins     map[string]PluginRecord
 }
 
 func NewMemory() *Memory {
@@ -42,6 +43,7 @@ func NewMemory() *Memory {
 		noteTags:   map[string]map[string]struct{}{},
 		tags:       map[string]time.Time{},
 		embeddings: map[string]EmbeddingRecord{},
+		plugins:    map[string]PluginRecord{},
 	}
 }
 
@@ -945,5 +947,71 @@ func (m *Memory) DeleteEmbedding(targetType, targetID, model string) error {
 			delete(m.embeddings, k)
 		}
 	}
+	return nil
+}
+
+func (m *Memory) SavePlugin(rec PluginRecord) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.plugins == nil {
+		m.plugins = make(map[string]PluginRecord)
+	}
+	if rec.InstalledAt.IsZero() {
+		rec.InstalledAt = time.Now()
+	}
+	rec.UpdatedAt = time.Now()
+	m.plugins[rec.ID] = rec
+	return nil
+}
+
+func (m *Memory) GetPlugin(id string) (*PluginRecord, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	rec, ok := m.plugins[id]
+	if !ok {
+		return nil, errors.New("plugin not found: " + id)
+	}
+	cp := rec
+	return &cp, nil
+}
+
+func (m *Memory) ListPlugins() ([]PluginRecord, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var list []PluginRecord
+	for _, rec := range m.plugins {
+		list = append(list, rec)
+	}
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].InstalledAt.Before(list[j].InstalledAt)
+	})
+	return list, nil
+}
+
+func (m *Memory) DeletePlugin(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, ok := m.plugins[id]; !ok {
+		return errors.New("plugin not found: " + id)
+	}
+	delete(m.plugins, id)
+	return nil
+}
+
+func (m *Memory) SetPluginEnabled(id string, enabled bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	rec, ok := m.plugins[id]
+	if !ok {
+		return errors.New("plugin not found: " + id)
+	}
+	rec.Enabled = enabled
+	rec.UpdatedAt = time.Now()
+	m.plugins[id] = rec
 	return nil
 }

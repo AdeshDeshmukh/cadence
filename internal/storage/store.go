@@ -181,6 +181,18 @@ type EmbeddingRecord struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
+// PluginRecord represents the persistent state and location of an installed plugin.
+type PluginRecord struct {
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	Version      string    `json:"version"`
+	InstallDir   string    `json:"install_dir"`
+	Enabled      bool      `json:"enabled"`
+	ManifestJSON string    `json:"manifest_json"`
+	InstalledAt  time.Time `json:"installed_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
 type Store interface {
 	SaveTranscript(Transcript) error
 	GetTranscript(id string) (*Transcript, error)
@@ -240,4 +252,11 @@ type Store interface {
 	GetEmbedding(targetType, targetID, model string) (*EmbeddingRecord, error)
 	ListEmbeddings(targetType, model string) ([]EmbeddingRecord, error)
 	DeleteEmbedding(targetType, targetID, model string) error
+
+	// Plugins
+	SavePlugin(PluginRecord) error
+	GetPlugin(id string) (*PluginRecord, error)
+	ListPlugins() ([]PluginRecord, error)
+	DeletePlugin(id string) error
+	SetPluginEnabled(id string, enabled bool) error
 }

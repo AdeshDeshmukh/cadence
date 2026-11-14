@@ -337,3 +337,67 @@ func TestMemoryStore_Embeddings(t *testing.T) {
 		t.Fatalf("expected embedding to be deleted")
 	}
 }
+
+func TestMemoryStore_Plugins(t *testing.T) {
+	mem := storage.NewMemory()
+
+	p1 := storage.PluginRecord{
+		ID:           "test-plugin-1",
+		Name:         "Test Plugin 1",
+		Version:      "1.0.0",
+		InstallDir:   "/tmp/plugins/test1",
+		Enabled:      true,
+		ManifestJSON: `{"id":"test-plugin-1"}`,
+		InstalledAt:  time.Now().Add(-time.Hour),
+	}
+	p2 := storage.PluginRecord{
+		ID:           "test-plugin-2",
+		Name:         "Test Plugin 2",
+		Version:      "0.1.0",
+		InstallDir:   "/tmp/plugins/test2",
+		Enabled:      false,
+		ManifestJSON: `{"id":"test-plugin-2"}`,
+		InstalledAt:  time.Now(),
+	}
+
+	if err := mem.SavePlugin(p1); err != nil {
+		t.Fatalf("SavePlugin p1 failed: %v", err)
+	}
+	if err := mem.SavePlugin(p2); err != nil {
+		t.Fatalf("SavePlugin p2 failed: %v", err)
+	}
+
+	got, err := mem.GetPlugin("test-plugin-1")
+	if err != nil {
+		t.Fatalf("GetPlugin failed: %v", err)
+	}
+	if got.Name != "Test Plugin 1" || !got.Enabled {
+		t.Fatalf("unexpected plugin got: %+v", got)
+	}
+
+	list, err := mem.ListPlugins()
+	if err != nil {
+		t.Fatalf("ListPlugins failed: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("expected 2 plugins, got %d", len(list))
+	}
+	if list[0].ID != "test-plugin-1" || list[1].ID != "test-plugin-2" {
+		t.Fatalf("expected sorted by installed_at ASC, got %s then %s", list[0].ID, list[1].ID)
+	}
+
+	if err := mem.SetPluginEnabled("test-plugin-2", true); err != nil {
+		t.Fatalf("SetPluginEnabled failed: %v", err)
+	}
+	p2Got, err := mem.GetPlugin("test-plugin-2")
+	if err != nil || !p2Got.Enabled {
+		t.Fatalf("expected p2 to be enabled: %+v", p2Got)
+	}
+
+	if err := mem.DeletePlugin("test-plugin-1"); err != nil {
+		t.Fatalf("DeletePlugin failed: %v", err)
+	}
+	if _, err := mem.GetPlugin("test-plugin-1"); err == nil {
+		t.Fatalf("expected plugin 1 to be deleted")
+	}
+}
