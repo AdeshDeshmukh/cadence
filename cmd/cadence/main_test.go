@@ -3380,3 +3380,40 @@ func TestCLI_Plugin(t *testing.T) {
 		t.Fatal("expected error for unknown plugin subcommand")
 	}
 }
+
+func TestCLI_MCP(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.Default()
+	client := ipc.Client{}
+
+	// 1. Info
+	var out bytes.Buffer
+	if err := cmdMCP(ctx, cfg, client, []string{"info"}, nil, &out); err != nil {
+		t.Fatalf("cmdMCP info failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Cadence Model Context Protocol (MCP) Server") ||
+		!strings.Contains(out.String(), "cadence_get_history") ||
+		!strings.Contains(out.String(), "cadence://notes") {
+		t.Fatalf("unexpected mcp info output: %s", out.String())
+	}
+
+	// 2. Help
+	out.Reset()
+	if err := cmdMCP(ctx, cfg, client, []string{"help"}, nil, &out); err != nil {
+		t.Fatalf("cmdMCP help failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "cadence mcp - Model Context Protocol") {
+		t.Fatalf("unexpected mcp help output: %s", out.String())
+	}
+
+	// 3. Serve (ping over piped in/out)
+	out.Reset()
+	in := strings.NewReader("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n")
+	serveCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+
+	_ = cmdMCP(serveCtx, cfg, client, []string{"serve"}, in, &out)
+	if !strings.Contains(out.String(), `"id":1`) {
+		t.Fatalf("expected ping response, got: %s", out.String())
+	}
+}
