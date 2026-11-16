@@ -1,7 +1,7 @@
 package mcp_test
 
 import (
-	"bytes"
+	"bufio"
 	"context"
 	"encoding/json"
 	"io"
@@ -25,7 +25,7 @@ func (m *mockIPCClient) Call(ctx context.Context, method string, params any) (an
 	return nil, nil
 }
 
-func setupTestServer(t *testing.T) (*mcp.Server, *storage.Memory, *bytes.Buffer, *io.PipeWriter) {
+func setupTestServer(t *testing.T) (*mcp.Server, *storage.Memory, *bufio.Reader, *io.PipeWriter) {
 	t.Helper()
 	store := storage.NewMemory()
 
@@ -68,16 +68,15 @@ func setupTestServer(t *testing.T) (*mcp.Server, *storage.Memory, *bytes.Buffer,
 
 	prov := mcp.NewDirectProvider(store, edCtx, nil, nil, nil)
 
-	pipeReader, pipeWriter := io.Pipe()
-	outBuf := &bytes.Buffer{}
+	inReader, inWriter := io.Pipe()
+	outReader, outWriter := io.Pipe()
 
-	server := mcp.NewServer(prov, pipeReader, outBuf)
-	return server, store, outBuf, pipeWriter
+	server := mcp.NewServer(prov, inReader, outWriter)
+	return server, store, bufio.NewReader(outReader), inWriter
 }
 
-func executeJSONRPC(t *testing.T, w *io.PipeWriter, out *bytes.Buffer, req mcp.Request) mcp.Response {
+func executeJSONRPC(t *testing.T, w *io.PipeWriter, r *bufio.Reader, req mcp.Request) mcp.Response {
 	t.Helper()
-	out.Reset()
 
 	data, err := json.Marshal(req)
 	if err != nil {
@@ -88,12 +87,9 @@ func executeJSONRPC(t *testing.T, w *io.PipeWriter, out *bytes.Buffer, req mcp.R
 		t.Fatalf("write to pipe: %v", err)
 	}
 
-	// Give a few ms for the server loop to process
-	time.Sleep(20 * time.Millisecond)
-
-	line, err := out.ReadBytes('\n')
+	line, err := r.ReadBytes('\n')
 	if err != nil {
-		t.Fatalf("read response line: %v, raw output: %q", err, out.String())
+		t.Fatalf("read response line: %v", err)
 	}
 
 	var resp mcp.Response
@@ -104,7 +100,7 @@ func executeJSONRPC(t *testing.T, w *io.PipeWriter, out *bytes.Buffer, req mcp.R
 }
 
 func TestMCP_InitializeAndPing(t *testing.T) {
-	server, _, outBuf, pipeWriter := setupTestServer(t)
+	server, _, outReader, pipeWriter := setupTestServer(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -121,7 +117,7 @@ func TestMCP_InitializeAndPing(t *testing.T) {
 		Method:  "initialize",
 		Params:  json.RawMessage(`{"protocolVersion":"2024-11-05","clientInfo":{"name":"test-client","version":"1.0"}}`),
 	}
-	resp := executeJSONRPC(t, pipeWriter, outBuf, initReq)
+	resp := executeJSONRPC(t, pipeWriter, outReader, initReq)
 	if resp.Error != nil {
 		t.Fatalf("initialize error: %v", resp.Error)
 	}
@@ -138,14 +134,14 @@ func TestMCP_InitializeAndPing(t *testing.T) {
 		ID:      2,
 		Method:  "ping",
 	}
-	pingResp := executeJSONRPC(t, pipeWriter, outBuf, pingReq)
+	pingResp := executeJSONRPC(t, pipeWriter, outReader, pingReq)
 	if pingResp.Error != nil {
 		t.Fatalf("ping failed: %v", pingResp.Error)
 	}
 }
 
 func TestMCP_ToolsListAndCalls(t *testing.T) {
-	server, store, outBuf, pipeWriter := setupTestServer(t)
+	server, store, outReader, pipeWriter := setupTestServer(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -161,7 +157,7 @@ func TestMCP_ToolsListAndCalls(t *testing.T) {
 		ID:      10,
 		Method:  "tools/list",
 	}
-	listResp := executeJSONRPC(t, pipeWriter, outBuf, listReq)
+	listResp := executeJSONRPC(t, pipeWriter, outReader, listReq)
 	if listResp.Error != nil {
 		t.Fatalf("tools/list error: %v", listResp.Error)
 	}
@@ -181,7 +177,7 @@ func TestMCP_ToolsListAndCalls(t *testing.T) {
 		Method:  "tools/call",
 		Params:  json.RawMessage(`{"name":"cadence_get_history","arguments":{"limit":5}}`),
 	}
-	histResp := executeJSONRPC(t, pipeWriter, outBuf, histReq)
+	histResp := executeJSONRPC(t, pipeWriter, outReader, histReq)
 	if histResp.Error != nil {
 		t.Fatalf("history call failed: %v", histResp.Error)
 	}
@@ -199,7 +195,7 @@ func TestMCP_ToolsListAndCalls(t *testing.T) {
 		Method:  "tools/call",
 		Params:  json.RawMessage(`{"name":"cadence_get_vocabulary","arguments":{"filter":"cube"}}`),
 	}
-	vocResp := executeJSONRPC(t, pipeWriter, outBuf, vocReq)
+	vocResp := executeJSONRPC(t, pipeWriter, outReader, vocReq)
 	if vocResp.Error != nil {
 		t.Fatalf("vocabulary call failed: %v", vocResp.Error)
 	}
@@ -217,7 +213,7 @@ func TestMCP_ToolsListAndCalls(t *testing.T) {
 		Method:  "tools/call",
 		Params:  json.RawMessage(`{"name":"cadence_add_vocabulary","arguments":{"spoken":"gee tee","canonical":"git"}}`),
 	}
-	addResp := executeJSONRPC(t, pipeWriter, outBuf, addReq)
+	addResp := executeJSONRPC(t, pipeWriter, outReader, addReq)
 	if addResp.Error != nil {
 		t.Fatalf("add vocabulary failed: %v", addResp.Error)
 	}
@@ -241,7 +237,7 @@ func TestMCP_ToolsListAndCalls(t *testing.T) {
 		Method:  "tools/call",
 		Params:  json.RawMessage(`{"name":"cadence_get_snippets","arguments":{"query":"sig"}}`),
 	}
-	snipResp := executeJSONRPC(t, pipeWriter, outBuf, snipReq)
+	snipResp := executeJSONRPC(t, pipeWriter, outReader, snipReq)
 	if snipResp.Error != nil {
 		t.Fatalf("snippets call failed: %v", snipResp.Error)
 	}
@@ -259,7 +255,7 @@ func TestMCP_ToolsListAndCalls(t *testing.T) {
 		Method:  "tools/call",
 		Params:  json.RawMessage(`{"name":"cadence_get_context","arguments":{"include_editor":true}}`),
 	}
-	ctxResp := executeJSONRPC(t, pipeWriter, outBuf, ctxReq)
+	ctxResp := executeJSONRPC(t, pipeWriter, outReader, ctxReq)
 	if ctxResp.Error != nil {
 		t.Fatalf("context call failed: %v", ctxResp.Error)
 	}
@@ -272,7 +268,7 @@ func TestMCP_ToolsListAndCalls(t *testing.T) {
 }
 
 func TestMCP_ResourcesAndPrompts(t *testing.T) {
-	server, _, outBuf, pipeWriter := setupTestServer(t)
+	server, _, outReader, pipeWriter := setupTestServer(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -288,7 +284,7 @@ func TestMCP_ResourcesAndPrompts(t *testing.T) {
 		ID:      20,
 		Method:  "resources/list",
 	}
-	resListResp := executeJSONRPC(t, pipeWriter, outBuf, resListReq)
+	resListResp := executeJSONRPC(t, pipeWriter, outReader, resListReq)
 	if resListResp.Error != nil {
 		t.Fatalf("resources/list error: %v", resListResp.Error)
 	}
@@ -305,7 +301,7 @@ func TestMCP_ResourcesAndPrompts(t *testing.T) {
 		Method:  "resources/read",
 		Params:  json.RawMessage(`{"uri":"cadence://notes"}`),
 	}
-	readResp := executeJSONRPC(t, pipeWriter, outBuf, readReq)
+	readResp := executeJSONRPC(t, pipeWriter, outReader, readReq)
 	if readResp.Error != nil {
 		t.Fatalf("resources/read error: %v", readResp.Error)
 	}
@@ -322,7 +318,7 @@ func TestMCP_ResourcesAndPrompts(t *testing.T) {
 		ID:      22,
 		Method:  "prompts/list",
 	}
-	pListResp := executeJSONRPC(t, pipeWriter, outBuf, pListReq)
+	pListResp := executeJSONRPC(t, pipeWriter, outReader, pListReq)
 	if pListResp.Error != nil {
 		t.Fatalf("prompts/list error: %v", pListResp.Error)
 	}
@@ -334,7 +330,7 @@ func TestMCP_ResourcesAndPrompts(t *testing.T) {
 		Method:  "prompts/get",
 		Params:  json.RawMessage(`{"name":"cadence_dictation_context"}`),
 	}
-	pGetResp := executeJSONRPC(t, pipeWriter, outBuf, pGetReq)
+	pGetResp := executeJSONRPC(t, pipeWriter, outReader, pGetReq)
 	if pGetResp.Error != nil {
 		t.Fatalf("prompts/get error: %v", pGetResp.Error)
 	}
@@ -347,7 +343,7 @@ func TestMCP_ResourcesAndPrompts(t *testing.T) {
 }
 
 func TestMCP_ErrorHandling(t *testing.T) {
-	server, _, outBuf, pipeWriter := setupTestServer(t)
+	server, _, outReader, pipeWriter := setupTestServer(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -363,7 +359,7 @@ func TestMCP_ErrorHandling(t *testing.T) {
 		ID:      99,
 		Method:  "unknown/method/xyz",
 	}
-	unkResp := executeJSONRPC(t, pipeWriter, outBuf, unkReq)
+	unkResp := executeJSONRPC(t, pipeWriter, outReader, unkReq)
 	if unkResp.Error == nil || unkResp.Error.Code != mcp.CodeMethodNotFound {
 		t.Fatalf("expected MethodNotFound error, got: %+v", unkResp)
 	}
@@ -375,7 +371,7 @@ func TestMCP_ErrorHandling(t *testing.T) {
 		Method:  "tools/call",
 		Params:  json.RawMessage(`{"name":"nonexistent_tool"}`),
 	}
-	badToolResp := executeJSONRPC(t, pipeWriter, outBuf, badToolReq)
+	badToolResp := executeJSONRPC(t, pipeWriter, outReader, badToolReq)
 	toolRes, _ := json.Marshal(badToolResp.Result)
 	var res mcp.ToolCallResult
 	_ = json.Unmarshal(toolRes, &res)

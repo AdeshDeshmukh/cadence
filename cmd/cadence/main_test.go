@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -3407,13 +3409,26 @@ func TestCLI_MCP(t *testing.T) {
 	}
 
 	// 3. Serve (ping over piped in/out)
-	out.Reset()
-	in := strings.NewReader("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n")
-	serveCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	cfg.Storage.DBPath = ":memory:"
+	inReader, inWriter := io.Pipe()
+	outReader, outWriter := io.Pipe()
+
+	serveCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
-	_ = cmdMCP(serveCtx, cfg, client, []string{"serve"}, in, &out)
-	if !strings.Contains(out.String(), `"id":1`) {
-		t.Fatalf("expected ping response, got: %s", out.String())
+	go func() {
+		_ = cmdMCP(serveCtx, cfg, client, []string{"serve"}, inReader, outWriter)
+		_ = outWriter.Close()
+	}()
+
+	_, _ = inWriter.Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n"))
+	_ = inWriter.Close()
+
+	respLine, err := bufio.NewReader(outReader).ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("failed reading ping response: %v", err)
+	}
+	if !strings.Contains(string(respLine), `"id":1`) {
+		t.Fatalf("expected ping response, got: %s", string(respLine))
 	}
 }
