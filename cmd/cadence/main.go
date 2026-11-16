@@ -21,6 +21,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/developer"
 	"github.com/AdeshDeshmukh/cadence/internal/edit"
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
+	"github.com/AdeshDeshmukh/cadence/internal/mcp"
 	"github.com/AdeshDeshmukh/cadence/internal/paste"
 	"github.com/AdeshDeshmukh/cadence/internal/plugins"
 	"github.com/AdeshDeshmukh/cadence/internal/polish"
@@ -75,6 +76,7 @@ Commands:
   export <type> <id>   Export meeting, transcript, or note (markdown, srt, vtt, json, txt)
   import <file>        Import media file (audio/video) or subtitles (.srt, .vtt, .json)
   plugin [subcommand]  Manage plugins, manifests, lifecycle, and sandbox (install, activate, deactivate, list, status)
+  mcp [serve|info]     Model Context Protocol (MCP) server for Claude Code, Cursor, Antigravity
   context [show|set|clear] Show or manage developer/code editor context (file, language, selection)
   terminal [status|hook] Inspect terminal/shell context or generate shell integration hooks
   app                Show detected active foreground application and category
@@ -361,6 +363,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "plugin", "plugins":
 		if err := cmdPlugin(ctx, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "mcp":
+		if err := cmdMCP(ctx, cfg, client, args[1:], os.Stdin, stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -6281,4 +6290,82 @@ func cmdPluginInit(ctx context.Context, client ipc.Client, args []string, out io
 	fmt.Fprintf(out, "  Version:    %s\n", tmpl.Version)
 	fmt.Fprintf(out, "  Entrypoint: %s\n", tmpl.Entrypoint)
 	return nil
+}
+
+func printMCPUsage(out io.Writer) {
+	fmt.Fprintln(out, "cadence mcp - Model Context Protocol (MCP) server for Cadence")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Usage:")
+	fmt.Fprintln(out, "  cadence mcp [serve]    Run MCP stdio JSON-RPC 2.0 server (used by Claude/Cursor/Windsurf)")
+	fmt.Fprintln(out, "  cadence mcp info       Display exposed tools, resources, and client configuration guide")
+}
+
+func cmdMCP(ctx context.Context, cfg config.Config, client ipc.Client, args []string, in io.Reader, out io.Writer) error {
+	sub := "serve"
+	if len(args) > 0 {
+		sub = strings.ToLower(args[0])
+	}
+
+	switch sub {
+	case "serve", "start", "run":
+		return runMCPServer(ctx, cfg, client, in, out)
+	case "info":
+		showMCPInfo(out)
+		return nil
+	case "help", "--help", "-h":
+		printMCPUsage(out)
+		return nil
+	default:
+		return runMCPServer(ctx, cfg, client, in, out)
+	}
+}
+
+func runMCPServer(ctx context.Context, cfg config.Config, client ipc.Client, in io.Reader, out io.Writer) error {
+	ipcProv := mcp.NewIPCProvider(client)
+
+	var directProv *mcp.DirectProvider
+	storePath := cfg.Storage.DBPath
+	if storePath == "" {
+		home, _ := os.UserHomeDir()
+		storePath = filepath.Join(home, ".config", "cadence", "cadence.db")
+	}
+	if st, err := storage.Open(storePath); err == nil {
+		defer st.Close()
+		directProv = mcp.NewDirectProvider(st, nil, nil, nil, nil)
+	}
+
+	autoProv := mcp.NewAutoProvider(ipcProv, directProv)
+	server := mcp.NewServer(autoProv, in, out)
+	return server.Serve(ctx)
+}
+
+func showMCPInfo(out io.Writer) {
+	fmt.Fprintln(out, "Cadence Model Context Protocol (MCP) Server")
+	fmt.Fprintf(out, "Version:     %s\n", version.Version)
+	fmt.Fprintf(out, "Protocol:    %s (JSON-RPC 2.0 Stdio)\n\n", mcp.LatestMCPVersion)
+
+	fmt.Fprintln(out, "Exposed MCP Tools:")
+	fmt.Fprintln(out, "  - cadence_get_history:        Query recent dictations and meeting summaries")
+	fmt.Fprintln(out, "  - cadence_get_vocabulary:     List custom spoken-to-canonical terms")
+	fmt.Fprintln(out, "  - cadence_add_vocabulary:     Register new technical / spoken phonetic terms")
+	fmt.Fprintln(out, "  - cadence_get_snippets:       Fetch text expansion snippets and triggers")
+	fmt.Fprintln(out, "  - cadence_get_context:        Real-time active editor, file, and terminal state")
+	fmt.Fprintln(out, "  - cadence_search_knowledge:   Full-text and semantic vector search across notes")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Exposed MCP Resources:")
+	fmt.Fprintln(out, "  - cadence://transcripts/recent")
+	fmt.Fprintln(out, "  - cadence://notes")
+	fmt.Fprintln(out, "  - cadence://context/editor")
+	fmt.Fprintln(out, "  - cadence://vocabulary")
+	fmt.Fprintln(out, "  - cadence://snippets")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Claude Desktop / Claude Code Configuration (~/.claude/claude_desktop_config.json):")
+	fmt.Fprintln(out, "  {")
+	fmt.Fprintln(out, "    \"mcpServers\": {")
+	fmt.Fprintln(out, "      \"cadence\": {")
+	fmt.Fprintln(out, "        \"command\": \"cadence\",")
+	fmt.Fprintln(out, "        \"args\": [\"mcp\"]")
+	fmt.Fprintln(out, "      }")
+	fmt.Fprintln(out, "    }")
+	fmt.Fprintln(out, "  }")
 }

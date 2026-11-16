@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -3378,5 +3380,55 @@ func TestCLI_Plugin(t *testing.T) {
 	// 11. Unknown subcommand
 	if err := cmdPlugin(ctx, client, []string{"unknown_cmd_xyz"}, &out); err == nil {
 		t.Fatal("expected error for unknown plugin subcommand")
+	}
+}
+
+func TestCLI_MCP(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.Default()
+	client := ipc.Client{}
+
+	// 1. Info
+	var out bytes.Buffer
+	if err := cmdMCP(ctx, cfg, client, []string{"info"}, nil, &out); err != nil {
+		t.Fatalf("cmdMCP info failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Cadence Model Context Protocol (MCP) Server") ||
+		!strings.Contains(out.String(), "cadence_get_history") ||
+		!strings.Contains(out.String(), "cadence://notes") {
+		t.Fatalf("unexpected mcp info output: %s", out.String())
+	}
+
+	// 2. Help
+	out.Reset()
+	if err := cmdMCP(ctx, cfg, client, []string{"help"}, nil, &out); err != nil {
+		t.Fatalf("cmdMCP help failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "cadence mcp - Model Context Protocol") {
+		t.Fatalf("unexpected mcp help output: %s", out.String())
+	}
+
+	// 3. Serve (ping over piped in/out)
+	cfg.Storage.DBPath = ":memory:"
+	inReader, inWriter := io.Pipe()
+	outReader, outWriter := io.Pipe()
+
+	serveCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	go func() {
+		_ = cmdMCP(serveCtx, cfg, client, []string{"serve"}, inReader, outWriter)
+		_ = outWriter.Close()
+	}()
+
+	_, _ = inWriter.Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n"))
+	_ = inWriter.Close()
+
+	respLine, err := bufio.NewReader(outReader).ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("failed reading ping response: %v", err)
+	}
+	if !strings.Contains(string(respLine), `"id":1`) {
+		t.Fatalf("expected ping response, got: %s", string(respLine))
 	}
 }
