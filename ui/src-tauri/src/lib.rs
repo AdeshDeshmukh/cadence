@@ -2,11 +2,18 @@ pub mod commands;
 pub mod ipc;
 pub mod overlay;
 pub mod streaming;
+pub mod tray;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .setup(|app| {
+            if let Err(e) = tray::setup_tray(app.handle()) {
+                eprintln!("Warning: failed to setup status bar tray icon: {}", e);
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::cadence_ping,
@@ -40,6 +47,7 @@ pub fn run() {
             overlay::emit_overlay_state,
             streaming::cadence_get_partial,
             streaming::cadence_emit_partial,
+            tray::cadence_update_tray,
         ])
         .run(tauri::generate_context!())
         .expect("error while running cadence desktop app");

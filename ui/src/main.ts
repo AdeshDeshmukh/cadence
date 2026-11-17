@@ -267,6 +267,7 @@ export function renderDashboard(el: HTMLElement) {
           state.activeDictating = true;
           startStreamingPoller();
           state.lastPingResult = "Dictation recording started";
+          await CadenceIPC.updateTray("recording").catch(() => {});
           renderDashboard(el);
         } catch (err: any) {
           state.lastPingResult = `Dictate start error: ${err?.message || err}`;
@@ -284,6 +285,7 @@ export function renderDashboard(el: HTMLElement) {
             state: "transcribing",
             text: "Transcribing audio...",
           });
+          await CadenceIPC.updateTray("transcribing").catch(() => {});
           await CadenceIPC.dictateStop();
           await broadcastOverlayState({
             state: "done",
@@ -291,6 +293,7 @@ export function renderDashboard(el: HTMLElement) {
           });
           state.activeDictating = false;
           state.lastPingResult = "Dictation stopped and processed";
+          await CadenceIPC.updateTray("idle").catch(() => {});
           renderDashboard(el);
         } catch (err: any) {
           state.lastPingResult = `Dictate stop error: ${err?.message || err}`;
@@ -426,13 +429,18 @@ async function checkDaemonConnectivity(el: HTMLElement) {
         state: "recording",
         text: "Listening...",
       });
+      await CadenceIPC.updateTray("recording").catch(() => {});
     } else if (!status.recording && state.activeDictating) {
       state.activeDictating = false;
       stopStreamingPoller();
+      await CadenceIPC.updateTray("idle").catch(() => {});
+    } else {
+      await CadenceIPC.updateTray(status.recording ? "recording" : "idle").catch(() => {});
     }
   } catch (_e) {
     state.daemonConnected = false;
     state.daemonStatus = null;
+    await CadenceIPC.updateTray("offline").catch(() => {});
   }
 
   if (state.mode === "dashboard") {

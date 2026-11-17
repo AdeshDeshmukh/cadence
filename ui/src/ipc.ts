@@ -287,6 +287,13 @@ export class CadenceIPC {
   }
 
   /**
+   * Update the native status bar tray icon tooltip and state.
+   */
+  static async updateTray(status: string): Promise<any> {
+    return await invoke<any>("cadence_update_tray", { status });
+  }
+
+  /**
    * Search past transcription history and knowledge records.
    */
   static async search(query: string, limit?: number): Promise<any[]> {
