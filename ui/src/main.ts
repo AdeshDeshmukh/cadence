@@ -1,134 +1,235 @@
 // Cadence Desktop UI - Main entry point
 import { CadenceIPC, type CadenceStatus } from "./ipc";
+import {
+  initOverlay,
+  toggleOverlayWindow,
+  broadcastOverlayState,
+  type OverlayState,
+} from "./overlay";
 
 export type UIState = {
   mode: "overlay" | "dashboard";
-  recordingState: "idle" | "recording" | "transcribing" | "polishing" | "done";
-  statusText: string;
   version: string;
   daemonConnected: boolean;
   daemonStatus: CadenceStatus | null;
   lastPingResult: string;
+  overlayVisible: boolean;
+  activeDictating: boolean;
 };
 
 const state: UIState = {
   mode: window.location.search.includes("window=overlay") ? "overlay" : "dashboard",
-  recordingState: "idle",
-  statusText: "Ready (Cmd+Shift+Space)",
   version: "0.1.0",
   daemonConnected: false,
   daemonStatus: null,
   lastPingResult: "",
+  overlayVisible: false,
+  activeDictating: false,
 };
 
-export function render(el: HTMLElement) {
-  if (state.mode === "overlay") {
-    el.innerHTML = `
-      <div class="pill-container" id="pill">
-        <div class="pill-dot ${state.recordingState}" id="pill-dot"></div>
-        <span class="pill-text" id="pill-text">${state.statusText}</span>
-      </div>
-    `;
-  } else {
-    const isConn = state.daemonConnected;
-    const modeName = state.daemonStatus?.mode || "Dictation";
-    const engineName = state.daemonStatus?.engine || state.daemonStatus?.asr_engine || "Whisper (local)";
-    const statusBadgeClass = isConn ? "badge-connected" : "badge-offline";
-    const statusText = isConn ? "Daemon: Connected" : "Daemon: Offline";
+export function renderDashboard(el: HTMLElement) {
+  const isConn = state.daemonConnected;
+  const modeName = state.daemonStatus?.mode || "Dictation";
+  const engineName =
+    state.daemonStatus?.engine || state.daemonStatus?.asr_engine || "Whisper (local)";
+  const statusBadgeClass = isConn ? "badge-connected" : "badge-offline";
+  const statusText = isConn ? "Daemon: Connected" : "Daemon: Offline";
 
-    el.innerHTML = `
-      <div class="dashboard-container">
-        <header class="header">
-          <div class="title">
-            <span>Cadence</span>
-            <span class="badge">v${state.version}</span>
-          </div>
-          <div style="display: flex; align-items: center; gap: 8px;">
-            <span class="badge ${statusBadgeClass}" id="daemon-status">${statusText}</span>
-            <button id="btn-ping" class="action-btn" title="Ping Daemon over UNIX Socket">Ping</button>
-          </div>
-        </header>
+  el.innerHTML = `
+    <div class="dashboard-container">
+      <header class="header">
+        <div class="title">
+          <span>Cadence</span>
+          <span class="badge">v${state.version}</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span class="badge ${statusBadgeClass}" id="daemon-status">${statusText}</span>
+          <button id="btn-ping" class="action-btn" title="Ping Daemon over UNIX Socket">Ping</button>
+        </div>
+      </header>
 
-        <section class="cards-grid">
-          <div class="card">
-            <div class="card-title">Operating Mode</div>
-            <div class="card-value" id="card-mode">${modeName}</div>
-          </div>
-          <div class="card">
-            <div class="card-title">Default Shortcut</div>
-            <div class="card-value" id="card-shortcut">Cmd+Shift+Space</div>
-          </div>
-          <div class="card">
-            <div class="card-title">ASR Engine</div>
-            <div class="card-value" id="card-engine">${engineName}</div>
-          </div>
-          <div class="card">
-            <div class="card-title">IPC Bridge</div>
-            <div class="card-value" id="card-ipc">UNIX Socket</div>
-          </div>
-        </section>
+      <section class="cards-grid">
+        <div class="card">
+          <div class="card-title">Operating Mode</div>
+          <div class="card-value" id="card-mode">${modeName}</div>
+        </div>
+        <div class="card">
+          <div class="card-title">Default Shortcut</div>
+          <div class="card-value" id="card-shortcut">Cmd+Shift+Space</div>
+        </div>
+        <div class="card">
+          <div class="card-title">ASR Engine</div>
+          <div class="card-value" id="card-engine">${engineName}</div>
+        </div>
+        <div class="card">
+          <div class="card-title">Floating Pill</div>
+          <div class="card-value" id="card-pill">Overlay Ready</div>
+        </div>
+      </section>
 
-        <div style="flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; border: 1px dashed rgba(148, 163, 184, 0.4); border-radius: 12px; padding: 32px; text-align: center;">
-          <h3 style="margin-bottom: 8px;">Cadence Desktop Engine</h3>
-          <p style="color: #64748b; max-width: 480px; margin-bottom: 16px;">
-            The native desktop application communicates with the background daemon over the high-performance local UNIX domain socket bridge.
-          </p>
-          <div id="ipc-feedback" style="font-family: monospace; font-size: 12px; color: #3b82f6; min-height: 20px;">
-            ${state.lastPingResult ? `IPC: ${state.lastPingResult}` : ""}
-          </div>
+      <!-- Overlay & Dictation Controls -->
+      <section style="background: rgba(255, 255, 255, 0.6); border: 1px solid #e2e8f0; border-radius: 12px; padding: 16px; margin-bottom: 20px;">
+        <h4 style="margin-bottom: 12px; color: #334155;">Pill Overlay & Dictation Controls</h4>
+        <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 12px;">
+          <button id="btn-toggle-overlay" class="action-btn" style="background: #475569;">Toggle Overlay Window</button>
+          <button id="btn-start-dictation" class="action-btn" style="background: #ef4444;" ${!isConn ? "disabled" : ""}>Start Dictation</button>
+          <button id="btn-stop-dictation" class="action-btn" style="background: #10b981;" ${!isConn ? "disabled" : ""}>Stop Dictation</button>
+        </div>
+        <div style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
+          <span style="font-size: 12px; color: #64748b; font-weight: 500;">Simulate States:</span>
+          <button id="sim-rec" class="action-btn" style="background: #ef4444; font-size: 11px;">Rec</button>
+          <button id="sim-asr" class="action-btn" style="background: #3b82f6; font-size: 11px;">ASR</button>
+          <button id="sim-ai" class="action-btn" style="background: #a855f7; font-size: 11px;">Polish</button>
+          <button id="sim-done" class="action-btn" style="background: #10b981; font-size: 11px;">Done</button>
+          <button id="sim-idle" class="action-btn" style="background: #64748b; font-size: 11px;">Idle</button>
+        </div>
+      </section>
+
+      <div style="flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; border: 1px dashed rgba(148, 163, 184, 0.4); border-radius: 12px; padding: 24px; text-align: center;">
+        <h3 style="margin-bottom: 8px;">Cadence Desktop Engine</h3>
+        <p style="color: #64748b; max-width: 480px; margin-bottom: 12px;">
+          The native desktop application controls the recording pill, streaming transcript preview, knowledge notes, and system settings.
+        </p>
+        <div id="ipc-feedback" style="font-family: monospace; font-size: 12px; color: #3b82f6; min-height: 20px;">
+          ${state.lastPingResult ? `IPC: ${state.lastPingResult}` : ""}
         </div>
       </div>
-    `;
+    </div>
+  `;
 
-    const pingBtn = el.querySelector("#btn-ping") as HTMLButtonElement | null;
-    if (pingBtn) {
-      pingBtn.onclick = async () => {
-        pingBtn.disabled = true;
-        pingBtn.textContent = "Pinging...";
+  // Attach button event listeners
+  const pingBtn = el.querySelector("#btn-ping") as HTMLButtonElement | null;
+  if (pingBtn) {
+    pingBtn.onclick = async () => {
+      pingBtn.disabled = true;
+      pingBtn.textContent = "Pinging...";
+      try {
+        const res = await CadenceIPC.ping();
+        state.daemonConnected = true;
+        state.lastPingResult = `Ping response: ${res} at ${new Date().toLocaleTimeString()}`;
+      } catch (err: any) {
+        state.daemonConnected = false;
+        state.lastPingResult = `Ping failed: ${err?.message || err}`;
+      } finally {
+        pingBtn.disabled = false;
+        pingBtn.textContent = "Ping";
+        renderDashboard(el);
+      }
+    };
+  }
+
+  const toggleOverlayBtn = el.querySelector("#btn-toggle-overlay") as HTMLButtonElement | null;
+  if (toggleOverlayBtn) {
+    toggleOverlayBtn.onclick = async () => {
+      try {
+        const visible = await toggleOverlayWindow();
+        state.overlayVisible = visible;
+        state.lastPingResult = `Overlay window ${visible ? "visible" : "hidden"}`;
+        renderDashboard(el);
+      } catch (err: any) {
+        state.lastPingResult = `Toggle overlay error: ${err?.message || err}`;
+        renderDashboard(el);
+      }
+    };
+  }
+
+  const startDictBtn = el.querySelector("#btn-start-dictation") as HTMLButtonElement | null;
+  if (startDictBtn) {
+    startDictBtn.onclick = async () => {
+      try {
+        await CadenceIPC.dictateStart();
+        await broadcastOverlayState({
+          state: "recording",
+          text: "Listening...",
+        });
+        state.activeDictating = true;
+        state.lastPingResult = "Dictation recording started";
+        renderDashboard(el);
+      } catch (err: any) {
+        state.lastPingResult = `Dictate start error: ${err?.message || err}`;
+        renderDashboard(el);
+      }
+    };
+  }
+
+  const stopDictBtn = el.querySelector("#btn-stop-dictation") as HTMLButtonElement | null;
+  if (stopDictBtn) {
+    stopDictBtn.onclick = async () => {
+      try {
+        await broadcastOverlayState({
+          state: "transcribing",
+          text: "Transcribing audio...",
+        });
+        await CadenceIPC.dictateStop();
+        await broadcastOverlayState({
+          state: "done",
+          text: "Pasted text",
+        });
+        state.activeDictating = false;
+        state.lastPingResult = "Dictation stopped and processed";
+        renderDashboard(el);
+      } catch (err: any) {
+        state.lastPingResult = `Dictate stop error: ${err?.message || err}`;
+        renderDashboard(el);
+      }
+    };
+  }
+
+  const attachSim = (id: string, s: OverlayState, text: string) => {
+    const btn = el.querySelector(id) as HTMLButtonElement | null;
+    if (btn) {
+      btn.onclick = async () => {
         try {
-          const res = await CadenceIPC.ping();
-          state.daemonConnected = true;
-          state.lastPingResult = `Ping response: ${res} at ${new Date().toLocaleTimeString()}`;
+          await broadcastOverlayState({ state: s, text });
+          state.lastPingResult = `Simulated overlay state: ${s}`;
+          renderDashboard(el);
         } catch (err: any) {
-          state.daemonConnected = false;
-          state.lastPingResult = `Ping failed: ${err?.message || err}`;
-        } finally {
-          pingBtn.disabled = false;
-          pingBtn.textContent = "Ping";
-          render(el);
+          state.lastPingResult = `Sim error: ${err?.message || err}`;
+          renderDashboard(el);
         }
       };
     }
-  }
+  };
+
+  attachSim("#sim-rec", "recording", "Listening...");
+  attachSim("#sim-asr", "transcribing", "Transcribing audio...");
+  attachSim("#sim-ai", "polishing", "Polishing with AI...");
+  attachSim("#sim-done", "done", "Pasted into document");
+  attachSim("#sim-idle", "idle", "Ready (Cmd+Shift+Space)");
 }
 
-async function checkDaemonConnectivity() {
+async function checkDaemonConnectivity(el: HTMLElement) {
   try {
     const status = await CadenceIPC.getStatus();
     state.daemonConnected = true;
     state.daemonStatus = status;
-    if (status.recording) {
-      state.recordingState = "recording";
-      state.statusText = "Listening...";
-    } else {
-      state.recordingState = "idle";
-      state.statusText = "Ready (Cmd+Shift+Space)";
+
+    if (status.recording && !state.activeDictating) {
+      state.activeDictating = true;
+      await broadcastOverlayState({
+        state: "recording",
+        text: "Listening...",
+      });
+    } else if (!status.recording && state.activeDictating) {
+      state.activeDictating = false;
     }
   } catch (_e) {
     state.daemonConnected = false;
     state.daemonStatus = null;
-    state.recordingState = "idle";
-    state.statusText = "Daemon Offline";
   }
 
-  const appEl = document.getElementById("app");
-  if (appEl) {
-    render(appEl);
+  if (state.mode === "dashboard") {
+    renderDashboard(el);
   }
 }
 
 const appEl = document.getElementById("app");
 if (appEl) {
-  render(appEl);
-  checkDaemonConnectivity();
+  if (state.mode === "overlay") {
+    initOverlay(appEl);
+  } else {
+    renderDashboard(appEl);
+    checkDaemonConnectivity(appEl);
+    window.setInterval(() => checkDaemonConnectivity(appEl), 2000);
+  }
 }
