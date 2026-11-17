@@ -3954,3 +3954,34 @@ func TestApp_IPCPaste(t *testing.T) {
 		t.Fatalf("expected clipboard text 'Hello from re-paste!', got %q", paster.Text())
 	}
 }
+
+func TestApp_IPCPrivacyStatsAndClearRecoveries(t *testing.T) {
+	cfg := config.Default()
+	cfg.Privacy.NetworkMode = "local"
+	cfg.Privacy.Telemetry = false
+	app := NewApp(cfg, WithCapture(&testLiveCapture{}))
+	ctx := context.Background()
+
+	// 1. Check initial privacy stats
+	res, err := app.Handle(ctx, ipc.Request{Method: "privacy_stats"})
+	if err != nil {
+		t.Fatalf("privacy_stats failed: %v", err)
+	}
+	m, ok := res.(map[string]any)
+	if !ok || m["ok"] != true {
+		t.Fatalf("unexpected privacy_stats response: %+v", res)
+	}
+	if m["network_mode"] != "local" || m["telemetry"] != false {
+		t.Fatalf("unexpected privacy modes: %+v", m)
+	}
+
+	// 2. Clear recoveries
+	clearRes, err := app.Handle(ctx, ipc.Request{Method: "clear_recoveries"})
+	if err != nil {
+		t.Fatalf("clear_recoveries failed: %v", err)
+	}
+	clearMap, ok := clearRes.(map[string]any)
+	if !ok || clearMap["ok"] != true {
+		t.Fatalf("unexpected clear_recoveries response: %+v", clearRes)
+	}
+}

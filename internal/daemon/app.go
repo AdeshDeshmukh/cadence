@@ -2681,6 +2681,42 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 		expanded := postprocess.ExpandVariables(template, clip, time.Now())
 		return map[string]any{"ok": true, "template": template, "expanded": expanded}, nil
 
+	case "privacy_stats":
+		transcripts, _ := a.store.ListTranscripts(1000)
+		vocab, _ := a.store.Vocabulary()
+		snippets, _ := a.store.ListSnippets()
+		recoveries, _ := a.store.ListRecoveries(1000)
+		notes, _ := a.store.ListNotes(storage.NoteFilter{})
+		meetings, _ := a.store.ListMeetings(1000)
+
+		dbPath := a.cfg.Storage.DBPath
+		var dbSizeBytes int64 = 0
+		if dbPath != "" {
+			if fi, err := os.Stat(dbPath); err == nil {
+				dbSizeBytes = fi.Size()
+			}
+		}
+
+		return map[string]any{
+			"ok":                true,
+			"transcripts_count": len(transcripts),
+			"vocabulary_count":  len(vocab),
+			"snippets_count":    len(snippets),
+			"recoveries_count":  len(recoveries),
+			"notes_count":       len(notes),
+			"meetings_count":    len(meetings),
+			"db_path":           dbPath,
+			"db_size_bytes":     dbSizeBytes,
+			"network_mode":      a.cfg.Privacy.NetworkMode,
+			"telemetry":         a.cfg.Privacy.Telemetry,
+		}, nil
+
+	case "clear_recoveries":
+		if err := a.store.ClearRecoveries(); err != nil {
+			return nil, fmt.Errorf("clear recoveries: %w", err)
+		}
+		return map[string]any{"ok": true}, nil
+
 	case "polish":
 		params, _ := req.Params.(map[string]any)
 		text, _ := params["text"].(string)

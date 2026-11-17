@@ -28,6 +28,8 @@ pub fn run() {
             commands::cadence_get_audio_devices,
             commands::cadence_get_polish_profiles,
             commands::cadence_paste,
+            commands::cadence_get_privacy_stats,
+            commands::cadence_clear_recoveries,
             commands::cadence_search,
             commands::cadence_call,
             overlay::show_overlay,
