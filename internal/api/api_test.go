@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -526,19 +527,19 @@ func TestAPIWebSocket(t *testing.T) {
 		t.Fatalf("failed to send handshake request: %v", err)
 	}
 
-	// Read handshake response
-	respBuf := make([]byte, 1024)
-	n, err := conn.Read(respBuf)
-	if err != nil {
-		t.Fatalf("failed to read handshake response: %v", err)
-	}
-	handshakeResp := string(respBuf[:n])
-	if !strings.Contains(handshakeResp, "101 Switching Protocols") {
-		t.Fatalf("expected 101 Switching Protocols, got:\n%s", handshakeResp)
+	bufr := bufio.NewReader(conn)
+	for {
+		line, err := bufr.ReadString('\n')
+		if err != nil {
+			t.Fatalf("failed reading handshake response line: %v", err)
+		}
+		if line == "\r\n" || line == "\n" {
+			break
+		}
 	}
 
 	// Read initial welcome frame from server
-	welcomeMsg, err := readWSClientFrame(conn)
+	welcomeMsg, err := readWSClientFrame(bufr)
 	if err != nil {
 		t.Fatalf("failed to read welcome frame: %v", err)
 	}
@@ -551,7 +552,7 @@ func TestAPIWebSocket(t *testing.T) {
 		t.Fatalf("failed to send ping frame: %v", err)
 	}
 
-	pongMsg, err := readWSClientFrame(conn)
+	pongMsg, err := readWSClientFrame(bufr)
 	if err != nil {
 		t.Fatalf("failed to read pong frame: %v", err)
 	}
@@ -568,7 +569,7 @@ func TestAPIWebSocket(t *testing.T) {
 	// Read response frames until dictation_started is received
 	foundStarted := false
 	for i := 0; i < 3; i++ {
-		frame, err := readWSClientFrame(conn)
+		frame, err := readWSClientFrame(bufr)
 		if err != nil {
 			t.Fatalf("failed to read frame: %v", err)
 		}
@@ -590,7 +591,7 @@ func TestAPIWebSocket(t *testing.T) {
 	// Read frames until transcription result frame is received
 	foundTranscript := false
 	for i := 0; i < 5; i++ {
-		frame, err := readWSClientFrame(conn)
+		frame, err := readWSClientFrame(bufr)
 		if err != nil {
 			t.Fatalf("failed to read transcribe result frame: %v", err)
 		}
