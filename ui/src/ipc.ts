@@ -70,6 +70,20 @@ export interface CadenceSnippet {
   description?: string;
 }
 
+export interface PrivacyStats {
+  ok?: boolean;
+  transcripts_count: number;
+  vocabulary_count: number;
+  snippets_count: number;
+  recoveries_count: number;
+  notes_count: number;
+  meetings_count: number;
+  db_path?: string;
+  db_size_bytes?: number;
+  network_mode?: string;
+  telemetry?: boolean;
+}
+
 /**
  * CadenceIPC provides type-safe IPC communication with the background
  * Cadence daemon (`cadenced`) through the native Tauri 2.0 Rust bridge.
@@ -214,6 +228,20 @@ export class CadenceIPC {
    */
   static async paste(text: string): Promise<{ ok: boolean; text: string }> {
     return await invoke<{ ok: boolean; text: string }>("cadence_paste", { text });
+  }
+
+  /**
+   * Fetch stored data statistics and privacy settings.
+   */
+  static async getPrivacyStats(): Promise<PrivacyStats> {
+    return await invoke<PrivacyStats>("cadence_get_privacy_stats");
+  }
+
+  /**
+   * Clear all cached recovery session records.
+   */
+  static async clearRecoveries(): Promise<{ ok: boolean }> {
+    return await invoke<{ ok: boolean }>("cadence_clear_recoveries");
   }
 
   /**

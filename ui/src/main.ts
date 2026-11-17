@@ -26,10 +26,14 @@ import {
   fetchSnippets,
   renderSnippetManager,
 } from "./snippets";
+import {
+  fetchPrivacyStats,
+  renderPrivacyDashboard,
+} from "./privacy";
 
 export type UIState = {
   mode: "overlay" | "dashboard";
-  activeTab: "overview" | "history" | "vocabulary" | "snippets" | "settings";
+  activeTab: "overview" | "history" | "vocabulary" | "snippets" | "privacy" | "settings";
   version: string;
   daemonConnected: boolean;
   daemonStatus: CadenceStatus | null;
@@ -80,6 +84,7 @@ export function renderDashboard(el: HTMLElement) {
         <button id="tab-history" class="nav-tab ${state.activeTab === "history" ? "active" : ""}">History</button>
         <button id="tab-vocabulary" class="nav-tab ${state.activeTab === "vocabulary" ? "active" : ""}">Vocabulary</button>
         <button id="tab-snippets" class="nav-tab ${state.activeTab === "snippets" ? "active" : ""}">Snippets</button>
+        <button id="tab-privacy" class="nav-tab ${state.activeTab === "privacy" ? "active" : ""}">Privacy</button>
         <button id="tab-settings" class="nav-tab ${state.activeTab === "settings" ? "active" : ""}">Settings</button>
       </nav>
 
@@ -125,6 +130,15 @@ export function renderDashboard(el: HTMLElement) {
     };
   }
 
+  const privacyTab = el.querySelector("#tab-privacy") as HTMLButtonElement | null;
+  if (privacyTab) {
+    privacyTab.onclick = async () => {
+      state.activeTab = "privacy";
+      await fetchPrivacyStats();
+      renderDashboard(el);
+    };
+  }
+
   const settingsTab = el.querySelector("#tab-settings") as HTMLButtonElement | null;
   if (settingsTab) {
     settingsTab.onclick = async () => {
@@ -149,6 +163,8 @@ export function renderDashboard(el: HTMLElement) {
     renderVocabularyManager(tabContent);
   } else if (state.activeTab === "snippets") {
     renderSnippetManager(tabContent);
+  } else if (state.activeTab === "privacy") {
+    renderPrivacyDashboard(tabContent);
   } else if (state.activeTab === "settings") {
     renderSettingsPanel(tabContent, async () => {
       await checkDaemonConnectivity(el);

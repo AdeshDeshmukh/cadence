@@ -217,6 +217,18 @@ pub fn cadence_search(query: String, limit: Option<usize>) -> Result<serde_json:
     ipc::call_daemon("search", Some(params))
 }
 
+/// Query stored data privacy statistics and network isolation state.
+#[tauri::command]
+pub fn cadence_get_privacy_stats() -> Result<serde_json::Value, String> {
+    ipc::call_daemon("privacy_stats", None)
+}
+
+/// Purge all cached audio session recoveries from storage.
+#[tauri::command]
+pub fn cadence_clear_recoveries() -> Result<serde_json::Value, String> {
+    ipc::call_daemon("clear_recoveries", None)
+}
+
 /// Generic proxy method to invoke any supported daemon method over IPC.
 #[tauri::command]
 pub fn cadence_call(
