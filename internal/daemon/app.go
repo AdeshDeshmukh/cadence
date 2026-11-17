@@ -1218,6 +1218,20 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			"correction_enabled": a.cfg.Post.Correction,
 		}, nil
 
+	case "partial":
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		var sessID, partial string
+		if a.activeSess != nil {
+			sessID = a.activeSess.ID
+			partial = a.activeSess.GetPartial()
+		}
+		return map[string]any{
+			"session":   sessID,
+			"partial":   partial,
+			"recording": a.isRecording,
+		}, nil
+
 	case "undo":
 		target := "unpolished"
 		depth := 1

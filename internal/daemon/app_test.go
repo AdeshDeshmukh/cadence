@@ -3836,3 +3836,24 @@ capabilities:
 		t.Fatalf("expected ok true in uninstall: %+v", uninstMap)
 	}
 }
+
+func TestApp_IPCPartialQuery(t *testing.T) {
+	cfg := config.Default()
+	app := NewApp(cfg, WithCapture(&testLiveCapture{}))
+	ctx := context.Background()
+
+	res, err := app.Handle(ctx, ipc.Request{Method: "partial"})
+	if err != nil {
+		t.Fatalf("partial IPC call failed: %v", err)
+	}
+	m, ok := res.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any, got %T", res)
+	}
+	if m["recording"] != false {
+		t.Fatalf("expected recording false, got %v", m["recording"])
+	}
+	if m["partial"] != "" {
+		t.Fatalf("expected empty partial when idle, got %v", m["partial"])
+	}
+}

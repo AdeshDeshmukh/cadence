@@ -233,7 +233,14 @@ mod tests {
 
     #[test]
     fn test_mock_socket_status_and_params() {
-        let sock_path = PathBuf::from(format!("/tmp/cadence_test_status_{}.sock", std::process::id()));
+        let sock_path = env::temp_dir().join(format!(
+            "cadence_test_status_{}_{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let _ = fs::remove_file(&sock_path);
         let listener = UnixListener::bind(&sock_path).expect("bind status unix socket");
 
@@ -277,12 +284,23 @@ mod tests {
 
     #[test]
     fn test_mock_socket_daemon_error() {
-        let sock_path = PathBuf::from(format!("/tmp/cadence_test_err_{}.sock", std::process::id()));
+        let sock_path = env::temp_dir().join(format!(
+            "cadence_test_err_{}_{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let _ = fs::remove_file(&sock_path);
         let listener = UnixListener::bind(&sock_path).expect("bind");
 
         let handle = thread::spawn(move || {
             let (stream, _) = listener.accept().expect("accept");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut line = String::new();
+            let _ = reader.read_line(&mut line);
+
             let resp = IpcResponse {
                 jsonrpc: "2.0".to_string(),
                 id: "tauri-1".to_string(),

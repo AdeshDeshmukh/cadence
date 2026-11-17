@@ -6,6 +6,10 @@ import {
   broadcastOverlayState,
   type OverlayState,
 } from "./overlay";
+import {
+  getDaemonPartial,
+  broadcastPartialText,
+} from "./streaming";
 
 export type UIState = {
   mode: "overlay" | "dashboard";
@@ -15,6 +19,7 @@ export type UIState = {
   lastPingResult: string;
   overlayVisible: boolean;
   activeDictating: boolean;
+  streamingSimulationActive: boolean;
 };
 
 const state: UIState = {
@@ -25,7 +30,10 @@ const state: UIState = {
   lastPingResult: "",
   overlayVisible: false,
   activeDictating: false,
+  streamingSimulationActive: false,
 };
+
+let streamingPollTimer: number | null = null;
 
 export function renderDashboard(el: HTMLElement) {
   const isConn = state.daemonConnected;
@@ -62,18 +70,21 @@ export function renderDashboard(el: HTMLElement) {
           <div class="card-value" id="card-engine">${engineName}</div>
         </div>
         <div class="card">
-          <div class="card-title">Floating Pill</div>
-          <div class="card-value" id="card-pill">Overlay Ready</div>
+          <div class="card-title">Streaming Engine</div>
+          <div class="card-value" id="card-pill">Real-time ASR</div>
         </div>
       </section>
 
       <!-- Overlay & Dictation Controls -->
       <section style="background: rgba(255, 255, 255, 0.6); border: 1px solid #e2e8f0; border-radius: 12px; padding: 16px; margin-bottom: 20px;">
-        <h4 style="margin-bottom: 12px; color: #334155;">Pill Overlay & Dictation Controls</h4>
+        <h4 style="margin-bottom: 12px; color: #334155;">Pill Overlay & Streaming Dictation Controls</h4>
         <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 12px;">
           <button id="btn-toggle-overlay" class="action-btn" style="background: #475569;">Toggle Overlay Window</button>
           <button id="btn-start-dictation" class="action-btn" style="background: #ef4444;" ${!isConn ? "disabled" : ""}>Start Dictation</button>
           <button id="btn-stop-dictation" class="action-btn" style="background: #10b981;" ${!isConn ? "disabled" : ""}>Stop Dictation</button>
+          <button id="btn-stream-sim" class="action-btn" style="background: #8b5cf6;" ${state.streamingSimulationActive ? "disabled" : ""}>
+            ${state.streamingSimulationActive ? "Streaming..." : "Simulate Live Streaming"}
+          </button>
         </div>
         <div style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
           <span style="font-size: 12px; color: #64748b; font-weight: 500;">Simulate States:</span>
@@ -88,7 +99,7 @@ export function renderDashboard(el: HTMLElement) {
       <div style="flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; border: 1px dashed rgba(148, 163, 184, 0.4); border-radius: 12px; padding: 24px; text-align: center;">
         <h3 style="margin-bottom: 8px;">Cadence Desktop Engine</h3>
         <p style="color: #64748b; max-width: 480px; margin-bottom: 12px;">
-          The native desktop application controls the recording pill, streaming transcript preview, knowledge notes, and system settings.
+          The native desktop application renders real-time streaming speech partials directly onto the floating pill overlay.
         </p>
         <div id="ipc-feedback" style="font-family: monospace; font-size: 12px; color: #3b82f6; min-height: 20px;">
           ${state.lastPingResult ? `IPC: ${state.lastPingResult}` : ""}
@@ -143,6 +154,7 @@ export function renderDashboard(el: HTMLElement) {
           text: "Listening...",
         });
         state.activeDictating = true;
+        startStreamingPoller();
         state.lastPingResult = "Dictation recording started";
         renderDashboard(el);
       } catch (err: any) {
@@ -155,6 +167,7 @@ export function renderDashboard(el: HTMLElement) {
   const stopDictBtn = el.querySelector("#btn-stop-dictation") as HTMLButtonElement | null;
   if (stopDictBtn) {
     stopDictBtn.onclick = async () => {
+      stopStreamingPoller();
       try {
         await broadcastOverlayState({
           state: "transcribing",
@@ -172,6 +185,50 @@ export function renderDashboard(el: HTMLElement) {
         state.lastPingResult = `Dictate stop error: ${err?.message || err}`;
         renderDashboard(el);
       }
+    };
+  }
+
+  const streamSimBtn = el.querySelector("#btn-stream-sim") as HTMLButtonElement | null;
+  if (streamSimBtn) {
+    streamSimBtn.onclick = async () => {
+      state.streamingSimulationActive = true;
+      renderDashboard(el);
+
+      await broadcastOverlayState({
+        state: "recording",
+        text: "Listening...",
+      });
+
+      const sentence = "Cadence dictation engine streams words in real-time as you speak.";
+      const words = sentence.split(" ");
+      let accumulated = "";
+
+      for (let i = 0; i < words.length; i++) {
+        accumulated += (accumulated ? " " : "") + words[i];
+        await broadcastPartialText({
+          session_id: "sim-sess-1",
+          text: accumulated,
+          is_final: i === words.length - 1,
+          word_count: i + 1,
+        });
+        await new Promise((resolve) => window.setTimeout(resolve, 140));
+      }
+
+      await new Promise((resolve) => window.setTimeout(resolve, 600));
+      await broadcastOverlayState({
+        state: "polishing",
+        text: "Polishing with AI...",
+      });
+
+      await new Promise((resolve) => window.setTimeout(resolve, 800));
+      await broadcastOverlayState({
+        state: "done",
+        text: "Pasted: " + sentence,
+      });
+
+      state.streamingSimulationActive = false;
+      state.lastPingResult = "Completed streaming simulation";
+      renderDashboard(el);
     };
   }
 
@@ -198,6 +255,31 @@ export function renderDashboard(el: HTMLElement) {
   attachSim("#sim-idle", "idle", "Ready (Cmd+Shift+Space)");
 }
 
+function startStreamingPoller() {
+  if (streamingPollTimer !== null) return;
+  streamingPollTimer = window.setInterval(async () => {
+    if (!state.activeDictating) {
+      stopStreamingPoller();
+      return;
+    }
+    try {
+      const partial = await getDaemonPartial();
+      if (partial && partial.text) {
+        await broadcastPartialText(partial);
+      }
+    } catch (_e) {
+      // ignore transient poll errors while recording
+    }
+  }, 100);
+}
+
+function stopStreamingPoller() {
+  if (streamingPollTimer !== null) {
+    window.clearInterval(streamingPollTimer);
+    streamingPollTimer = null;
+  }
+}
+
 async function checkDaemonConnectivity(el: HTMLElement) {
   try {
     const status = await CadenceIPC.getStatus();
@@ -206,12 +288,14 @@ async function checkDaemonConnectivity(el: HTMLElement) {
 
     if (status.recording && !state.activeDictating) {
       state.activeDictating = true;
+      startStreamingPoller();
       await broadcastOverlayState({
         state: "recording",
         text: "Listening...",
       });
     } else if (!status.recording && state.activeDictating) {
       state.activeDictating = false;
+      stopStreamingPoller();
     }
   } catch (_e) {
     state.daemonConnected = false;
