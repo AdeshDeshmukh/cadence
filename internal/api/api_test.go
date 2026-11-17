@@ -454,7 +454,7 @@ func TestAPIServerSentEvents(t *testing.T) {
 	ts := httptest.NewServer(server.Handler())
 	defer ts.Close()
 
-	req, err := http.NewRequest(http.MethodGet, ts.URL+"/v1/events", nil)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, ts.URL+"/v1/events", nil)
 	if err != nil {
 		t.Fatalf("failed to create SSE request: %v", err)
 	}
@@ -487,6 +487,8 @@ func TestAPIServerSentEvents(t *testing.T) {
 	if !strings.Contains(content, "event:") || !strings.Contains(content, "data:") {
 		t.Errorf("expected SSE event framing, got: %s", content)
 	}
+	_ = resp.Body.Close()
+	ts.CloseClientConnections()
 }
 
 func TestAPIWebSocket(t *testing.T) {
@@ -603,6 +605,8 @@ func TestAPIWebSocket(t *testing.T) {
 
 	// Send close frame
 	_ = writeWSClientFrame(conn, OpClose, nil)
+	_ = conn.Close()
+	ts.CloseClientConnections()
 }
 
 // Helpers for testing WebSocket client frames (masked as required by RFC 6455).
