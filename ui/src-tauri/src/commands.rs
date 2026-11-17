@@ -229,6 +229,23 @@ pub fn cadence_clear_recoveries() -> Result<serde_json::Value, String> {
     ipc::call_daemon("clear_recoveries", None)
 }
 
+/// Query aggregated benchmark latency and accuracy metrics from daemon.
+#[tauri::command]
+pub fn cadence_get_benchmark_stats() -> Result<serde_json::Value, String> {
+    ipc::call_daemon("benchmark_stats", None)
+}
+
+/// Execute a local synthetic benchmark run profiling ASR inference and latency.
+#[tauri::command]
+pub fn cadence_run_benchmark(sample_text: Option<String>) -> Result<serde_json::Value, String> {
+    ipc::call_daemon(
+        "benchmark_run",
+        Some(serde_json::json!({
+            "sample_text": sample_text.unwrap_or_default()
+        })),
+    )
+}
+
 /// Generic proxy method to invoke any supported daemon method over IPC.
 #[tauri::command]
 pub fn cadence_call(

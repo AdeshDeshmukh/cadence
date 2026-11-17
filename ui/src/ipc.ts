@@ -84,6 +84,32 @@ export interface PrivacyStats {
   telemetry?: boolean;
 }
 
+export interface BenchmarkRecord {
+  id: string;
+  timestamp: string;
+  engine: string;
+  audio_duration_ms: number;
+  asr_latency_ms: number;
+  polish_latency_ms: number;
+  total_latency_ms: number;
+  rtf: number;
+  wer: number;
+  reference_text?: string;
+  hypothesis_text?: string;
+  tokens_per_sec: number;
+}
+
+export interface BenchmarkStats {
+  ok?: boolean;
+  total_sessions: number;
+  p50_latency_ms: number;
+  p95_latency_ms: number;
+  avg_wer: number;
+  avg_rtf: number;
+  engine: string;
+  runs: BenchmarkRecord[];
+}
+
 /**
  * CadenceIPC provides type-safe IPC communication with the background
  * Cadence daemon (`cadenced`) through the native Tauri 2.0 Rust bridge.
@@ -242,6 +268,22 @@ export class CadenceIPC {
    */
   static async clearRecoveries(): Promise<{ ok: boolean }> {
     return await invoke<{ ok: boolean }>("cadence_clear_recoveries");
+  }
+
+  /**
+   * Fetch aggregated benchmark statistics and historical run records.
+   */
+  static async getBenchmarkStats(): Promise<BenchmarkStats> {
+    return await invoke<BenchmarkStats>("cadence_get_benchmark_stats");
+  }
+
+  /**
+   * Run a local benchmark simulation profiling inference latency and accuracy.
+   */
+  static async runBenchmark(sampleText?: string): Promise<{ ok: boolean; record: BenchmarkRecord }> {
+    return await invoke<{ ok: boolean; record: BenchmarkRecord }>("cadence_run_benchmark", {
+      sample_text: sampleText,
+    });
   }
 
   /**
