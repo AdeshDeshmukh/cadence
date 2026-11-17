@@ -14,10 +14,14 @@ import {
   loadSettings,
   renderSettingsPanel,
 } from "./settings";
+import {
+  fetchHistory,
+  renderHistoryView,
+} from "./history";
 
 export type UIState = {
   mode: "overlay" | "dashboard";
-  activeTab: "overview" | "settings";
+  activeTab: "overview" | "history" | "settings";
   version: string;
   daemonConnected: boolean;
   daemonStatus: CadenceStatus | null;
@@ -65,6 +69,7 @@ export function renderDashboard(el: HTMLElement) {
       <!-- Navigation Tabs -->
       <nav class="nav-tabs">
         <button id="tab-overview" class="nav-tab ${state.activeTab === "overview" ? "active" : ""}">Overview & Overlay</button>
+        <button id="tab-history" class="nav-tab ${state.activeTab === "history" ? "active" : ""}">History</button>
         <button id="tab-settings" class="nav-tab ${state.activeTab === "settings" ? "active" : ""}">Settings</button>
       </nav>
 
@@ -83,6 +88,15 @@ export function renderDashboard(el: HTMLElement) {
     };
   }
 
+  const historyTab = el.querySelector("#tab-history") as HTMLButtonElement | null;
+  if (historyTab) {
+    historyTab.onclick = async () => {
+      state.activeTab = "history";
+      await fetchHistory();
+      renderDashboard(el);
+    };
+  }
+
   const settingsTab = el.querySelector("#tab-settings") as HTMLButtonElement | null;
   if (settingsTab) {
     settingsTab.onclick = async () => {
@@ -95,7 +109,15 @@ export function renderDashboard(el: HTMLElement) {
   const tabContent = el.querySelector("#tab-content") as HTMLElement | null;
   if (!tabContent) return;
 
-  if (state.activeTab === "settings") {
+  if (state.activeTab === "history") {
+    renderHistoryView(tabContent, async (pastedText) => {
+      state.lastPingResult = `Re-pasted: "${pastedText.slice(0, 30)}..."`;
+      await broadcastOverlayState({
+        state: "done",
+        text: "Re-pasted text",
+      });
+    });
+  } else if (state.activeTab === "settings") {
     renderSettingsPanel(tabContent, async () => {
       await checkDaemonConnectivity(el);
     });

@@ -2516,6 +2516,21 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			}
 		}
 		return a.store.ListTranscripts(limit)
+
+	case "paste":
+		params, _ := req.Params.(map[string]any)
+		text, _ := params["text"].(string)
+		if text == "" {
+			return nil, errors.New("missing text parameter")
+		}
+		if a.paster == nil {
+			return nil, errors.New("paster not configured")
+		}
+		res, err := a.paster.Paste(text)
+		if err != nil {
+			return nil, fmt.Errorf("paste: %w", err)
+		}
+		return map[string]any{"ok": true, "text": text, "method": res.Method}, nil
 	case "recover":
 		rec, err := a.store.GetLastRecovery()
 		if err != nil {

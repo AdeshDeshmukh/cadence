@@ -153,6 +153,20 @@ export class CadenceIPC {
   }
 
   /**
+   * Re-paste specified text into the currently active target application.
+   */
+  static async paste(text: string): Promise<{ ok: boolean; text: string }> {
+    return await invoke<{ ok: boolean; text: string }>("cadence_paste", { text });
+  }
+
+  /**
+   * Search past transcription history and knowledge records.
+   */
+  static async search(query: string, limit?: number): Promise<any[]> {
+    return await invoke<any[]>("cadence_search", { query, limit });
+  }
+
+  /**
    * Generic method proxy to invoke any supported daemon method over IPC.
    */
   static async call(method: string, params?: Record<string, any>): Promise<any> {
