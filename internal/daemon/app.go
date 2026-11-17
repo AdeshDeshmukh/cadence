@@ -758,7 +758,6 @@ func (a *App) startDictation() {
 					a.mu.Unlock()
 					if stopped {
 						_ = a.capture.Stop()
-						return
 					}
 				}
 			}

@@ -35,3 +35,12 @@ env/
 # Local runtime data
 *.log
 scratch/
+
+# UI / Node / Rust / Tauri
+node_modules/
+dist/
+build/
+ui/dist/
+ui/src-tauri/target/
+ui/node_modules/
+
