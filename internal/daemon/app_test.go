@@ -53,9 +53,10 @@ func (r *recordingPaster) Text() string {
 }
 
 type testLiveCapture struct {
-	mu     sync.Mutex
-	stopCh chan struct{}
-	chunk  audio.Chunk
+	mu      sync.Mutex
+	stopCh  chan struct{}
+	stopped bool
+	chunk   audio.Chunk
 }
 
 func (t *testLiveCapture) Devices() ([]audio.Device, error) { return nil, nil }
@@ -66,6 +67,10 @@ func (t *testLiveCapture) Start() (<-chan audio.Chunk, error) {
 	t.stopCh = make(chan struct{})
 	ch := make(chan audio.Chunk, 10)
 	ch <- t.chunk
+	if t.stopped {
+		close(t.stopCh)
+	}
+	t.stopped = false
 	go func(stopCh chan struct{}) {
 		<-stopCh
 		close(ch)
@@ -76,6 +81,7 @@ func (t *testLiveCapture) Start() (<-chan audio.Chunk, error) {
 func (t *testLiveCapture) Stop() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.stopped = true
 	if t.stopCh != nil {
 		select {
 		case <-t.stopCh:
@@ -1038,11 +1044,14 @@ func TestApp_UndoTransformationAndIPC(t *testing.T) {
 
 	// 1. Run dictation session
 	simHotkey.Emit(hotkey.EventKeyDown)
-	time.Sleep(50 * time.Millisecond)
+	deadline := time.Now().Add(2 * time.Second)
+	for !app.IsRecording() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
 	simHotkey.Emit(hotkey.EventKeyUp)
 
 	// Wait for paste and undo cache
-	deadline := time.Now().Add(3 * time.Second)
+	deadline = time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if app.CanUndo() && paster.Text() == "AI: My original thoughts." {
 			break
@@ -1104,10 +1113,13 @@ func TestApp_UndoTransformationAndIPC(t *testing.T) {
 	// 4. Test Hotkey undo triggering
 	// Start another dictation session
 	simHotkey.Emit(hotkey.EventKeyDown)
-	time.Sleep(50 * time.Millisecond)
+	deadline = time.Now().Add(2 * time.Second)
+	for !app.IsRecording() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
 	simHotkey.Emit(hotkey.EventKeyUp)
 
-	deadline = time.Now().Add(3 * time.Second)
+	deadline = time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if app.CanUndo() && paster.Text() == "AI: My original thoughts." {
 			break
@@ -1166,10 +1178,13 @@ func TestApp_UndoNotPolished(t *testing.T) {
 	defer app.Stop()
 
 	simHotkey.Emit(hotkey.EventKeyDown)
-	time.Sleep(50 * time.Millisecond)
+	deadline := time.Now().Add(2 * time.Second)
+	for !app.IsRecording() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
 	simHotkey.Emit(hotkey.EventKeyUp)
 
-	deadline := time.Now().Add(3 * time.Second)
+	deadline = time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if app.LastUndo() != nil && paster.Text() != "" {
 			break
@@ -3609,7 +3624,7 @@ func TestApp_ExportAndImportIPC(t *testing.T) {
 
 func TestApp_PluginIPC(t *testing.T) {
 	cfg := config.Default()
-	app := NewApp(cfg)
+	app := NewApp(cfg, WithCapture(&testLiveCapture{}))
 	ctx := context.Background()
 	tempDir := t.TempDir()
 
@@ -3743,7 +3758,7 @@ capabilities:
 	mgr := plugins.NewManager(memStore, reg, pluginsHome)
 
 	cfg := config.Default()
-	app := NewApp(cfg, WithStore(memStore), WithPluginRegistry(reg), WithPluginManager(mgr))
+	app := NewApp(cfg, WithStore(memStore), WithPluginRegistry(reg), WithPluginManager(mgr), WithCapture(&testLiveCapture{}))
 	ctx := context.Background()
 
 	// 1. Install
