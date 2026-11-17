@@ -74,6 +74,60 @@ pub fn cadence_get_vocabulary() -> Result<serde_json::Value, String> {
     ipc::call_daemon("vocabulary", None)
 }
 
+/// Add custom vocabulary spoken -> canonical pair via daemon IPC.
+#[tauri::command]
+pub fn cadence_add_vocabulary(
+    spoken: String,
+    canonical: String,
+) -> Result<serde_json::Value, String> {
+    ipc::call_daemon(
+        "vocab_add",
+        Some(serde_json::json!({
+            "spoken": spoken,
+            "canonical": canonical
+        })),
+    )
+}
+
+/// Delete custom vocabulary term via daemon IPC.
+#[tauri::command]
+pub fn cadence_delete_vocabulary(spoken: String) -> Result<serde_json::Value, String> {
+    ipc::call_daemon(
+        "vocab_remove",
+        Some(serde_json::json!({
+            "spoken": spoken
+        })),
+    )
+}
+
+/// Import vocabulary batch via daemon IPC.
+#[tauri::command]
+pub fn cadence_import_vocabulary(
+    content: String,
+    format: Option<String>,
+) -> Result<serde_json::Value, String> {
+    ipc::call_daemon(
+        "vocab_import",
+        Some(serde_json::json!({
+            "content": content,
+            "format": format.unwrap_or_else(|| "json".to_string())
+        })),
+    )
+}
+
+/// Export vocabulary entries via daemon IPC.
+#[tauri::command]
+pub fn cadence_export_vocabulary(
+    format: Option<String>,
+) -> Result<serde_json::Value, String> {
+    ipc::call_daemon(
+        "vocab_export",
+        Some(serde_json::json!({
+            "format": format.unwrap_or_else(|| "json".to_string())
+        })),
+    )
+}
+
 /// Fetch snippet triggers and templates from daemon.
 #[tauri::command]
 pub fn cadence_get_snippets() -> Result<serde_json::Value, String> {
