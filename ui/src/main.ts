@@ -18,10 +18,14 @@ import {
   fetchHistory,
   renderHistoryView,
 } from "./history";
+import {
+  fetchVocabulary,
+  renderVocabularyManager,
+} from "./vocab";
 
 export type UIState = {
   mode: "overlay" | "dashboard";
-  activeTab: "overview" | "history" | "settings";
+  activeTab: "overview" | "history" | "vocabulary" | "settings";
   version: string;
   daemonConnected: boolean;
   daemonStatus: CadenceStatus | null;
@@ -70,6 +74,7 @@ export function renderDashboard(el: HTMLElement) {
       <nav class="nav-tabs">
         <button id="tab-overview" class="nav-tab ${state.activeTab === "overview" ? "active" : ""}">Overview & Overlay</button>
         <button id="tab-history" class="nav-tab ${state.activeTab === "history" ? "active" : ""}">History</button>
+        <button id="tab-vocabulary" class="nav-tab ${state.activeTab === "vocabulary" ? "active" : ""}">Vocabulary</button>
         <button id="tab-settings" class="nav-tab ${state.activeTab === "settings" ? "active" : ""}">Settings</button>
       </nav>
 
@@ -97,6 +102,15 @@ export function renderDashboard(el: HTMLElement) {
     };
   }
 
+  const vocabTab = el.querySelector("#tab-vocabulary") as HTMLButtonElement | null;
+  if (vocabTab) {
+    vocabTab.onclick = async () => {
+      state.activeTab = "vocabulary";
+      await fetchVocabulary();
+      renderDashboard(el);
+    };
+  }
+
   const settingsTab = el.querySelector("#tab-settings") as HTMLButtonElement | null;
   if (settingsTab) {
     settingsTab.onclick = async () => {
@@ -117,6 +131,8 @@ export function renderDashboard(el: HTMLElement) {
         text: "Re-pasted text",
       });
     });
+  } else if (state.activeTab === "vocabulary") {
+    renderVocabularyManager(tabContent);
   } else if (state.activeTab === "settings") {
     renderSettingsPanel(tabContent, async () => {
       await checkDaemonConnectivity(el);

@@ -623,6 +623,135 @@ body {
   border-radius: 10px;
 }
 
+/* Vocabulary Manager Styling */
+.vocab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  height: 100%;
+}
+
+.vocab-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.vocab-subtitle {
+  font-size: 13px;
+  color: #64748b;
+  margin-top: 4px;
+}
+
+.vocab-actions-top {
+  display: flex;
+  gap: 8px;
+}
+
+.vocab-add-card {
+  padding: 16px 20px;
+  background: rgba(255, 255, 255, 0.65);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 10px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .vocab-add-card {
+    background: rgba(30, 41, 59, 0.5);
+    border-color: rgba(148, 163, 184, 0.15);
+  }
+}
+
+.vocab-add-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: flex-end;
+}
+
+.vocab-input-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 220px;
+}
+
+.vocab-input-group label {
+  font-size: 12px;
+  font-weight: 500;
+  color: #64748b;
+}
+
+.vocab-table-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  max-height: calc(100vh - 330px);
+  padding-right: 6px;
+}
+
+.vocab-table-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.vocab-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  background: rgba(255, 255, 255, 0.5);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+@media (prefers-color-scheme: dark) {
+  .vocab-table {
+    background: rgba(30, 41, 59, 0.4);
+    border-color: rgba(148, 163, 184, 0.15);
+  }
+}
+
+.vocab-table th {
+  text-align: left;
+  padding: 10px 14px;
+  background: rgba(148, 163, 184, 0.1);
+  font-weight: 600;
+  color: #64748b;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.vocab-table td {
+  padding: 10px 14px;
+  border-top: 1px solid rgba(148, 163, 184, 0.15);
+}
+
+.vocab-spoken-term {
+  font-weight: 500;
+}
+
+.vocab-canonical-term code {
+  background: rgba(59, 130, 246, 0.12);
+  color: #2563eb;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  .vocab-canonical-term code {
+    background: rgba(59, 130, 246, 0.25);
+    color: #93c5fd;
+  }
+}
+
 .cards-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));

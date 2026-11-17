@@ -146,6 +146,38 @@ export class CadenceIPC {
   }
 
   /**
+   * Add a new custom spoken phrase -> canonical term mapping.
+   */
+  static async addVocabulary(spoken: string, canonical: string): Promise<any> {
+    return await invoke<any>("cadence_add_vocabulary", { spoken, canonical });
+  }
+
+  /**
+   * Delete an existing vocabulary term by spoken phrase.
+   */
+  static async deleteVocabulary(spoken: string): Promise<any> {
+    return await invoke<any>("cadence_delete_vocabulary", { spoken });
+  }
+
+  /**
+   * Import batch vocabulary entries from JSON / text content.
+   */
+  static async importVocabulary(content: string, format = "json"): Promise<{ count: number }> {
+    return await invoke<{ count: number }>("cadence_import_vocabulary", { content, format });
+  }
+
+  /**
+   * Export all vocabulary entries in JSON format.
+   */
+  static async exportVocabulary(format = "json"): Promise<string> {
+    const res = await invoke<any>("cadence_export_vocabulary", { format });
+    if (res && typeof res === "object" && typeof res.content === "string") {
+      return res.content;
+    }
+    return typeof res === "string" ? res : JSON.stringify(res, null, 2);
+  }
+
+  /**
    * Fetch registered snippets and templates.
    */
   static async getSnippets(): Promise<CadenceSnippet[]> {
