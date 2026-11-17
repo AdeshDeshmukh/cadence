@@ -3932,3 +3932,25 @@ func TestApp_IPCConfigAndDevices(t *testing.T) {
 		t.Fatalf("expected audio devices list, got: %T %+v", devRes, devRes)
 	}
 }
+
+func TestApp_IPCPaste(t *testing.T) {
+	cfg := config.Default()
+	paster := paste.NewClipboard()
+	app := NewApp(cfg, WithCapture(&testLiveCapture{}), WithPaster(paster))
+	ctx := context.Background()
+
+	res, err := app.Handle(ctx, ipc.Request{
+		Method: "paste",
+		Params: map[string]any{"text": "Hello from re-paste!"},
+	})
+	if err != nil {
+		t.Fatalf("paste failed: %v", err)
+	}
+	m := res.(map[string]any)
+	if m["ok"] != true || m["text"] != "Hello from re-paste!" {
+		t.Fatalf("unexpected paste response: %+v", m)
+	}
+	if paster.Text() != "Hello from re-paste!" {
+		t.Fatalf("expected clipboard text 'Hello from re-paste!', got %q", paster.Text())
+	}
+}

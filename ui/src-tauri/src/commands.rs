@@ -104,6 +104,22 @@ pub fn cadence_get_polish_profiles() -> Result<serde_json::Value, String> {
     ipc::call_daemon("polish_profile_list", None)
 }
 
+/// Trigger re-paste of text into the active application via daemon IPC.
+#[tauri::command]
+pub fn cadence_paste(text: String) -> Result<serde_json::Value, String> {
+    ipc::call_daemon("paste", Some(serde_json::json!({ "text": text })))
+}
+
+/// Perform full-text search across past dictations and notes via daemon IPC.
+#[tauri::command]
+pub fn cadence_search(query: String, limit: Option<usize>) -> Result<serde_json::Value, String> {
+    let params = serde_json::json!({
+        "query": query,
+        "limit": limit.unwrap_or(30)
+    });
+    ipc::call_daemon("search", Some(params))
+}
+
 /// Generic proxy method to invoke any supported daemon method over IPC.
 #[tauri::command]
 pub fn cadence_call(
