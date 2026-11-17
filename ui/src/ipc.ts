@@ -67,6 +67,7 @@ export interface CadenceVocabularyItem {
 export interface CadenceSnippet {
   trigger: string;
   template: string;
+  description?: string;
 }
 
 /**
@@ -182,6 +183,30 @@ export class CadenceIPC {
    */
   static async getSnippets(): Promise<CadenceSnippet[]> {
     return await invoke<CadenceSnippet[]>("cadence_get_snippets");
+  }
+
+  /**
+   * Create or update a snippet.
+   */
+  static async setSnippet(trigger: string, template: string, description?: string): Promise<any> {
+    return await invoke<any>("cadence_set_snippet", { trigger, template, description });
+  }
+
+  /**
+   * Delete a snippet by trigger.
+   */
+  static async deleteSnippet(trigger: string): Promise<any> {
+    return await invoke<any>("cadence_delete_snippet", { trigger });
+  }
+
+  /**
+   * Expand a snippet template with dynamic variables (e.g. {{date}}, {{time}}).
+   */
+  static async expandSnippet(template?: string, trigger?: string): Promise<{ ok: boolean; template: string; expanded: string }> {
+    return await invoke<{ ok: boolean; template: string; expanded: string }>("cadence_expand_snippet", {
+      template,
+      trigger,
+    });
   }
 
   /**
