@@ -134,6 +134,49 @@ pub fn cadence_get_snippets() -> Result<serde_json::Value, String> {
     ipc::call_daemon("snippet_list", None)
 }
 
+/// Create or update a snippet with trigger, template, and optional description.
+#[tauri::command]
+pub fn cadence_set_snippet(
+    trigger: String,
+    template: String,
+    description: Option<String>,
+) -> Result<serde_json::Value, String> {
+    ipc::call_daemon(
+        "snippet_set",
+        Some(serde_json::json!({
+            "trigger": trigger,
+            "template": template,
+            "description": description.unwrap_or_default()
+        })),
+    )
+}
+
+/// Delete a snippet by trigger via daemon IPC.
+#[tauri::command]
+pub fn cadence_delete_snippet(trigger: String) -> Result<serde_json::Value, String> {
+    ipc::call_daemon(
+        "snippet_delete",
+        Some(serde_json::json!({
+            "trigger": trigger
+        })),
+    )
+}
+
+/// Expand snippet template dynamically with variables (e.g. {{date}}, {{time}}).
+#[tauri::command]
+pub fn cadence_expand_snippet(
+    template: Option<String>,
+    trigger: Option<String>,
+) -> Result<serde_json::Value, String> {
+    ipc::call_daemon(
+        "snippet_expand",
+        Some(serde_json::json!({
+            "template": template.unwrap_or_default(),
+            "trigger": trigger.unwrap_or_default()
+        })),
+    )
+}
+
 /// Fetch full daemon configuration via IPC.
 #[tauri::command]
 pub fn cadence_get_config() -> Result<serde_json::Value, String> {
