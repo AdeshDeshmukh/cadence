@@ -1232,6 +1232,116 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			"recording": a.isRecording,
 		}, nil
 
+	case "config_get":
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		return map[string]any{
+			"audio": map[string]any{
+				"sample_rate": a.cfg.Audio.SampleRate,
+				"channels":    a.cfg.Audio.Channels,
+			},
+			"hotkey": map[string]any{
+				"shortcut":      a.cfg.Hotkey.Shortcut,
+				"undo_shortcut": a.cfg.Hotkey.UndoShortcut,
+				"mode":          a.cfg.Hotkey.Mode,
+			},
+			"asr": map[string]any{
+				"engine":    a.cfg.ASR.Engine,
+				"model":     a.cfg.ASR.Model,
+				"language":  a.cfg.ASR.Language,
+				"streaming": a.cfg.ASR.Streaming,
+			},
+			"polish": map[string]any{
+				"enabled":         a.cfg.Polish.Enabled,
+				"backend":         a.cfg.Polish.Backend,
+				"model":           a.cfg.Polish.Model,
+				"endpoint":        a.cfg.Polish.Endpoint,
+				"default_profile": a.cfg.Polish.DefaultProfile,
+				"timeout_ms":      a.cfg.Polish.TimeoutMs,
+				"auto_route":      a.cfg.Polish.AutoRoute,
+			},
+			"privacy": map[string]any{
+				"network_mode": a.cfg.Privacy.NetworkMode,
+				"telemetry":    a.cfg.Privacy.Telemetry,
+			},
+		}, nil
+
+	case "config_set":
+		params, _ := req.Params.(map[string]any)
+		if params == nil {
+			return nil, errors.New("missing config parameters")
+		}
+		a.mu.Lock()
+		defer a.mu.Unlock()
+
+		if hotkeyMap, ok := params["hotkey"].(map[string]any); ok {
+			if sc, ok := hotkeyMap["shortcut"].(string); ok && sc != "" {
+				a.cfg.Hotkey.Shortcut = sc
+			}
+			if usc, ok := hotkeyMap["undo_shortcut"].(string); ok && usc != "" {
+				a.cfg.Hotkey.UndoShortcut = usc
+			}
+			if mode, ok := hotkeyMap["mode"].(string); ok && mode != "" {
+				a.cfg.Hotkey.Mode = mode
+			}
+		}
+
+		if asrMap, ok := params["asr"].(map[string]any); ok {
+			if eng, ok := asrMap["engine"].(string); ok && eng != "" {
+				a.cfg.ASR.Engine = eng
+			}
+			if m, ok := asrMap["model"].(string); ok && m != "" {
+				a.cfg.ASR.Model = m
+			}
+			if lang, ok := asrMap["language"].(string); ok && lang != "" {
+				a.cfg.ASR.Language = lang
+			}
+			if str, ok := asrMap["streaming"].(bool); ok {
+				a.cfg.ASR.Streaming = str
+			}
+		}
+
+		if polishMap, ok := params["polish"].(map[string]any); ok {
+			if en, ok := polishMap["enabled"].(bool); ok {
+				a.cfg.Polish.Enabled = en
+			}
+			if b, ok := polishMap["backend"].(string); ok && b != "" {
+				a.cfg.Polish.Backend = b
+			}
+			if m, ok := polishMap["model"].(string); ok && m != "" {
+				a.cfg.Polish.Model = m
+			}
+			if ep, ok := polishMap["endpoint"].(string); ok && ep != "" {
+				a.cfg.Polish.Endpoint = ep
+			}
+			if prof, ok := polishMap["default_profile"].(string); ok && prof != "" {
+				a.cfg.Polish.DefaultProfile = prof
+			}
+		}
+
+		if privMap, ok := params["privacy"].(map[string]any); ok {
+			if nm, ok := privMap["network_mode"].(string); ok && nm != "" {
+				a.cfg.Privacy.NetworkMode = nm
+			}
+			if tel, ok := privMap["telemetry"].(bool); ok {
+				a.cfg.Privacy.Telemetry = tel
+			}
+		}
+
+		return map[string]any{"ok": true}, nil
+
+	case "audio_devices":
+		if a.capture != nil {
+			devs, err := a.capture.Devices()
+			if err == nil && len(devs) > 0 {
+				return devs, nil
+			}
+		}
+		return []map[string]any{
+			{"id": "default", "name": "Default System Microphone", "is_default": true},
+			{"id": "builtin", "name": "Built-in Microphone", "is_default": false},
+		}, nil
+
 	case "undo":
 		target := "unpolished"
 		depth := 1

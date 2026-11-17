@@ -80,6 +80,30 @@ pub fn cadence_get_snippets() -> Result<serde_json::Value, String> {
     ipc::call_daemon("snippet_list", None)
 }
 
+/// Fetch full daemon configuration via IPC.
+#[tauri::command]
+pub fn cadence_get_config() -> Result<serde_json::Value, String> {
+    ipc::call_daemon("config_get", None)
+}
+
+/// Update daemon configuration fields via IPC.
+#[tauri::command]
+pub fn cadence_set_config(config: serde_json::Value) -> Result<serde_json::Value, String> {
+    ipc::call_daemon("config_set", Some(config))
+}
+
+/// Query available audio input devices from daemon.
+#[tauri::command]
+pub fn cadence_get_audio_devices() -> Result<serde_json::Value, String> {
+    ipc::call_daemon("audio_devices", None)
+}
+
+/// Fetch list of available polish profiles from daemon.
+#[tauri::command]
+pub fn cadence_get_polish_profiles() -> Result<serde_json::Value, String> {
+    ipc::call_daemon("polish_profile_list", None)
+}
+
 /// Generic proxy method to invoke any supported daemon method over IPC.
 #[tauri::command]
 pub fn cadence_call(
