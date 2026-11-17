@@ -3857,3 +3857,78 @@ func TestApp_IPCPartialQuery(t *testing.T) {
 		t.Fatalf("expected empty partial when idle, got %v", m["partial"])
 	}
 }
+
+func TestApp_IPCConfigAndDevices(t *testing.T) {
+	cfg := config.Default()
+	app := NewApp(cfg, WithCapture(&testLiveCapture{}))
+	ctx := context.Background()
+
+	// 1. Get initial config
+	getRes, err := app.Handle(ctx, ipc.Request{Method: "config_get"})
+	if err != nil {
+		t.Fatalf("config_get failed: %v", err)
+	}
+	cfgMap := getRes.(map[string]any)
+	hotkeyMap := cfgMap["hotkey"].(map[string]any)
+	if hotkeyMap["shortcut"] != "Cmd+Shift+Space" {
+		t.Fatalf("expected shortcut Cmd+Shift+Space, got %v", hotkeyMap["shortcut"])
+	}
+
+	// 2. Update config via config_set
+	setRes, err := app.Handle(ctx, ipc.Request{
+		Method: "config_set",
+		Params: map[string]any{
+			"hotkey": map[string]any{
+				"shortcut": "Ctrl+Space",
+				"mode":     "toggle",
+			},
+			"asr": map[string]any{
+				"engine":   "whisper",
+				"model":    "small.en",
+				"language": "en",
+			},
+			"polish": map[string]any{
+				"enabled":         true,
+				"backend":         "ollama",
+				"model":           "llama3",
+				"default_profile": "code",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("config_set failed: %v", err)
+	}
+	setMap := setRes.(map[string]any)
+	if setMap["ok"] != true {
+		t.Fatalf("expected ok true, got: %v", setMap)
+	}
+
+	// 3. Verify updated config
+	getRes2, err := app.Handle(ctx, ipc.Request{Method: "config_get"})
+	if err != nil {
+		t.Fatalf("config_get 2 failed: %v", err)
+	}
+	cfgMap2 := getRes2.(map[string]any)
+	hk2 := cfgMap2["hotkey"].(map[string]any)
+	if hk2["shortcut"] != "Ctrl+Space" || hk2["mode"] != "toggle" {
+		t.Fatalf("unexpected updated hotkey: %+v", hk2)
+	}
+	asr2 := cfgMap2["asr"].(map[string]any)
+	if asr2["model"] != "small.en" {
+		t.Fatalf("unexpected asr model: %+v", asr2)
+	}
+	pol2 := cfgMap2["polish"].(map[string]any)
+	if pol2["enabled"] != true || pol2["default_profile"] != "code" {
+		t.Fatalf("unexpected polish config: %+v", pol2)
+	}
+
+	// 4. Test audio_devices
+	devRes, err := app.Handle(ctx, ipc.Request{Method: "audio_devices"})
+	if err != nil {
+		t.Fatalf("audio_devices failed: %v", err)
+	}
+	devs, ok := devRes.([]map[string]any)
+	if !ok || len(devs) == 0 {
+		t.Fatalf("expected audio devices list, got: %T %+v", devRes, devRes)
+	}
+}

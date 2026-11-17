@@ -12,6 +12,43 @@ export interface CadenceStatus {
   [key: string]: any;
 }
 
+export interface CadenceConfig {
+  audio?: {
+    sample_rate?: number;
+    channels?: number;
+  };
+  hotkey?: {
+    shortcut?: string;
+    undo_shortcut?: string;
+    mode?: string;
+  };
+  asr?: {
+    engine?: string;
+    model?: string;
+    language?: string;
+    streaming?: boolean;
+  };
+  polish?: {
+    enabled?: boolean;
+    backend?: string;
+    model?: string;
+    endpoint?: string;
+    default_profile?: string;
+    timeout_ms?: number;
+    auto_route?: boolean;
+  };
+  privacy?: {
+    network_mode?: string;
+    telemetry?: boolean;
+  };
+}
+
+export interface AudioDevice {
+  id: string;
+  name: string;
+  is_default?: boolean;
+}
+
 export interface CadenceHistoryItem {
   id: string;
   text?: string;
@@ -50,6 +87,34 @@ export class CadenceIPC {
    */
   static async getStatus(): Promise<CadenceStatus> {
     return await invoke<CadenceStatus>("cadence_get_status");
+  }
+
+  /**
+   * Fetch complete daemon settings and configuration.
+   */
+  static async getConfig(): Promise<CadenceConfig> {
+    return await invoke<CadenceConfig>("cadence_get_config");
+  }
+
+  /**
+   * Update daemon configuration fields via IPC.
+   */
+  static async setConfig(config: CadenceConfig): Promise<{ ok: boolean }> {
+    return await invoke<{ ok: boolean }>("cadence_set_config", { config });
+  }
+
+  /**
+   * Fetch available audio input devices.
+   */
+  static async getAudioDevices(): Promise<AudioDevice[]> {
+    return await invoke<AudioDevice[]>("cadence_get_audio_devices");
+  }
+
+  /**
+   * Fetch registered AI polish profiles list.
+   */
+  static async getPolishProfiles(): Promise<string[]> {
+    return await invoke<string[]>("cadence_get_polish_profiles");
   }
 
   /**

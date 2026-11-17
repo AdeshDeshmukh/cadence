@@ -10,9 +10,14 @@ import {
   getDaemonPartial,
   broadcastPartialText,
 } from "./streaming";
+import {
+  loadSettings,
+  renderSettingsPanel,
+} from "./settings";
 
 export type UIState = {
   mode: "overlay" | "dashboard";
+  activeTab: "overview" | "settings";
   version: string;
   daemonConnected: boolean;
   daemonStatus: CadenceStatus | null;
@@ -24,6 +29,7 @@ export type UIState = {
 
 const state: UIState = {
   mode: window.location.search.includes("window=overlay") ? "overlay" : "dashboard",
+  activeTab: "overview",
   version: "0.1.0",
   daemonConnected: false,
   daemonStatus: null,
@@ -56,6 +62,46 @@ export function renderDashboard(el: HTMLElement) {
         </div>
       </header>
 
+      <!-- Navigation Tabs -->
+      <nav class="nav-tabs">
+        <button id="tab-overview" class="nav-tab ${state.activeTab === "overview" ? "active" : ""}">Overview & Overlay</button>
+        <button id="tab-settings" class="nav-tab ${state.activeTab === "settings" ? "active" : ""}">Settings</button>
+      </nav>
+
+      <div id="tab-content" style="flex: 1; display: flex; flex-direction: column;">
+        <!-- Tab Content dynamically injected below -->
+      </div>
+    </div>
+  `;
+
+  // Attach tab navigation listeners
+  const overviewTab = el.querySelector("#tab-overview") as HTMLButtonElement | null;
+  if (overviewTab) {
+    overviewTab.onclick = () => {
+      state.activeTab = "overview";
+      renderDashboard(el);
+    };
+  }
+
+  const settingsTab = el.querySelector("#tab-settings") as HTMLButtonElement | null;
+  if (settingsTab) {
+    settingsTab.onclick = async () => {
+      state.activeTab = "settings";
+      await loadSettings();
+      renderDashboard(el);
+    };
+  }
+
+  const tabContent = el.querySelector("#tab-content") as HTMLElement | null;
+  if (!tabContent) return;
+
+  if (state.activeTab === "settings") {
+    renderSettingsPanel(tabContent, async () => {
+      await checkDaemonConnectivity(el);
+    });
+  } else {
+    // Render Overview Tab
+    tabContent.innerHTML = `
       <section class="cards-grid">
         <div class="card">
           <div class="card-title">Operating Mode</div>
@@ -105,10 +151,136 @@ export function renderDashboard(el: HTMLElement) {
           ${state.lastPingResult ? `IPC: ${state.lastPingResult}` : ""}
         </div>
       </div>
-    </div>
-  `;
+    `;
 
-  // Attach button event listeners
+    // Attach button event listeners in Overview
+    const toggleOverlayBtn = tabContent.querySelector("#btn-toggle-overlay") as HTMLButtonElement | null;
+    if (toggleOverlayBtn) {
+      toggleOverlayBtn.onclick = async () => {
+        try {
+          const visible = await toggleOverlayWindow();
+          state.overlayVisible = visible;
+          state.lastPingResult = `Overlay window ${visible ? "visible" : "hidden"}`;
+          renderDashboard(el);
+        } catch (err: any) {
+          state.lastPingResult = `Toggle overlay error: ${err?.message || err}`;
+          renderDashboard(el);
+        }
+      };
+    }
+
+    const startDictBtn = tabContent.querySelector("#btn-start-dictation") as HTMLButtonElement | null;
+    if (startDictBtn) {
+      startDictBtn.onclick = async () => {
+        try {
+          await CadenceIPC.dictateStart();
+          await broadcastOverlayState({
+            state: "recording",
+            text: "Listening...",
+          });
+          state.activeDictating = true;
+          startStreamingPoller();
+          state.lastPingResult = "Dictation recording started";
+          renderDashboard(el);
+        } catch (err: any) {
+          state.lastPingResult = `Dictate start error: ${err?.message || err}`;
+          renderDashboard(el);
+        }
+      };
+    }
+
+    const stopDictBtn = tabContent.querySelector("#btn-stop-dictation") as HTMLButtonElement | null;
+    if (stopDictBtn) {
+      stopDictBtn.onclick = async () => {
+        stopStreamingPoller();
+        try {
+          await broadcastOverlayState({
+            state: "transcribing",
+            text: "Transcribing audio...",
+          });
+          await CadenceIPC.dictateStop();
+          await broadcastOverlayState({
+            state: "done",
+            text: "Pasted text",
+          });
+          state.activeDictating = false;
+          state.lastPingResult = "Dictation stopped and processed";
+          renderDashboard(el);
+        } catch (err: any) {
+          state.lastPingResult = `Dictate stop error: ${err?.message || err}`;
+          renderDashboard(el);
+        }
+      };
+    }
+
+    const streamSimBtn = tabContent.querySelector("#btn-stream-sim") as HTMLButtonElement | null;
+    if (streamSimBtn) {
+      streamSimBtn.onclick = async () => {
+        state.streamingSimulationActive = true;
+        renderDashboard(el);
+
+        await broadcastOverlayState({
+          state: "recording",
+          text: "Listening...",
+        });
+
+        const sentence = "Cadence dictation engine streams words in real-time as you speak.";
+        const words = sentence.split(" ");
+        let accumulated = "";
+
+        for (let i = 0; i < words.length; i++) {
+          accumulated += (accumulated ? " " : "") + words[i];
+          await broadcastPartialText({
+            session_id: "sim-sess-1",
+            text: accumulated,
+            is_final: i === words.length - 1,
+            word_count: i + 1,
+          });
+          await new Promise((resolve) => window.setTimeout(resolve, 140));
+        }
+
+        await new Promise((resolve) => window.setTimeout(resolve, 600));
+        await broadcastOverlayState({
+          state: "polishing",
+          text: "Polishing with AI...",
+        });
+
+        await new Promise((resolve) => window.setTimeout(resolve, 800));
+        await broadcastOverlayState({
+          state: "done",
+          text: "Pasted: " + sentence,
+        });
+
+        state.streamingSimulationActive = false;
+        state.lastPingResult = "Completed streaming simulation";
+        renderDashboard(el);
+      };
+    }
+
+    const attachSim = (id: string, s: OverlayState, text: string) => {
+      const btn = tabContent.querySelector(id) as HTMLButtonElement | null;
+      if (btn) {
+        btn.onclick = async () => {
+          try {
+            await broadcastOverlayState({ state: s, text });
+            state.lastPingResult = `Simulated overlay state: ${s}`;
+            renderDashboard(el);
+          } catch (err: any) {
+            state.lastPingResult = `Sim error: ${err?.message || err}`;
+            renderDashboard(el);
+          }
+        };
+      }
+    };
+
+    attachSim("#sim-rec", "recording", "Listening...");
+    attachSim("#sim-asr", "transcribing", "Transcribing audio...");
+    attachSim("#sim-ai", "polishing", "Polishing with AI...");
+    attachSim("#sim-done", "done", "Pasted into document");
+    attachSim("#sim-idle", "idle", "Ready (Cmd+Shift+Space)");
+  }
+
+  // Header Ping Button
   const pingBtn = el.querySelector("#btn-ping") as HTMLButtonElement | null;
   if (pingBtn) {
     pingBtn.onclick = async () => {
@@ -128,131 +300,6 @@ export function renderDashboard(el: HTMLElement) {
       }
     };
   }
-
-  const toggleOverlayBtn = el.querySelector("#btn-toggle-overlay") as HTMLButtonElement | null;
-  if (toggleOverlayBtn) {
-    toggleOverlayBtn.onclick = async () => {
-      try {
-        const visible = await toggleOverlayWindow();
-        state.overlayVisible = visible;
-        state.lastPingResult = `Overlay window ${visible ? "visible" : "hidden"}`;
-        renderDashboard(el);
-      } catch (err: any) {
-        state.lastPingResult = `Toggle overlay error: ${err?.message || err}`;
-        renderDashboard(el);
-      }
-    };
-  }
-
-  const startDictBtn = el.querySelector("#btn-start-dictation") as HTMLButtonElement | null;
-  if (startDictBtn) {
-    startDictBtn.onclick = async () => {
-      try {
-        await CadenceIPC.dictateStart();
-        await broadcastOverlayState({
-          state: "recording",
-          text: "Listening...",
-        });
-        state.activeDictating = true;
-        startStreamingPoller();
-        state.lastPingResult = "Dictation recording started";
-        renderDashboard(el);
-      } catch (err: any) {
-        state.lastPingResult = `Dictate start error: ${err?.message || err}`;
-        renderDashboard(el);
-      }
-    };
-  }
-
-  const stopDictBtn = el.querySelector("#btn-stop-dictation") as HTMLButtonElement | null;
-  if (stopDictBtn) {
-    stopDictBtn.onclick = async () => {
-      stopStreamingPoller();
-      try {
-        await broadcastOverlayState({
-          state: "transcribing",
-          text: "Transcribing audio...",
-        });
-        await CadenceIPC.dictateStop();
-        await broadcastOverlayState({
-          state: "done",
-          text: "Pasted text",
-        });
-        state.activeDictating = false;
-        state.lastPingResult = "Dictation stopped and processed";
-        renderDashboard(el);
-      } catch (err: any) {
-        state.lastPingResult = `Dictate stop error: ${err?.message || err}`;
-        renderDashboard(el);
-      }
-    };
-  }
-
-  const streamSimBtn = el.querySelector("#btn-stream-sim") as HTMLButtonElement | null;
-  if (streamSimBtn) {
-    streamSimBtn.onclick = async () => {
-      state.streamingSimulationActive = true;
-      renderDashboard(el);
-
-      await broadcastOverlayState({
-        state: "recording",
-        text: "Listening...",
-      });
-
-      const sentence = "Cadence dictation engine streams words in real-time as you speak.";
-      const words = sentence.split(" ");
-      let accumulated = "";
-
-      for (let i = 0; i < words.length; i++) {
-        accumulated += (accumulated ? " " : "") + words[i];
-        await broadcastPartialText({
-          session_id: "sim-sess-1",
-          text: accumulated,
-          is_final: i === words.length - 1,
-          word_count: i + 1,
-        });
-        await new Promise((resolve) => window.setTimeout(resolve, 140));
-      }
-
-      await new Promise((resolve) => window.setTimeout(resolve, 600));
-      await broadcastOverlayState({
-        state: "polishing",
-        text: "Polishing with AI...",
-      });
-
-      await new Promise((resolve) => window.setTimeout(resolve, 800));
-      await broadcastOverlayState({
-        state: "done",
-        text: "Pasted: " + sentence,
-      });
-
-      state.streamingSimulationActive = false;
-      state.lastPingResult = "Completed streaming simulation";
-      renderDashboard(el);
-    };
-  }
-
-  const attachSim = (id: string, s: OverlayState, text: string) => {
-    const btn = el.querySelector(id) as HTMLButtonElement | null;
-    if (btn) {
-      btn.onclick = async () => {
-        try {
-          await broadcastOverlayState({ state: s, text });
-          state.lastPingResult = `Simulated overlay state: ${s}`;
-          renderDashboard(el);
-        } catch (err: any) {
-          state.lastPingResult = `Sim error: ${err?.message || err}`;
-          renderDashboard(el);
-        }
-      };
-    }
-  };
-
-  attachSim("#sim-rec", "recording", "Listening...");
-  attachSim("#sim-asr", "transcribing", "Transcribing audio...");
-  attachSim("#sim-ai", "polishing", "Polishing with AI...");
-  attachSim("#sim-done", "done", "Pasted into document");
-  attachSim("#sim-idle", "idle", "Ready (Cmd+Shift+Space)");
 }
 
 function startStreamingPoller() {

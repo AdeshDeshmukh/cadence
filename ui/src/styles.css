@@ -296,6 +296,163 @@ body {
   cursor: not-allowed;
 }
 
+/* Settings View Styling */
+.nav-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+  padding-bottom: 8px;
+}
+
+.nav-tab {
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.nav-tab.active {
+  background: #2563eb;
+  color: #ffffff;
+}
+
+.nav-tab:hover:not(.active) {
+  background: rgba(148, 163, 184, 0.15);
+  color: #1e293b;
+}
+
+@media (prefers-color-scheme: dark) {
+  .nav-tab:hover:not(.active) {
+    color: #f8fafc;
+  }
+}
+
+.settings-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow-y: auto;
+  padding-right: 8px;
+  max-height: calc(100vh - 180px);
+}
+
+.settings-header {
+  margin-bottom: 4px;
+}
+
+.settings-subtitle {
+  font-size: 13px;
+  color: #64748b;
+  margin-top: 4px;
+}
+
+.save-banner {
+  padding: 10px 14px;
+  background: #dcfce7;
+  color: #15803d;
+  border: 1px solid #bbf7d0;
+  border-radius: 8px;
+  font-weight: 500;
+  font-size: 13px;
+}
+
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.settings-section {
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 10px;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: rgba(255, 255, 255, 0.4);
+}
+
+@media (prefers-color-scheme: dark) {
+  .settings-section {
+    background: rgba(30, 41, 59, 0.4);
+  }
+}
+
+.section-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #3b82f6;
+  padding: 0 6px;
+}
+
+.form-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.form-row label {
+  font-size: 13px;
+  font-weight: 500;
+  min-width: 140px;
+}
+
+.checkbox-row {
+  justify-content: flex-start;
+  gap: 10px;
+}
+
+.form-input {
+  flex: 1;
+  max-width: 340px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  background: #ffffff;
+  color: #1e293b;
+  font-size: 13px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .form-input {
+    background: #0f172a;
+    color: #f1f5f9;
+    border-color: rgba(148, 163, 184, 0.2);
+  }
+}
+
+.form-readonly {
+  font-size: 12px;
+  color: #64748b;
+  font-family: monospace;
+}
+
+.settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+  margin-bottom: 24px;
+}
+
+.save-btn {
+  padding: 8px 20px;
+  font-size: 13px;
+  background: #16a34a;
+}
+
+.save-btn:hover {
+  background: #15803d;
+}
+
 .cards-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
