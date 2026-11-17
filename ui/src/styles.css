@@ -172,6 +172,55 @@ body {
   letter-spacing: 0.2px;
 }
 
+.streaming-container {
+  display: flex;
+  align-items: center;
+  overflow-x: auto;
+  scroll-behavior: smooth;
+  scrollbar-width: none;
+}
+
+.streaming-container::-webkit-scrollbar {
+  display: none;
+}
+
+.streaming-token.committed {
+  color: #f1f5f9;
+}
+
+.streaming-token.latest {
+  color: #93c5fd;
+  font-weight: 600;
+  text-shadow: 0 0 8px rgba(147, 197, 253, 0.5);
+  animation: word-fade-in 0.15s ease-out;
+}
+
+.streaming-placeholder {
+  color: #94a3b8;
+  font-style: italic;
+}
+
+.streaming-caret {
+  display: inline-block;
+  width: 2px;
+  height: 13px;
+  background-color: #60a5fa;
+  margin-left: 3px;
+  vertical-align: middle;
+  border-radius: 1px;
+  animation: caret-blink 0.8s infinite;
+}
+
+@keyframes caret-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+@keyframes word-fade-in {
+  from { opacity: 0.4; transform: translateY(1px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 /* Dashboard / Settings styling */
 .dashboard-container {
   display: flex;

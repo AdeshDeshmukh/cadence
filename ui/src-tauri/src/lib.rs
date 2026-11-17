@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod ipc;
 pub mod overlay;
+pub mod streaming;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -20,6 +21,8 @@ pub fn run() {
             overlay::hide_overlay,
             overlay::toggle_overlay,
             overlay::emit_overlay_state,
+            streaming::cadence_get_partial,
+            streaming::cadence_emit_partial,
         ])
         .run(tauri::generate_context!())
         .expect("error while running cadence desktop app");

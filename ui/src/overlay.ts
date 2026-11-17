@@ -1,5 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { StreamingAccumulator, subscribePartialText, type PartialTextPayload } from "./streaming";
 
 export type OverlayState =
   | "idle"
@@ -22,6 +23,7 @@ let currentState: OverlayPayload = {
   text: "Ready (Cmd+Shift+Space)",
 };
 
+const accumulator = new StreamingAccumulator();
 let autoHideTimer: number | null = null;
 
 const STATE_CONFIG: Record<
@@ -74,8 +76,15 @@ const STATE_CONFIG: Record<
 
 export function renderOverlay(container: HTMLElement, payload: OverlayPayload) {
   const conf = STATE_CONFIG[payload.state] || STATE_CONFIG.idle;
-  const displayText = payload.text || conf.defaultText;
   const appBadge = payload.app_name ? `<span class="pill-app">${payload.app_name}</span>` : "";
+
+  let contentHtml = "";
+  if (payload.state === "recording" && accumulator.getText()) {
+    contentHtml = accumulator.getFormattedHTML();
+  } else {
+    const displayText = payload.text || conf.defaultText;
+    contentHtml = `<span>${displayText}</span>`;
+  }
 
   container.innerHTML = `
     <div class="pill-container" id="pill" data-tauri-drag-region>
@@ -83,10 +92,18 @@ export function renderOverlay(container: HTMLElement, payload: OverlayPayload) {
         <div class="pill-dot ${conf.dotClass}" id="pill-dot"></div>
       </div>
       <span class="pill-badge ${conf.badge}">${conf.label}</span>
-      <span class="pill-text" id="pill-text" title="${displayText}">${displayText}</span>
+      <div class="pill-text streaming-container" id="pill-text">
+        ${contentHtml}
+      </div>
       ${appBadge}
     </div>
   `;
+
+  // Auto-scroll pill text container to end of speech
+  const textEl = container.querySelector("#pill-text");
+  if (textEl) {
+    textEl.scrollLeft = textEl.scrollWidth;
+  }
 }
 
 export function setOverlayState(
@@ -99,6 +116,10 @@ export function setOverlayState(
   if (autoHideTimer !== null) {
     window.clearTimeout(autoHideTimer);
     autoHideTimer = null;
+  }
+
+  if (newState === "idle" || newState === "done") {
+    accumulator.reset();
   }
 
   currentState = {
@@ -117,6 +138,19 @@ export function setOverlayState(
   }
 }
 
+export function updateStreamingText(
+  container: HTMLElement,
+  text: string,
+  isFinal = false,
+  sessionId = ""
+) {
+  accumulator.update(text, isFinal, sessionId);
+  if (currentState.state !== "recording") {
+    currentState.state = "recording";
+  }
+  renderOverlay(container, currentState);
+}
+
 export function getOverlayState(): OverlayPayload {
   return currentState;
 }
@@ -124,7 +158,7 @@ export function getOverlayState(): OverlayPayload {
 export async function initOverlay(container: HTMLElement) {
   renderOverlay(container, currentState);
 
-  // Listen to cross-window events emitted from main dashboard or Rust core
+  // Listen to cross-window state change events
   try {
     await listen<OverlayPayload>("overlay-state-changed", (event) => {
       if (event.payload) {
@@ -136,17 +170,16 @@ export async function initOverlay(container: HTMLElement) {
         );
       }
     });
+
+    // Listen to real-time streaming partials
+    await subscribePartialText((payload: PartialTextPayload) => {
+      if (payload && payload.text) {
+        updateStreamingText(container, payload.text, payload.is_final, payload.session_id);
+      }
+    });
   } catch (err) {
-    console.warn("Event listener initialization error:", err);
+    console.warn("Overlay event listener initialization error:", err);
   }
-}
-
-export async function showOverlayWindow(): Promise<void> {
-  await invoke("show_overlay");
-}
-
-export async function hideOverlayWindow(): Promise<void> {
-  await invoke("hide_overlay");
 }
 
 export async function toggleOverlayWindow(): Promise<boolean> {
