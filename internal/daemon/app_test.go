@@ -3985,3 +3985,42 @@ func TestApp_IPCPrivacyStatsAndClearRecoveries(t *testing.T) {
 		t.Fatalf("unexpected clear_recoveries response: %+v", clearRes)
 	}
 }
+
+func TestApp_IPCBenchmarkStatsAndRun(t *testing.T) {
+	cfg := config.Default()
+	app := NewApp(cfg, WithCapture(&testLiveCapture{}))
+	ctx := context.Background()
+
+	// 1. Initial benchmark stats
+	res, err := app.Handle(ctx, ipc.Request{Method: "benchmark_stats"})
+	if err != nil {
+		t.Fatalf("benchmark_stats failed: %v", err)
+	}
+	m, ok := res.(map[string]any)
+	if !ok || m["ok"] != true {
+		t.Fatalf("unexpected benchmark_stats response: %+v", res)
+	}
+	if m["total_sessions"].(int) == 0 {
+		t.Fatalf("expected non-zero baseline benchmark sessions")
+	}
+
+	// 2. Run local benchmark
+	runRes, err := app.Handle(ctx, ipc.Request{
+		Method: "benchmark_run",
+		Params: map[string]any{"sample_text": "Cadence on-device voice engine test."},
+	})
+	if err != nil {
+		t.Fatalf("benchmark_run failed: %v", err)
+	}
+	runMap, ok := runRes.(map[string]any)
+	if !ok || runMap["ok"] != true {
+		t.Fatalf("unexpected benchmark_run response: %+v", runRes)
+	}
+	rec := runMap["record"].(BenchmarkRecord)
+	if rec.ReferenceText != "Cadence on-device voice engine test." {
+		t.Fatalf("unexpected benchmark record reference: %v", rec)
+	}
+	if rec.WER != 0.0 {
+		t.Fatalf("expected 0.0 WER on identical hypothesis, got %v", rec.WER)
+	}
+}

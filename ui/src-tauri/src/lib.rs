@@ -30,6 +30,8 @@ pub fn run() {
             commands::cadence_paste,
             commands::cadence_get_privacy_stats,
             commands::cadence_clear_recoveries,
+            commands::cadence_get_benchmark_stats,
+            commands::cadence_run_benchmark,
             commands::cadence_search,
             commands::cadence_call,
             overlay::show_overlay,
