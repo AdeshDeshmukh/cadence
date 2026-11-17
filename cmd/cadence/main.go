@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +18,7 @@ import (
 	"time"
 
 	"github.com/AdeshDeshmukh/cadence/internal/agent"
+	"github.com/AdeshDeshmukh/cadence/internal/api"
 	"github.com/AdeshDeshmukh/cadence/internal/config"
 	appcontext "github.com/AdeshDeshmukh/cadence/internal/context"
 	"github.com/AdeshDeshmukh/cadence/internal/developer"
@@ -77,6 +80,7 @@ Commands:
   import <file>        Import media file (audio/video) or subtitles (.srt, .vtt, .json)
   plugin [subcommand]  Manage plugins, manifests, lifecycle, and sandbox (install, activate, deactivate, list, status)
   mcp [serve|info]     Model Context Protocol (MCP) server for Claude Code, Cursor, Antigravity
+  serve [flags]        Run standalone REST + WebSocket + Event Stream API server
   context [show|set|clear] Show or manage developer/code editor context (file, language, selection)
   terminal [status|hook] Inspect terminal/shell context or generate shell integration hooks
   app                Show detected active foreground application and category
@@ -370,6 +374,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "mcp":
 		if err := cmdMCP(ctx, cfg, client, args[1:], os.Stdin, stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "serve", "server":
+		if err := cmdServe(ctx, cfg, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -6337,6 +6348,83 @@ func runMCPServer(ctx context.Context, cfg config.Config, client ipc.Client, in 
 	autoProv := mcp.NewAutoProvider(ipcProv, directProv)
 	server := mcp.NewServer(autoProv, in, out)
 	return server.Serve(ctx)
+}
+
+func cmdServe(ctx context.Context, cfg config.Config, client ipc.Client, args []string, out io.Writer) error {
+	httpCfg := cfg.HTTP
+	if httpCfg.Host == "" {
+		httpCfg.Host = "127.0.0.1"
+	}
+	if httpCfg.Port == 0 {
+		httpCfg.Port = 8080
+	}
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--host":
+			if i+1 < len(args) {
+				httpCfg.Host = args[i+1]
+				i++
+			}
+		case "--port", "-p":
+			if i+1 < len(args) {
+				if p, err := strconv.Atoi(args[i+1]); err == nil {
+					httpCfg.Port = p
+				}
+				i++
+			}
+		case "--token":
+			if i+1 < len(args) {
+				httpCfg.AuthToken = args[i+1]
+				i++
+			}
+		case "--cors":
+			if i+1 < len(args) {
+				httpCfg.CORSOrigins = strings.Split(args[i+1], ",")
+				i++
+			}
+		case "--help", "-h":
+			fmt.Fprintln(out, "Usage: cadence serve [--host 127.0.0.1] [--port 8080] [--token secret] [--cors *]")
+			return nil
+		}
+	}
+
+	var st storage.Store
+	storePath := cfg.Storage.DBPath
+	if storePath == "" {
+		home, _ := os.UserHomeDir()
+		storePath = filepath.Join(home, ".config", "cadence", "cadence.db")
+	}
+	if s, err := storage.Open(storePath); err == nil {
+		defer s.Close()
+		st = s
+	} else {
+		st = storage.NewMemory()
+	}
+
+	addr := fmt.Sprintf("%s:%d", httpCfg.Host, httpCfg.Port)
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("failed to listen on %s: %w", addr, err)
+	}
+	defer l.Close()
+
+	srv := api.NewServer(httpCfg, st, nil, nil)
+	fmt.Fprintf(out, "Cadence API server listening on http://%s\n", l.Addr().String())
+	fmt.Fprintln(out, "Endpoints: /v1/status, /v1/history, /v1/vocabulary, /v1/snippets, /v1/notes, /v1/events, /v1/ws")
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.Stop(shutdownCtx)
+		_ = l.Close()
+	}()
+
+	if err := srv.Start(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }
 
 func showMCPInfo(out io.Writer) {

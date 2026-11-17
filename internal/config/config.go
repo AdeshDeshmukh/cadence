@@ -17,6 +17,7 @@ type Config struct {
 	IPC     IPCConfig
 	Storage StorageConfig
 	Meeting MeetingConfig
+	HTTP    HTTPConfig
 }
 
 type AudioConfig struct {
@@ -98,6 +99,14 @@ type DiarizationConfig struct {
 	MaxSpeakers int
 }
 
+type HTTPConfig struct {
+	Enabled     bool
+	Host        string
+	Port        int
+	AuthToken   string
+	CORSOrigins []string
+}
+
 func DefaultDBPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
@@ -176,6 +185,12 @@ func Default() Config {
 				MinSpeakers: 1,
 				MaxSpeakers: 8,
 			},
+		},
+		HTTP: HTTPConfig{
+			Enabled:     false,
+			Host:        "127.0.0.1",
+			Port:        8080,
+			CORSOrigins: []string{"*"},
 		},
 	}
 }

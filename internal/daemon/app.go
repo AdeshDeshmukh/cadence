@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/AdeshDeshmukh/cadence/internal/agent"
+	"github.com/AdeshDeshmukh/cadence/internal/api"
 	"github.com/AdeshDeshmukh/cadence/internal/asr"
 	"github.com/AdeshDeshmukh/cadence/internal/audio"
 	"github.com/AdeshDeshmukh/cadence/internal/config"
@@ -115,6 +116,7 @@ type App struct {
 	importEngine     *impexp.ImportEngine
 	pluginRegistry   *plugins.Registry
 	pluginManager    *plugins.Manager
+	apiServer        *api.Server
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -639,6 +641,19 @@ func (a *App) Start(ctx context.Context) error {
 		_ = a.pluginManager.LoadAll(a.ctx)
 	}
 
+	if a.cfg.HTTP.Enabled {
+		addr := fmt.Sprintf("%s:%d", a.cfg.HTTP.Host, a.cfg.HTTP.Port)
+		l, err := net.Listen("tcp", addr)
+		if err == nil {
+			a.apiServer = api.NewServer(a.cfg.HTTP, a.store, a, a.asr)
+			a.wg.Add(1)
+			go func() {
+				defer a.wg.Done()
+				_ = a.apiServer.Start(l)
+			}()
+		}
+	}
+
 	return nil
 }
 
@@ -827,6 +842,65 @@ func (a *App) cancelDictation() {
 		cancel()
 	}
 	_ = a.capture.Stop()
+}
+
+// Status returns a snapshot of daemon state for API/IPC consumers.
+func (a *App) Status(ctx context.Context) (map[string]any, error) {
+	res, err := a.Handle(ctx, ipc.Request{Method: "status"})
+	if err != nil {
+		return nil, err
+	}
+	if m, ok := res.(map[string]any); ok {
+		return m, nil
+	}
+	return map[string]any{"raw": res}, nil
+}
+
+// StartRecording starts a new audio dictation session from API/IPC requests.
+func (a *App) StartRecording(ctx context.Context) error {
+	a.startDictation()
+	return nil
+}
+
+// StopRecording stops the ongoing audio dictation session and returns final text.
+func (a *App) StopRecording(ctx context.Context) (string, error) {
+	a.mu.Lock()
+	sess := a.activeSess
+	a.mu.Unlock()
+
+	a.stopDictation()
+
+	if sess != nil {
+		// Wait briefly for pipeline completion
+		for i := 0; i < 20; i++ {
+			if sess.GetState() == pipeline.Complete {
+				return sess.FinalText, nil
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if sess.FinalText != "" {
+			return sess.FinalText, nil
+		}
+		return sess.GetPartial(), nil
+	}
+	return "", nil
+}
+
+// TranscribeAudio processes audio chunks through the ASR engine directly.
+func (a *App) TranscribeAudio(ctx context.Context, chunks []audio.Chunk) (string, error) {
+	if a.asr == nil {
+		return "", errors.New("no ASR engine configured")
+	}
+	res, err := a.asr.Transcribe(ctx, chunks)
+	if err != nil {
+		return "", err
+	}
+	return res.Text, nil
+}
+
+// APIServer returns the active HTTP/WebSocket API server if started.
+func (a *App) APIServer() *api.Server {
+	return a.apiServer
 }
 
 // IsRecording returns true if an audio dictation session is actively recording.
@@ -3725,6 +3799,12 @@ func (a *App) Stop() error {
 
 	if a.workerMgr != nil {
 		_ = a.workerMgr.Stop()
+	}
+
+	if a.apiServer != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = a.apiServer.Stop(shutdownCtx)
 	}
 
 	if a.store != nil {

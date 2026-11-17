@@ -3432,3 +3432,47 @@ func TestCLI_MCP(t *testing.T) {
 		t.Fatalf("expected ping response, got: %s", string(respLine))
 	}
 }
+
+func TestCLI_Serve(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cfg := config.Default()
+	client := ipc.Client{}
+
+	// 1. Help flag
+	var out bytes.Buffer
+	if err := cmdServe(ctx, cfg, client, []string{"--help"}, &out); err != nil {
+		t.Fatalf("cmdServe --help failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Usage: cadence serve") {
+		t.Fatalf("unexpected help output: %s", out.String())
+	}
+
+	// 2. Start server on dynamic port (port 0)
+	serveCtx, serveCancel := context.WithCancel(ctx)
+	defer serveCancel()
+
+	out.Reset()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- cmdServe(serveCtx, cfg, client, []string{"--host", "127.0.0.1", "--port", "0"}, &out)
+	}()
+
+	// Wait for listening line
+	time.Sleep(100 * time.Millisecond)
+	serveCancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "use of closed network connection") {
+			t.Fatalf("unexpected serve error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for server to shut down")
+	}
+
+	if !strings.Contains(out.String(), "Cadence API server listening") {
+		t.Errorf("expected listening message in output, got: %s", out.String())
+	}
+}
