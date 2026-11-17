@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod ipc;
+pub mod overlay;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -15,6 +16,10 @@ pub fn run() {
             commands::cadence_get_vocabulary,
             commands::cadence_get_snippets,
             commands::cadence_call,
+            overlay::show_overlay,
+            overlay::hide_overlay,
+            overlay::toggle_overlay,
+            overlay::emit_overlay_state,
         ])
         .run(tauri::generate_context!())
         .expect("error while running cadence desktop app");
