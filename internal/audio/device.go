@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os/exec"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -222,10 +221,7 @@ func (m *Manager) LastRefresh() time.Time {
 
 // NewDefaultEnumerator creates the appropriate device enumerator for the current operating system.
 func NewDefaultEnumerator() DeviceEnumerator {
-	if runtime.GOOS == "darwin" {
-		return &DarwinAudioEnumerator{}
-	}
-	return &FallbackEnumerator{}
+	return newPlatformEnumerator()
 }
 
 // FallbackEnumerator provides a static fallback input device for non-macOS or headless environments.
