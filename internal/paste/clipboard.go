@@ -23,3 +23,23 @@ func (c *Clipboard) Text() string {
 	defer c.mu.RUnlock()
 	return c.text
 }
+
+// FallbackMemoryTier is an in-memory mock tier for headless or fallback environments.
+type FallbackMemoryTier struct {
+	clipboard *Clipboard
+}
+
+func NewFallbackMemoryTier() *FallbackMemoryTier {
+	return &FallbackMemoryTier{
+		clipboard: NewClipboard(),
+	}
+}
+
+func (f *FallbackMemoryTier) Name() string {
+	return "fallback_memory"
+}
+
+func (f *FallbackMemoryTier) Paste(text string) error {
+	_, err := f.clipboard.Paste(text)
+	return err
+}
