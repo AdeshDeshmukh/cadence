@@ -26,6 +26,13 @@ type DeviceEnumerator interface {
 	EnumerateDevices() ([]Device, error)
 }
 
+// CommandRunner allows executing shell commands (mockable for testing).
+type CommandRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
+
+func defaultCommandRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, name, args...).Output()
+}
+
 // Manager handles audio device discovery, active selection, and fallback resolution.
 type Manager struct {
 	mu          sync.RWMutex
