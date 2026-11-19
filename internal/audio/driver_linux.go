@@ -48,9 +48,6 @@ type LinuxAudioDriver struct {
 // NewLinuxAudioDriver creates a stream driver for Linux.
 func NewLinuxAudioDriver(deviceName string) StreamDriver {
 	backend := DetectLinuxAudioBackend()
-	if backend == BackendSimulated {
-		return NewSimulatedDriver(440, 512, 32*time.Millisecond)
-	}
 
 	return &LinuxAudioDriver{
 		backend:      backend,
@@ -74,6 +71,7 @@ func (d *LinuxAudioDriver) StartStream(ctx context.Context, sampleRate int, out 
 	}
 
 	if d.backend == BackendSimulated {
+		d.running = true
 		d.mu.Unlock()
 		return d.fallback.StartStream(ctx, sampleRate, out)
 	}
@@ -98,6 +96,8 @@ func (d *LinuxAudioDriver) StartStream(ctx context.Context, sampleRate int, out 
 			args = append(args, fmt.Sprintf("--device=%s", d.deviceName))
 		}
 	default:
+		d.backend = BackendSimulated
+		d.running = true
 		d.mu.Unlock()
 		return d.fallback.StartStream(ctx, sampleRate, out)
 	}
@@ -105,14 +105,16 @@ func (d *LinuxAudioDriver) StartStream(ctx context.Context, sampleRate int, out 
 	cmd := exec.CommandContext(streamCtx, bin, args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		d.cancel()
+		d.backend = BackendSimulated
+		d.running = true
 		d.mu.Unlock()
 		// Fallback to simulated if pipe creation fails
 		return d.fallback.StartStream(ctx, sampleRate, out)
 	}
 
 	if err := cmd.Start(); err != nil {
-		d.cancel()
+		d.backend = BackendSimulated
+		d.running = true
 		d.mu.Unlock()
 		// Fallback to simulated if command start fails (e.g., daemon not running)
 		return d.fallback.StartStream(ctx, sampleRate, out)
@@ -145,9 +147,6 @@ func (d *LinuxAudioDriver) StopStream() error {
 	defer d.mu.Unlock()
 
 	if !d.running {
-		if d.fallback != nil {
-			return d.fallback.StopStream()
-		}
 		return ErrNotCapturing
 	}
 
@@ -157,6 +156,9 @@ func (d *LinuxAudioDriver) StopStream() error {
 	}
 	if d.cmd != nil && d.cmd.Process != nil {
 		_ = d.cmd.Process.Kill()
+	}
+	if d.backend == BackendSimulated && d.fallback != nil {
+		_ = d.fallback.StopStream()
 	}
 
 	return nil
