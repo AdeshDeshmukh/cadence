@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 )
 
 type Client struct {
@@ -18,9 +17,7 @@ func (c Client) Call(
 	method string,
 	params interface{},
 ) (interface{}, error) {
-	var d net.Dialer
-
-	conn, err := d.DialContext(ctx, c.Network, c.Address)
+	conn, err := Dial(ctx, c.Network, c.Address)
 	if err != nil {
 		return nil, err
 	}
