@@ -4,7 +4,6 @@ package audio
 
 import (
 	"context"
-	"os/exec"
 	"strings"
 	"time"
 )
@@ -12,13 +11,6 @@ import (
 // LinuxAudioEnumerator discovers input devices using pactl or pw-cli.
 type LinuxAudioEnumerator struct {
 	runner CommandRunner
-}
-
-// CommandRunner allows executing shell commands (mockable for testing).
-type CommandRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
-
-func defaultCommandRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).Output()
 }
 
 // NewLinuxAudioEnumerator creates a device enumerator for Linux audio systems.
