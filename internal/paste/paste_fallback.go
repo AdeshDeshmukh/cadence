@@ -1,4 +1,4 @@
-//go:build !darwin && !linux
+//go:build !darwin && !linux && !windows
 
 package paste
 
@@ -15,7 +15,7 @@ var (
 	fallbackClipboard   string
 )
 
-// NewDefaultCascade returns the fallback cascade for non-macOS/non-Linux systems.
+// NewDefaultCascade returns the fallback cascade for non-macOS/non-Linux/non-Windows systems.
 func NewDefaultCascade() *Cascade {
 	return NewCascade(NewFallbackMemoryTier())
 }
