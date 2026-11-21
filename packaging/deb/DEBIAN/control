@@ -1,0 +1,11 @@
+Package: cadence
+Version: 1.0.0
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: Adesh Deshmukh <adeshkd123@gmail.com>
+Homepage: https://github.com/AdeshDeshmukh/cadence
+Description: Local AI-first voice dictation CLI and developer engine
+ Cadence is a local, high-performance, private voice dictation and developer engine.
+ Features on-device speech-to-text, real-time voice editing, terminal commands,
+ meeting recording, and Model Context Protocol (MCP) agent execution.
