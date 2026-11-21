@@ -1,190 +1,111 @@
 # Cadence
 
-> **Free, open-source, on-device AI voice interface for developers.**
+> **Free, open-source, on-device AI voice interface and developer engine.**
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go)](https://golang.org)
-[![Status](https://img.shields.io/badge/status-pre--alpha-orange)](https://github.com/AdeshDeshmukh/cadence/releases)
+[![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-blue)](docs/INSTALL.md)
+[![Release](https://img.shields.io/badge/release-v1.0.0-green.svg)](https://github.com/AdeshDeshmukh/cadence/releases)
+[![CI](https://github.com/AdeshDeshmukh/cadence/actions/workflows/ci.yml/badge.svg)](https://github.com/AdeshDeshmukh/cadence/actions/workflows/ci.yml)
+[![Security & Supply Chain](https://github.com/AdeshDeshmukh/cadence/actions/workflows/security.yml/badge.svg)](https://github.com/AdeshDeshmukh/cadence/actions/workflows/security.yml)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-Cadence is a **local-first, cross-platform voice interface** that goes far beyond dictation. Speak naturally — Cadence understands whether you want to dictate text, edit existing content, run a developer workflow, control your computer, or invoke an AI agent.
+Cadence is a **local-first, cross-platform voice interface and developer engine** that goes far beyond standard dictation. Speak naturally — Cadence understands whether you want to dictate text, edit code, execute shell commands, manage meetings, control your desktop, or run an autonomous AI agent.
+
+- **100% On-Device & Private:** Whisper ASR, Silero VAD, and local LLMs run completely on your machine. Zero mandatory accounts, zero cloud dependencies, zero audio or transcript logging without explicit opt-in.
+- **Cross-Platform:** Native audio capture, keyboard automation, and background service management across **macOS** (CoreAudio, Launchd, Universal arm64/x86_64), **Linux** (PulseAudio, PipeWire, Systemd), and **Windows** (WASAPI, Named Pipes, Win32).
+- **Developer First:** AST code casing, terminal context awareness, three-tier command safety guards, Git commit/PR generation, and Model Context Protocol (MCP) server for Claude Code, Cursor, and Antigravity.
 
 ---
 
-## Vision
+## Documentation
 
-> **Voice → Understanding → Context → Action**
-
-```
-Speak
-  ↓
-VAD (Silero)
-  ↓
-ASR (Whisper / Parakeet)
-  ↓
-Intent Router
-  ├── Dictate    → format → paste
-  ├── Edit       → transform selected text
-  ├── Command    → structured desktop action
-  ├── Developer  → code / terminal / git
-  └── Agent      → multi-step tool loop
-  ↓
-Context Engine (app / file / terminal / git / URL)
-  ↓
-Model Router (local LLM / BYOK cloud)
-  ↓
-Output
-```
-
-No cloud dependency. No mandatory account. No transcript sent anywhere you didn't approve.
-
----
-
-## Why Cadence
-
-| Capability | Wispr Flow | Superwhisper | **Cadence** |
-|---|---|---|---|
-| macOS support | ✅ | ✅ | ✅ |
-| Linux support | ❌ | ❌ | ✅ |
-| Windows | ❌ | ❌ | 🔄 Planned |
-| Local ASR | ✅ | ✅ | ✅ |
-| Streaming transcription | ✅ | ❌ | ✅ |
-| Voice editing | ✅ | ❌ | ✅ |
-| Developer Mode (IDE + terminal) | ❌ | ❌ | ✅ |
-| Command Mode | ❌ | ❌ | ✅ |
-| Agent Mode | ❌ | ❌ | ✅ |
-| Meeting transcription + diarization | ❌ | ❌ | ✅ |
-| CLI-first | ❌ | ❌ | ✅ |
-| Plugin / MCP API | ❌ | ❌ | ✅ |
-| Fully open source | ❌ | ❌ | ✅ Apache 2.0 |
-
----
-
-## Architecture
-
-Cadence runs as a **background daemon** (Go) with Python ML workers. Clients — CLI, Desktop UI (Tauri), REST/WebSocket — all talk to the daemon over a local Unix socket.
-
-```
-┌─────────────────────────────────────────────────┐
-│               cadence-daemon (Go)                │
-│                                                  │
-│  AudioCapture → VAD → ASR → Intent → Context    │
-│                                  ↓               │
-│                        Model / Tool Router       │
-│                                  ↓               │
-│             PostProcess / Action / Paste         │
-│                                                  │
-│  IPC: Unix Socket · JSON-RPC 2.0                │
-└─────────────┬──────────────────────┬─────────────┘
-              │                      │
-         Desktop UI               CLI / REST
-         (Tauri)                  (Go)
-              │                      │
-         Python ML Workers
-         Whisper · Parakeet · Silero VAD
-```
-
----
-
-## Technology Stack
-
-| Layer | Technology |
-|---|---|
-| Daemon / Core | Go 1.23+ |
-| ML Workers | Python 3.12 + faster-whisper + Silero VAD |
-| Desktop UI | Tauri 2.0 + React + TypeScript |
-| CLI | Go + Cobra |
-| IPC | JSON-RPC 2.0 over Unix socket |
-| Config | TOML |
-| Storage | SQLite |
-| Release | GoReleaser |
+- **[Installation Guide](docs/INSTALL.md):** Quickstart via Homebrew, macOS Universal Binaries, `.deb`, `.rpm`, Windows installer, and source builds.
+- **[System Architecture](docs/ARCHITECTURE.md):** Deep dive into audio capture, Silero VAD, streaming Whisper, IPC, process supervisor, and security models.
+- **[CLI Reference](docs/CLI_REFERENCE.md):** Exhaustive command reference for all 35+ commands, flags, and subcommands.
+- **[Plugin SDK](docs/PLUGIN_SDK.md):** Manifest specification, hook lifecycles, and sandboxed WASM tool creation.
 
 ---
 
 ## Quick Start
 
-> ⚠️ Cadence is in **pre-alpha**. This section will be updated as the project matures.
-
+### macOS (Homebrew)
 ```bash
-# Clone
-git clone https://github.com/AdeshDeshmukh/cadence
-cd cadence
+brew tap AdeshDeshmukh/cadence
+brew install cadence
+brew services start cadence
+```
 
-# Build
-make build
+### Linux (Debian / Ubuntu)
+```bash
+curl -LO https://github.com/AdeshDeshmukh/cadence/releases/latest/download/cadence_1.0.0_amd64.deb
+sudo dpkg -i cadence_1.0.0_amd64.deb
+systemctl --user enable --now cadenced.service
+```
 
-# Run the daemon
-./cadenced
+### Windows (PowerShell)
+```powershell
+irm https://github.com/AdeshDeshmukh/cadence/releases/latest/download/install.ps1 | iex
+```
 
-# Start dictating
-./cadence dictate
+### Diagnose & Verify
+```bash
+cadence doctor
 ```
 
 ---
 
-## CLI
+## Architecture Overview
 
-```
-cadence dictate                          # Start a voice session
-cadence transcribe meeting.mp3           # Transcribe a file
-cadence transcribe *.mp3 --format srt   # Batch transcribe
-cadence recover                          # Recover last cancelled session
-cadence history --search "kubernetes"    # Search transcripts
-cadence vocabulary add "gRPC" "gRPC"    # Add custom vocabulary
-cadence mode list                        # List available modes
-cadence model list                       # List available ASR models
-cadence benchmark asr                    # Run ASR benchmarks
-cadence daemon status                    # Check daemon health
-cadence doctor                           # Diagnose setup issues
+```mermaid
+flowchart LR
+    Mic([Microphone]) --> VAD[Silero VAD]
+    VAD --> ASR[Local Streaming Whisper]
+    ASR --> Router{Intent Router}
+    Router -->|Dictation| Polish[Local LLM Polish]
+    Router -->|Edit Mode| CodeAST[Editor & Code Casing]
+    Router -->|Terminal| Shell[Command Risk Guard]
+    Router -->|Agent| MCP[MCP Tools & Plugins]
+    Polish --> Paste([Active Application])
+    CodeAST --> Paste
+    Shell --> Paste
 ```
 
 ---
 
-## Development Phases
+## Feature Comparison
 
-| Phase | Milestone | Goal |
-|---|---|---|
-| 0 | Foundation | Repo + architecture |
-| 1 | Dictation MVP | Speak → ASR → paste |
-| 2 | Great Dictation | Streaming + formatting |
-| 3 | AI Dictation | Context + polish |
-| 4 | Edit Mode | Voice editing |
-| 5 | Developer Mode | IDE + terminal + git |
-| 6 | Command + Agent | Desktop control |
-| 7 | Meeting + Knowledge | Diarization + search |
-| 8 | Ecosystem | Plugins + MCP |
-| 9 | Cross-platform | Windows |
-| 10 | v1.0 | Production release |
+| Capability | Wispr Flow | Superwhisper | **Cadence v1.0.0** |
+|---|---|---|---|
+| macOS (Universal arm64 + x86_64) | ✅ | ✅ | ✅ |
+| Linux (PulseAudio / PipeWire / Systemd) | ❌ | ❌ | ✅ |
+| Windows (WASAPI / Win32 / Named Pipe) | ❌ | ❌ | ✅ |
+| Local On-Device ASR | ✅ | ✅ | ✅ |
+| Real-Time Streaming Speculation | ✅ | ❌ | ✅ |
+| Natural Voice Text & Code Editing | ✅ | ❌ | ✅ |
+| Developer Mode (IDE + Terminal Context) | ❌ | ❌ | ✅ |
+| Three-Tier Shell Safety Guard | ❌ | ❌ | ✅ |
+| Autonomous Agent Loop & MCP Server | ❌ | ❌ | ✅ |
+| Meeting Diarization & Vector Knowledge Base | ❌ | ❌ | ✅ |
+| Pure-Go CGO-Free SQLite Storage | ❌ | ❌ | ✅ |
+| System Keychain Secret Storage | ❌ | ❌ | ✅ |
+| Package Ecosystem (.deb, .rpm, brew, exe) | ❌ | ❌ | ✅ |
+| Fully Open Source | ❌ | ❌ | ✅ Apache 2.0 |
 
 ---
 
 ## Contributing
 
-Cadence is built in public. Contributions are very welcome.
+Cadence is built in public by a passionate open-source community. Contributions, bug reports, and suggestions are welcome!
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) to get started.
-
-Good first issues are tagged [`good-first-issue`](https://github.com/AdeshDeshmukh/cadence/labels/good-first-issue).
-
----
-
-## Privacy
-
-Cadence is **local-first by design**:
-
-- All speech recognition runs on-device by default
-- No data is sent to any cloud without explicit opt-in
-- API keys are stored in the OS keychain, never in config files
-- Audio is never logged or retained beyond the active session by default
-
-See the [Privacy Guide](docs/docs/privacy.md) *(coming soon)* for full details.
+- Read [CONTRIBUTING.md](CONTRIBUTING.md) to set up your local development environment.
+- Explore open issues labeled [`good-first-issue`](https://github.com/AdeshDeshmukh/cadence/labels/good-first-issue).
+- Review our [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ---
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
 
----
-
-*Built by [Adesh Deshmukh](https://github.com/AdeshDeshmukh) and the open-source community.*
+*Built with ❤️ by [Adesh Deshmukh](https://github.com/AdeshDeshmukh) and the open-source community.*
