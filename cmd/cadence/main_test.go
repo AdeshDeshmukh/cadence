@@ -3716,3 +3716,20 @@ func TestCLI_Service(t *testing.T) {
 		t.Fatalf("expected error for invalid subcommand, got nil")
 	}
 }
+
+func TestCLI_Doctor(t *testing.T) {
+	var out bytes.Buffer
+	cfg := config.Default()
+	client := ipc.Client{Network: "unix", Address: "/dev/null"}
+
+	if err := cmdDoctor(context.Background(), cfg, client, &out); err != nil {
+		t.Fatalf("cmdDoctor failed: %v", err)
+	}
+	outStr := out.String()
+	if !strings.Contains(outStr, "Cadence Diagnostics:") {
+		t.Errorf("expected Cadence Diagnostics header, got: %s", outStr)
+	}
+	if !strings.Contains(outStr, "Supply Chain:") {
+		t.Errorf("expected Supply Chain in doctor output, got: %s", outStr)
+	}
+}
