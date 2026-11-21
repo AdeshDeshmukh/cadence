@@ -44,5 +44,5 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Fri Nov 21 2026 Adesh Deshmukh <adeshkd123@gmail.com> - 1.0.0-1
+* Sat Nov 21 2026 Adesh Deshmukh <adeshkd123@gmail.com> - 1.0.0-1
 - Initial production release v1.0.0
