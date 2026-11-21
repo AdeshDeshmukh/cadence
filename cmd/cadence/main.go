@@ -25,6 +25,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/edit"
 	"github.com/AdeshDeshmukh/cadence/internal/ipc"
 	"github.com/AdeshDeshmukh/cadence/internal/mcp"
+	"github.com/AdeshDeshmukh/cadence/internal/model"
 	"github.com/AdeshDeshmukh/cadence/internal/paste"
 	"github.com/AdeshDeshmukh/cadence/internal/plugins"
 	"github.com/AdeshDeshmukh/cadence/internal/polish"
@@ -86,6 +87,7 @@ Commands:
   terminal [status|hook] Inspect terminal/shell context or generate shell integration hooks
   app                Show detected active foreground application and category
   secret <subcommand> Manage API keys and secrets in system keychain (list, get, set, delete)
+  model [subcommand]  Manage and verify speech/VAD model cryptographic integrity (list, verify, info)
   config [show|path] Inspect configuration and system file paths
   doctor             Perform diagnostics on system, daemon, and storage
   version            Print the version of cadence
@@ -439,6 +441,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "secret":
 		if err := cmdSecret(args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "model":
+		if err := cmdModel(args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -6542,5 +6551,171 @@ func cmdSecret(args []string, out io.Writer) error {
 
 	default:
 		return fmt.Errorf("unknown secret subcommand: %s (expected list, get, set, delete)", subcmd)
+	}
+}
+
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+func cmdModel(args []string, out io.Writer) error {
+	action := "list"
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		action = strings.ToLower(args[0])
+		args = args[1:]
+	}
+
+	var modelsDir string
+	var expectedSHA string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--dir":
+			if i+1 < len(args) {
+				modelsDir = args[i+1]
+				i++
+			}
+		case "--sha256":
+			if i+1 < len(args) {
+				expectedSHA = args[i+1]
+				i++
+			}
+		}
+	}
+
+	if modelsDir == "" {
+		modelsDir = model.DefaultModelsDir()
+	}
+
+	switch action {
+	case "list":
+		statuses, err := model.ListModels(modelsDir)
+		if err != nil {
+			return fmt.Errorf("list models: %w", err)
+		}
+		fmt.Fprintf(out, "Cadence Model Catalog (Directory: %s)\n\n", modelsDir)
+		fmt.Fprintf(out, "%-20s %-10s %-14s %-12s %-16s %s\n", "MODEL ID", "ENGINE", "STATUS", "SIZE", "SHA256 (PREFIX)", "RECOMMENDED")
+		fmt.Fprintln(out, strings.Repeat("-", 85))
+		for _, s := range statuses {
+			rec := ""
+			if s.Model.Recommended {
+				rec = "★ (default)"
+			}
+			shaPrefix := "-"
+			if len(s.Model.SHA256) >= 12 {
+				shaPrefix = s.Model.SHA256[:12] + "..."
+			}
+			sizeStr := formatBytes(s.Model.Size)
+			fmt.Fprintf(out, "%-20s %-10s %-14s %-12s %-16s %s\n",
+				s.Model.ID, s.Model.Engine, s.Status, sizeStr, shaPrefix, rec)
+		}
+		return nil
+
+	case "verify":
+		var target string
+		for _, arg := range args {
+			if !strings.HasPrefix(arg, "-") {
+				target = arg
+				break
+			}
+		}
+
+		if target == "" {
+			// Verify all models
+			fmt.Fprintf(out, "Verifying all catalog models in %s...\n\n", modelsDir)
+			results, err := model.VerifyAll(modelsDir)
+			if err != nil {
+				return fmt.Errorf("verify models: %w", err)
+			}
+			var hasCorruption bool
+			for _, r := range results {
+				switch r.Status {
+				case model.StatusVerified:
+					fmt.Fprintf(out, "[✓] %-20s: VERIFIED (%s, SHA256: %s)\n", r.ModelID, formatBytes(r.ActualSize), r.ActualSHA256[:12]+"...")
+				case model.StatusCorrupted:
+					hasCorruption = true
+					fmt.Fprintf(out, "[✗] %-20s: CORRUPTED (Expected: %s, Actual: %s)\n", r.ModelID, r.ExpectedSHA256[:12]+"...", r.ActualSHA256[:12]+"...")
+				case model.StatusSizeMismatch:
+					hasCorruption = true
+					fmt.Fprintf(out, "[✗] %-20s: SIZE MISMATCH (Expected: %s, Found: %s)\n", r.ModelID, formatBytes(r.ExpectedSize), formatBytes(r.ActualSize))
+				case model.StatusMissing:
+					fmt.Fprintf(out, "[-] %-20s: NOT INSTALLED\n", r.ModelID)
+				default:
+					fmt.Fprintf(out, "[?] %-20s: %s\n", r.ModelID, r.Status)
+				}
+			}
+			if hasCorruption {
+				return errors.New("one or more models failed integrity verification")
+			}
+			return nil
+		}
+
+		// Verify specific model or path
+		var res *model.VerificationResult
+		var err error
+		if _, statErr := os.Stat(target); statErr == nil {
+			res, err = model.VerifyFile(target, expectedSHA, 0)
+		} else {
+			res, err = model.VerifyModel(target, modelsDir)
+		}
+		if err != nil && res == nil {
+			return fmt.Errorf("verify model %q: %w", target, err)
+		}
+
+		fmt.Fprintln(out, "Model Integrity Verification Report:")
+		fmt.Fprintf(out, "  Target:        %s\n", res.Path)
+		if res.ModelID != "" {
+			fmt.Fprintf(out, "  Model ID:      %s\n", res.ModelID)
+		}
+		fmt.Fprintf(out, "  Status:        %s\n", res.Status)
+		if res.ExpectedSize > 0 {
+			fmt.Fprintf(out, "  Expected Size: %s (%d bytes)\n", formatBytes(res.ExpectedSize), res.ExpectedSize)
+		}
+		if res.ActualSize > 0 {
+			fmt.Fprintf(out, "  Actual Size:   %s (%d bytes)\n", formatBytes(res.ActualSize), res.ActualSize)
+		}
+		if res.ExpectedSHA256 != "" {
+			fmt.Fprintf(out, "  Expected Hash: %s\n", res.ExpectedSHA256)
+		}
+		if res.ActualSHA256 != "" {
+			fmt.Fprintf(out, "  Computed Hash: %s\n", res.ActualSHA256)
+		}
+		if res.Error != nil {
+			fmt.Fprintf(out, "  Diagnostic:    %v\n", res.Error)
+			return res.Error
+		}
+		return nil
+
+	case "info":
+		if len(args) == 0 {
+			return errors.New("usage: cadence model info <model_id>")
+		}
+		target := args[0]
+		m, err := model.LookupModel(target)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "Model Information: %s\n", m.ID)
+		fmt.Fprintf(out, "  Display Name:  %s\n", m.Name)
+		fmt.Fprintf(out, "  Engine:        %s\n", m.Engine)
+		fmt.Fprintf(out, "  Architecture:  %s\n", m.Architecture)
+		fmt.Fprintf(out, "  Filename:      %s\n", m.Filename)
+		fmt.Fprintf(out, "  Expected Size: %s (%d bytes)\n", formatBytes(m.Size), m.Size)
+		fmt.Fprintf(out, "  SHA-256:       %s\n", m.SHA256)
+		fmt.Fprintf(out, "  Download URL:  %s\n", m.DownloadURL)
+		fmt.Fprintf(out, "  Recommended:   %t\n", m.Recommended)
+		fmt.Fprintf(out, "  Description:   %s\n", m.Description)
+		return nil
+
+	default:
+		return fmt.Errorf("unknown model action: %s (expected list, verify, info)", action)
 	}
 }
