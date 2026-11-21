@@ -3662,3 +3662,16 @@ func TestCLI_Privacy(t *testing.T) {
 		t.Errorf("unexpected purge output: %s", out.String())
 	}
 }
+
+func TestCLI_Audit(t *testing.T) {
+	var out bytes.Buffer
+	if err := cmdAudit(&out); err != nil {
+		t.Fatalf("cmdAudit failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Supply-Chain & Dependency Audit Clean") {
+		t.Errorf("expected clean audit output, got: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "Pure Go") {
+		t.Errorf("expected Pure Go runtime in audit output, got: %s", out.String())
+	}
+}
