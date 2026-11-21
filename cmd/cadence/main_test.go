@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -3519,5 +3521,57 @@ func TestCLI_Secret(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "deleted successfully") {
 		t.Errorf("unexpected delete output: %s", out.String())
+	}
+}
+
+func TestCLI_Model(t *testing.T) {
+	var out bytes.Buffer
+
+	// 1. Model list
+	if err := cmdModel([]string{"list"}, &out); err != nil {
+		t.Fatalf("cmdModel list failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "whisper-base.en") || !strings.Contains(out.String(), "silero-vad") {
+		t.Errorf("expected model catalog output, got: %s", out.String())
+	}
+
+	// 2. Model info
+	out.Reset()
+	if err := cmdModel([]string{"info", "whisper-base.en"}, &out); err != nil {
+		t.Fatalf("cmdModel info failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "ggml-base.en.bin") || !strings.Contains(out.String(), "137c40403d78c54018080e678a2246944e7e604ec2820d0f5080c5e7b4458f27") {
+		t.Errorf("unexpected model info output: %s", out.String())
+	}
+
+	// 3. Model verify with valid file
+	tmpDir := t.TempDir()
+	validContent := []byte("cadence-test-model-bytes-stream")
+	filePath := filepath.Join(tmpDir, "valid_model.bin")
+	if err := os.WriteFile(filePath, validContent, 0644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	hasher := sha256.New()
+	hasher.Write(validContent)
+	expectedHash := hex.EncodeToString(hasher.Sum(nil))
+
+	out.Reset()
+	if err := cmdModel([]string{"verify", filePath, "--sha256", expectedHash}, &out); err != nil {
+		t.Fatalf("cmdModel verify failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Status:        VERIFIED") {
+		t.Errorf("expected Status: VERIFIED, got: %s", out.String())
+	}
+
+	// 4. Model verify with tampered/corrupted file
+	out.Reset()
+	badHash := "0000000000000000000000000000000000000000000000000000000000000000"
+	err := cmdModel([]string{"verify", filePath, "--sha256", badHash}, &out)
+	if err == nil {
+		t.Fatal("expected verify error for corrupted file, got nil")
+	}
+	if !strings.Contains(out.String(), "Status:        CORRUPTED") {
+		t.Errorf("expected Status: CORRUPTED in output, got: %s", out.String())
 	}
 }
