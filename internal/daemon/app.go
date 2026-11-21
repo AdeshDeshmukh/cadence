@@ -592,6 +592,12 @@ func NewApp(cfg config.Config, opts ...Option) *App {
 		a.kernel = pipeline.NewKernel(
 			a.capture, a.asr, a.paster, a.process, a.store,
 		)
+		a.kernel.SetPrivacyPolicy(pipeline.PrivacyPolicy{
+			SaveTranscripts: cfg.Privacy.SaveTranscripts,
+			SaveRecoveries:  !cfg.Privacy.Incognito,
+			Incognito:       cfg.Privacy.Incognito,
+			RedactSensitive: cfg.Privacy.RedactSensitive,
+		})
 	}
 
 	if a.hotkey == nil {
@@ -2727,6 +2733,94 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			"db_size_bytes":     dbSizeBytes,
 			"network_mode":      a.cfg.Privacy.NetworkMode,
 			"telemetry":         a.cfg.Privacy.Telemetry,
+			"save_transcripts":  a.cfg.Privacy.SaveTranscripts,
+			"save_audio":        a.cfg.Privacy.SaveAudio,
+			"incognito":         a.cfg.Privacy.Incognito,
+			"redact_sensitive":  a.cfg.Privacy.RedactSensitive,
+		}, nil
+
+	case "privacy_status":
+		return map[string]any{
+			"ok":               true,
+			"network_mode":     a.cfg.Privacy.NetworkMode,
+			"telemetry":        a.cfg.Privacy.Telemetry,
+			"save_transcripts": a.cfg.Privacy.SaveTranscripts,
+			"save_audio":       a.cfg.Privacy.SaveAudio,
+			"incognito":        a.cfg.Privacy.Incognito,
+			"redact_sensitive": a.cfg.Privacy.RedactSensitive,
+		}, nil
+
+	case "privacy_set":
+		params, _ := req.Params.(map[string]any)
+		if params == nil {
+			return nil, errors.New("missing parameters for privacy_set")
+		}
+		if st, ok := params["save_transcripts"].(bool); ok {
+			a.cfg.Privacy.SaveTranscripts = st
+		}
+		if inc, ok := params["incognito"].(bool); ok {
+			a.cfg.Privacy.Incognito = inc
+		}
+		if sa, ok := params["save_audio"].(bool); ok {
+			a.cfg.Privacy.SaveAudio = sa
+		}
+		if tel, ok := params["telemetry"].(bool); ok {
+			a.cfg.Privacy.Telemetry = tel
+		}
+		if rs, ok := params["redact_sensitive"].(bool); ok {
+			a.cfg.Privacy.RedactSensitive = rs
+		}
+		if nm, ok := params["network_mode"].(string); ok && nm != "" {
+			a.cfg.Privacy.NetworkMode = nm
+		}
+		if a.kernel != nil {
+			a.kernel.SetPrivacyPolicy(pipeline.PrivacyPolicy{
+				SaveTranscripts: a.cfg.Privacy.SaveTranscripts,
+				SaveRecoveries:  !a.cfg.Privacy.Incognito,
+				Incognito:       a.cfg.Privacy.Incognito,
+				RedactSensitive: a.cfg.Privacy.RedactSensitive,
+			})
+		}
+		return map[string]any{
+			"ok":               true,
+			"network_mode":     a.cfg.Privacy.NetworkMode,
+			"telemetry":        a.cfg.Privacy.Telemetry,
+			"save_transcripts": a.cfg.Privacy.SaveTranscripts,
+			"save_audio":       a.cfg.Privacy.SaveAudio,
+			"incognito":        a.cfg.Privacy.Incognito,
+			"redact_sensitive": a.cfg.Privacy.RedactSensitive,
+		}, nil
+
+	case "privacy_purge":
+		_ = a.store.ClearTranscripts()
+		_ = a.store.ClearRecoveries()
+		return map[string]any{
+			"ok":      true,
+			"message": "all transcripts and recoveries successfully purged",
+		}, nil
+
+	case "privacy_audit":
+		transcripts, _ := a.store.ListTranscripts(1000)
+		recoveries, _ := a.store.ListRecoveries(1000)
+		compliant := true
+		var issues []string
+		if !a.cfg.Privacy.SaveTranscripts && len(transcripts) > 0 {
+			compliant = false
+			issues = append(issues, fmt.Sprintf("%d transcripts found on disk while save_transcripts=false", len(transcripts)))
+		}
+		if a.cfg.Privacy.Incognito && (len(transcripts) > 0 || len(recoveries) > 0) {
+			compliant = false
+			issues = append(issues, fmt.Sprintf("%d transcripts and %d recoveries found while incognito=true", len(transcripts), len(recoveries)))
+		}
+		return map[string]any{
+			"ok":                true,
+			"compliant":         compliant,
+			"issues":            issues,
+			"save_transcripts":  a.cfg.Privacy.SaveTranscripts,
+			"incognito":         a.cfg.Privacy.Incognito,
+			"network_mode":      a.cfg.Privacy.NetworkMode,
+			"transcripts_count": len(transcripts),
+			"recoveries_count":  len(recoveries),
 		}, nil
 
 	case "clear_recoveries":

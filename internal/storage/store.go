@@ -197,6 +197,8 @@ type Store interface {
 	SaveTranscript(Transcript) error
 	GetTranscript(id string) (*Transcript, error)
 	ListTranscripts(int) ([]Transcript, error)
+	DeleteTranscript(string) error
+	ClearTranscripts() error
 	SetVocabulary(VocabularyEntry) error
 	Vocabulary() ([]VocabularyEntry, error)
 	DeleteVocabulary(string) error

@@ -82,6 +82,25 @@ func (m *Memory) GetTranscript(id string) (*Transcript, error) {
 	return nil, errors.New("transcript not found")
 }
 
+func (m *Memory) DeleteTranscript(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i, t := range m.transcripts {
+		if t.ID == id {
+			m.transcripts = append(m.transcripts[:i], m.transcripts[i+1:]...)
+			return nil
+		}
+	}
+	return nil
+}
+
+func (m *Memory) ClearTranscripts() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.transcripts = nil
+	return nil
+}
+
 func (m *Memory) SetVocabulary(e VocabularyEntry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

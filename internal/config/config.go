@@ -66,8 +66,12 @@ type PolishConfig struct {
 }
 
 type PrivacyConfig struct {
-	NetworkMode string
-	Telemetry   bool
+	NetworkMode     string
+	Telemetry       bool
+	SaveTranscripts bool
+	SaveAudio       bool
+	Incognito       bool
+	RedactSensitive bool
 }
 
 type HotkeyConfig struct {
@@ -162,8 +166,12 @@ func Default() Config {
 			AppRoutes:      map[string]string{},
 		},
 		Privacy: PrivacyConfig{
-			NetworkMode: "local_only",
-			Telemetry:   false,
+			NetworkMode:     "local_only",
+			Telemetry:       false,
+			SaveTranscripts: true,
+			SaveAudio:       false,
+			Incognito:       false,
+			RedactSensitive: true,
 		},
 		Hotkey: HotkeyConfig{
 			Shortcut:     "Cmd+Shift+Space",

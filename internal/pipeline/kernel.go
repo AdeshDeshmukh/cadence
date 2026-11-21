@@ -14,12 +14,31 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/storage"
 )
 
+// PrivacyPolicy defines data retention and logging rules for dictation sessions.
+type PrivacyPolicy struct {
+	SaveTranscripts bool // Persist successful transcripts to storage.
+	SaveRecoveries  bool // Persist uncommitted/failed session recoveries.
+	Incognito       bool // Complete ephemeral mode: zero storage persistence.
+	RedactSensitive bool // Redact sensitive credentials/tokens in memory/logs.
+}
+
+// DefaultPrivacyPolicy provides default persistence behavior.
+func DefaultPrivacyPolicy() PrivacyPolicy {
+	return PrivacyPolicy{
+		SaveTranscripts: true,
+		SaveRecoveries:  true,
+		Incognito:       false,
+		RedactSensitive: true,
+	}
+}
+
 type Kernel struct {
 	capture audio.Capture
 	asr     asr.Engine
 	paste   paste.Paster
 	process *postprocess.Pipeline
 	store   storage.Store
+	privacy PrivacyPolicy
 }
 
 func NewKernel(
@@ -32,7 +51,32 @@ func NewKernel(
 	return &Kernel{
 		capture: capture, asr: engine, paste: paster,
 		process: process, store: store,
+		privacy: DefaultPrivacyPolicy(),
 	}
+}
+
+// SetPrivacyPolicy updates the active privacy policy for the kernel.
+func (k *Kernel) SetPrivacyPolicy(p PrivacyPolicy) {
+	k.privacy = p
+}
+
+// PrivacyPolicy returns the current privacy policy of the kernel.
+func (k *Kernel) PrivacyPolicy() PrivacyPolicy {
+	return k.privacy
+}
+
+func (k *Kernel) saveRecovery(rec storage.SessionRecovery) {
+	if k.privacy.Incognito || !k.privacy.SaveRecoveries {
+		return
+	}
+	_ = k.store.SaveRecovery(rec)
+}
+
+func (k *Kernel) saveTranscript(tr storage.Transcript) error {
+	if k.privacy.Incognito || !k.privacy.SaveTranscripts {
+		return nil
+	}
+	return k.store.SaveTranscript(tr)
 }
 
 func (k *Kernel) Run(
@@ -41,7 +85,7 @@ func (k *Kernel) Run(
 	pc postprocess.Context,
 ) error {
 	session.SetState(Recording)
-	_ = k.store.SaveRecovery(storage.SessionRecovery{
+	k.saveRecovery(storage.SessionRecovery{
 		ID:        session.ID,
 		State:     "uncommitted",
 		CreatedAt: session.StartedAt,
@@ -51,7 +95,7 @@ func (k *Kernel) Run(
 	chunksCh, err := k.capture.Start()
 	if err != nil {
 		session.SetState(Failed)
-		_ = k.store.SaveRecovery(storage.SessionRecovery{
+		k.saveRecovery(storage.SessionRecovery{
 			ID:        session.ID,
 			State:     "failed",
 			Error:     err.Error(),
@@ -76,6 +120,14 @@ func (k *Kernel) Run(
 	}
 
 	var chunks []audio.Chunk
+	defer func() {
+		// Memory hygiene: securely scrub raw audio samples from memory upon completion/exit
+		for i := range chunks {
+			for j := range chunks[i].Samples {
+				chunks[i].Samples[j] = 0
+			}
+		}
+	}()
 
 	for {
 		select {
@@ -98,7 +150,7 @@ func (k *Kernel) Run(
 				}
 				quickCancel()
 			}
-			_ = k.store.SaveRecovery(storage.SessionRecovery{
+			k.saveRecovery(storage.SessionRecovery{
 				ID:           session.ID,
 				State:        "cancelled",
 				PartialText:  session.GetPartial(),
@@ -185,13 +237,13 @@ transcribe:
 	session.SetState(Pasting)
 
 	if _, err := k.paste.Paste(session.FinalText); err != nil {
-		_ = k.store.SaveTranscript(storage.Transcript{
+		_ = k.saveTranscript(storage.Transcript{
 			ID: session.ID, RawText: session.RawText,
 			Text: session.FinalText, Language: result.Language,
 			Mode: pc.Mode, Application: pc.Application,
 			CreatedAt: time.Now(),
 		})
-		_ = k.store.SaveRecovery(storage.SessionRecovery{
+		k.saveRecovery(storage.SessionRecovery{
 			ID:           session.ID,
 			State:        "failed",
 			PartialText:  session.GetPartial(),
@@ -206,7 +258,7 @@ transcribe:
 		return fmt.Errorf("paste: %w", err)
 	}
 
-	if err := k.store.SaveTranscript(storage.Transcript{
+	if err := k.saveTranscript(storage.Transcript{
 		ID: session.ID, RawText: session.RawText,
 		Text: session.FinalText, Language: result.Language,
 		Mode: pc.Mode, Application: pc.Application,
@@ -216,7 +268,7 @@ transcribe:
 		return fmt.Errorf("store: %w", err)
 	}
 
-	_ = k.store.SaveRecovery(storage.SessionRecovery{
+	k.saveRecovery(storage.SessionRecovery{
 		ID:           session.ID,
 		State:        "completed",
 		PartialText:  session.GetPartial(),
