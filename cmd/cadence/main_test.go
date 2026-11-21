@@ -3476,3 +3476,48 @@ func TestCLI_Serve(t *testing.T) {
 		t.Errorf("expected listening message in output, got: %s", out.String())
 	}
 }
+
+func TestCLI_Secret(t *testing.T) {
+	var out bytes.Buffer
+
+	// Secret list initially
+	if err := cmdSecret([]string{"list"}, &out); err != nil {
+		t.Fatalf("cmdSecret list failed: %v", err)
+	}
+
+	// Secret set
+	out.Reset()
+	if err := cmdSecret([]string{"set", "test_api_key", "sk-cli-test-secret"}, &out); err != nil {
+		t.Fatalf("cmdSecret set failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "stored successfully") {
+		t.Errorf("unexpected set output: %s", out.String())
+	}
+
+	// Secret get
+	out.Reset()
+	if err := cmdSecret([]string{"get", "test_api_key"}, &out); err != nil {
+		t.Fatalf("cmdSecret get failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "test_api_key=sk-cli-test-secret") {
+		t.Errorf("unexpected get output: %s", out.String())
+	}
+
+	// Secret list contains key
+	out.Reset()
+	if err := cmdSecret([]string{"list"}, &out); err != nil {
+		t.Fatalf("cmdSecret list failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "test_api_key") {
+		t.Errorf("expected test_api_key in list output: %s", out.String())
+	}
+
+	// Secret delete
+	out.Reset()
+	if err := cmdSecret([]string{"delete", "test_api_key"}, &out); err != nil {
+		t.Fatalf("cmdSecret delete failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "deleted successfully") {
+		t.Errorf("unexpected delete output: %s", out.String())
+	}
+}
