@@ -35,6 +35,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/storage"
 	"github.com/AdeshDeshmukh/cadence/internal/supervisor"
 	"github.com/AdeshDeshmukh/cadence/internal/system"
+	"github.com/AdeshDeshmukh/cadence/pkg/build"
 	"github.com/AdeshDeshmukh/cadence/pkg/version"
 )
 
@@ -614,6 +615,15 @@ func cmdConfig(cfg config.Config, args []string, out io.Writer) error {
 func cmdDoctor(ctx context.Context, cfg config.Config, client ipc.Client, out io.Writer) error {
 	fmt.Fprintln(out, "Cadence Diagnostics:")
 	fmt.Fprintf(out, "  • Version:        %s\n", version.Version)
+	if self, err := os.Executable(); err == nil {
+		if info, err := build.InspectMachO(self); err == nil && info != nil {
+			if info.IsFat {
+				fmt.Fprintf(out, "  • Binary:         Universal Mach-O (%s)\n", strings.Join(info.Architectures, ", "))
+			} else {
+				fmt.Fprintf(out, "  • Binary:         Mach-O (%s)\n", strings.Join(info.Architectures, ", "))
+			}
+		}
+	}
 	fmt.Fprintf(out, "  • Database path:  %s\n", cfg.Storage.DBPath)
 	fmt.Fprintf(out, "  • Socket path:    %s\n", cfg.IPC.SocketPath)
 	fmt.Fprintf(out, "  • Supply Chain:   Pure Go modernc.org/sqlite (CGO disabled, no external C linkage)\n")

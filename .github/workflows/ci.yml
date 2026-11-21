@@ -44,3 +44,9 @@ jobs:
 
       - name: Run unit & race tests
         run: go test -v -race ./...
+
+      - name: Build and verify macOS universal binaries
+        if: matrix.os == 'macos-latest'
+        run: |
+          chmod +x scripts/build-universal-macos.sh
+          ./scripts/build-universal-macos.sh

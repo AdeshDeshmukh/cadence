@@ -39,7 +39,7 @@ scratch/
 # UI / Node / Rust / Tauri
 node_modules/
 dist/
-build/
+/build/
 ui/dist/
 ui/src-tauri/target/
 ui/node_modules/
