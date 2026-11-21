@@ -551,6 +551,12 @@ func (s *SQLite) DeleteTranscript(id string) error {
 	return err
 }
 
+// ClearTranscripts removes all stored transcripts from the database.
+func (s *SQLite) ClearTranscripts() error {
+	_, err := s.db.Exec("DELETE FROM transcripts")
+	return err
+}
+
 // SetVocabulary adds or updates a spoken-to-canonical replacement mapping.
 func (s *SQLite) SetVocabulary(e VocabularyEntry) error {
 	if e.Spoken == "" {

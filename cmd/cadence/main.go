@@ -88,6 +88,7 @@ Commands:
   app                Show detected active foreground application and category
   secret <subcommand> Manage API keys and secrets in system keychain (list, get, set, delete)
   model [subcommand]  Manage and verify speech/VAD model cryptographic integrity (list, verify, info)
+  privacy [subcommand] Inspect, audit, and manage on-device privacy policies (status, audit, set, purge)
   config [show|path] Inspect configuration and system file paths
   doctor             Perform diagnostics on system, daemon, and storage
   version            Print the version of cadence
@@ -448,6 +449,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "model":
 		if err := cmdModel(args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "privacy":
+		if err := cmdPrivacy(ctx, cfg, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -6717,5 +6725,117 @@ func cmdModel(args []string, out io.Writer) error {
 
 	default:
 		return fmt.Errorf("unknown model action: %s (expected list, verify, info)", action)
+	}
+}
+
+func cmdPrivacy(ctx context.Context, cfg config.Config, client ipc.Client, args []string, out io.Writer) error {
+	action := "status"
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		action = strings.ToLower(args[0])
+		args = args[1:]
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	switch action {
+	case "status":
+		resp, err := client.Call(callCtx, "privacy_status", nil)
+		if err != nil {
+			// Daemon offline: show local config settings
+			fmt.Fprintln(out, "Cadence Privacy & Security Profile (Daemon offline):")
+			fmt.Fprintf(out, "  Network Mode:        %s\n", cfg.Privacy.NetworkMode)
+			fmt.Fprintf(out, "  Transcript Logging:  %t\n", cfg.Privacy.SaveTranscripts)
+			fmt.Fprintf(out, "  Audio Persistence:   %t\n", cfg.Privacy.SaveAudio)
+			fmt.Fprintf(out, "  Incognito Mode:      %t\n", cfg.Privacy.Incognito)
+			fmt.Fprintf(out, "  Telemetry:           %t\n", cfg.Privacy.Telemetry)
+			fmt.Fprintf(out, "  Sensitive Redaction: %t\n", cfg.Privacy.RedactSensitive)
+			return nil
+		}
+		st, ok := resp.(map[string]any)
+		if !ok {
+			return errors.New("invalid privacy_status response from daemon")
+		}
+		fmt.Fprintln(out, "Cadence Privacy & Security Profile:")
+		fmt.Fprintf(out, "  Network Mode:        %v\n", st["network_mode"])
+		fmt.Fprintf(out, "  Transcript Logging:  %v\n", st["save_transcripts"])
+		fmt.Fprintf(out, "  Audio Persistence:   %v\n", st["save_audio"])
+		fmt.Fprintf(out, "  Incognito Mode:      %v\n", st["incognito"])
+		fmt.Fprintf(out, "  Telemetry:           %v\n", st["telemetry"])
+		fmt.Fprintf(out, "  Sensitive Redaction: %v\n", st["redact_sensitive"])
+		return nil
+
+	case "audit":
+		resp, err := client.Call(callCtx, "privacy_audit", nil)
+		if err != nil {
+			return fmt.Errorf("privacy audit failed: %w", err)
+		}
+		audit, ok := resp.(map[string]any)
+		if !ok {
+			return errors.New("invalid privacy_audit response from daemon")
+		}
+		compliant, _ := audit["compliant"].(bool)
+		fmt.Fprintln(out, "Cadence Automated Privacy Audit Report:")
+		fmt.Fprintf(out, "  Compliance Status:   %t\n", compliant)
+		fmt.Fprintf(out, "  Save Transcripts:    %v\n", audit["save_transcripts"])
+		fmt.Fprintf(out, "  Incognito Mode:      %v\n", audit["incognito"])
+		fmt.Fprintf(out, "  Transcripts On Disk: %v\n", audit["transcripts_count"])
+		fmt.Fprintf(out, "  Recoveries On Disk:  %v\n", audit["recoveries_count"])
+		if issues, ok := audit["issues"].([]any); ok && len(issues) > 0 {
+			fmt.Fprintln(out, "  Audit Violations:")
+			for _, issue := range issues {
+				fmt.Fprintf(out, "    [!] %v\n", issue)
+			}
+			return errors.New("privacy audit failed compliance checks")
+		}
+		fmt.Fprintln(out, "  [✓] All on-device privacy policies strictly enforced.")
+		return nil
+
+	case "purge":
+		resp, err := client.Call(callCtx, "privacy_purge", nil)
+		if err != nil {
+			return fmt.Errorf("privacy purge failed: %w", err)
+		}
+		resMap, _ := resp.(map[string]any)
+		msg := "All stored transcripts and session recoveries successfully purged."
+		if m, ok := resMap["message"].(string); ok && m != "" {
+			msg = m
+		}
+		fmt.Fprintln(out, msg)
+		return nil
+
+	case "set":
+		if len(args) < 2 {
+			return errors.New("usage: cadence privacy set <key> <value>")
+		}
+		key := strings.ToLower(args[0])
+		valStr := strings.ToLower(args[1])
+		payload := make(map[string]any)
+		switch key {
+		case "save_transcripts", "transcripts":
+			payload["save_transcripts"] = (valStr == "true" || valStr == "1" || valStr == "yes" || valStr == "on")
+		case "incognito":
+			payload["incognito"] = (valStr == "true" || valStr == "1" || valStr == "yes" || valStr == "on")
+		case "save_audio", "audio":
+			payload["save_audio"] = (valStr == "true" || valStr == "1" || valStr == "yes" || valStr == "on")
+		case "telemetry":
+			payload["telemetry"] = (valStr == "true" || valStr == "1" || valStr == "yes" || valStr == "on")
+		case "redact_sensitive", "redact":
+			payload["redact_sensitive"] = (valStr == "true" || valStr == "1" || valStr == "yes" || valStr == "on")
+		case "network_mode", "network":
+			payload["network_mode"] = valStr
+		default:
+			return fmt.Errorf("unknown privacy key: %s (expected save_transcripts, incognito, save_audio, telemetry, redact_sensitive, network_mode)", key)
+		}
+		resp, err := client.Call(callCtx, "privacy_set", payload)
+		if err != nil {
+			return fmt.Errorf("privacy set failed: %w", err)
+		}
+		fmt.Fprintf(out, "Privacy setting updated successfully: %s = %s\n", key, valStr)
+		_ = resp
+		return nil
+
+	default:
+		return fmt.Errorf("unknown privacy action: %s (expected status, audit, purge, set)", action)
 	}
 }

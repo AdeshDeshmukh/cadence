@@ -966,6 +966,28 @@ func (m mockDaemonHandler) Handle(_ context.Context, req ipc.Request) (any, erro
 				"enabled":     true,
 			},
 		}, nil
+	case "privacy_status":
+		return map[string]any{
+			"ok":               true,
+			"network_mode":     "local_only",
+			"save_transcripts": false,
+			"incognito":        false,
+			"telemetry":        false,
+			"redact_sensitive": true,
+		}, nil
+	case "privacy_audit":
+		return map[string]any{
+			"ok":                true,
+			"compliant":         true,
+			"save_transcripts":  false,
+			"incognito":         false,
+			"transcripts_count": 0,
+			"recoveries_count":  0,
+		}, nil
+	case "privacy_set":
+		return map[string]any{"ok": true}, nil
+	case "privacy_purge":
+		return map[string]any{"ok": true, "message": "All data purged."}, nil
 	default:
 		return nil, os.ErrInvalid
 	}
@@ -3573,5 +3595,70 @@ func TestCLI_Model(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Status:        CORRUPTED") {
 		t.Errorf("expected Status: CORRUPTED in output, got: %s", out.String())
+	}
+}
+
+func TestCLI_Privacy(t *testing.T) {
+	cfg := config.Default()
+	var out bytes.Buffer
+
+	// 1. Offline status
+	offlineClient := ipc.Client{Network: "unix", Address: "/tmp/non-existent-cadence.sock"}
+	if err := cmdPrivacy(context.Background(), cfg, offlineClient, []string{"status"}, &out); err != nil {
+		t.Fatalf("cmdPrivacy status offline failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Transcript Logging") {
+		t.Errorf("expected Transcript Logging in output, got: %s", out.String())
+	}
+
+	// 2. Online status with mock daemon
+	sockPath := filepath.Join(t.TempDir(), "cad_priv_test.sock")
+	cleanup := startMockDaemon(t, sockPath)
+	defer cleanup()
+
+	// Test if socket connection is permitted in the current sandbox environment
+	conn, dialErr := net.Dial("unix", sockPath)
+	if dialErr != nil {
+		t.Logf("skipping online IPC tests in sandbox environment: %v", dialErr)
+		return
+	}
+	conn.Close()
+
+	client := ipc.Client{Network: "unix", Address: sockPath}
+
+	// Online status
+	out.Reset()
+	if err := cmdPrivacy(context.Background(), cfg, client, []string{"status"}, &out); err != nil {
+		t.Fatalf("cmdPrivacy status online failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Network Mode:") {
+		t.Errorf("expected Network Mode in output, got: %s", out.String())
+	}
+
+	// Audit
+	out.Reset()
+	if err := cmdPrivacy(context.Background(), cfg, client, []string{"audit"}, &out); err != nil {
+		t.Fatalf("cmdPrivacy audit failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Compliance Status:   true") {
+		t.Errorf("expected Compliance Status: true, got: %s", out.String())
+	}
+
+	// Set
+	out.Reset()
+	if err := cmdPrivacy(context.Background(), cfg, client, []string{"set", "save_transcripts", "false"}, &out); err != nil {
+		t.Fatalf("cmdPrivacy set failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "updated successfully") {
+		t.Errorf("unexpected set output: %s", out.String())
+	}
+
+	// Purge
+	out.Reset()
+	if err := cmdPrivacy(context.Background(), cfg, client, []string{"purge"}, &out); err != nil {
+		t.Fatalf("cmdPrivacy purge failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "All data purged.") {
+		t.Errorf("unexpected purge output: %s", out.String())
 	}
 }
