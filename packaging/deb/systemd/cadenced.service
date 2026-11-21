@@ -1,0 +1,13 @@
+[Unit]
+Description=Cadence Voice Dictation Daemon
+After=network.target sound.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/cadenced
+Restart=on-failure
+RestartSec=3s
+LimitNOFILE=65535
+
+[Install]
+WantedBy=default.target

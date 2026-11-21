@@ -1,4 +1,4 @@
-.PHONY: build test test-race fmt vet clean build-universal
+.PHONY: build test test-race fmt vet clean build-universal package package-deb package-rpm
 
 build:
 	@if ls ./cmd/cadence/*.go 1> /dev/null 2>&1; then go build ./cmd/cadence; fi
@@ -6,6 +6,15 @@ build:
 
 build-universal:
 	./scripts/build-universal-macos.sh
+
+package:
+	./scripts/package-all.sh
+
+package-deb:
+	./scripts/package-deb.sh
+
+package-rpm:
+	./scripts/package-rpm.sh
 
 test:
 	go test ./...

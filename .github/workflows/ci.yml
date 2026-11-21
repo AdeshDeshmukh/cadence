@@ -50,3 +50,9 @@ jobs:
         run: |
           chmod +x scripts/build-universal-macos.sh
           ./scripts/build-universal-macos.sh
+
+      - name: Build and verify release packages
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          chmod +x scripts/package-*.sh
+          ./scripts/package-all.sh
