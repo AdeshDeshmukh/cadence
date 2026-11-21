@@ -1,4 +1,4 @@
-.PHONY: build test test-race fmt vet clean build-universal package package-deb package-rpm
+.PHONY: build test test-race fmt vet clean build-universal package package-deb package-rpm benchmark
 
 build:
 	@if ls ./cmd/cadence/*.go 1> /dev/null 2>&1; then go build ./cmd/cadence; fi
@@ -15,6 +15,9 @@ package-deb:
 
 package-rpm:
 	./scripts/package-rpm.sh
+
+benchmark:
+	./scripts/run-benchmarks.sh
 
 test:
 	go test ./...

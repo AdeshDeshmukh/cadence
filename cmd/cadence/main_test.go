@@ -3733,3 +3733,34 @@ func TestCLI_Doctor(t *testing.T) {
 		t.Errorf("expected Supply Chain in doctor output, got: %s", outStr)
 	}
 }
+
+func TestCLI_Benchmark(t *testing.T) {
+	var out bytes.Buffer
+
+	// Run summary
+	out.Reset()
+	if err := cmdBenchmark([]string{"run"}, &out); err != nil {
+		t.Fatalf("cmdBenchmark run failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Cadence Performance Benchmarks:") {
+		t.Errorf("expected benchmarks header, got: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "Clean Speech WER:") {
+		t.Errorf("expected Clean Speech WER in output, got: %s", out.String())
+	}
+
+	// Report markdown
+	out.Reset()
+	if err := cmdBenchmark([]string{"report"}, &out); err != nil {
+		t.Fatalf("cmdBenchmark report failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "# Cadence Performance Benchmark Report") {
+		t.Errorf("expected markdown report, got: %s", out.String())
+	}
+
+	// Unknown subcommand
+	out.Reset()
+	if err := cmdBenchmark([]string{"invalid_action"}, &out); err == nil {
+		t.Fatalf("expected error for invalid benchmark action, got nil")
+	}
+}
