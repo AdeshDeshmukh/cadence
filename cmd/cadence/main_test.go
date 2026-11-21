@@ -3675,3 +3675,44 @@ func TestCLI_Audit(t *testing.T) {
 		t.Errorf("expected Pure Go runtime in audit output, got: %s", out.String())
 	}
 }
+
+func TestCLI_Service(t *testing.T) {
+	var out bytes.Buffer
+	client := ipc.Client{Network: "unix", Address: "/dev/null"}
+
+	// Status
+	out.Reset()
+	if err := cmdService(context.Background(), client, []string{"status"}, &out); err != nil {
+		t.Fatalf("cmdService status failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Cadence Daemon Service Status:") {
+		t.Errorf("expected service status header, got: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "Service Type:") {
+		t.Errorf("expected Service Type in output, got: %s", out.String())
+	}
+
+	// Definition
+	out.Reset()
+	if err := cmdService(context.Background(), client, []string{"definition"}, &out); err != nil {
+		t.Fatalf("cmdService definition failed: %v", err)
+	}
+	if len(out.String()) == 0 {
+		t.Errorf("expected service definition output, got empty")
+	}
+
+	// Crashes
+	out.Reset()
+	if err := cmdService(context.Background(), client, []string{"crashes"}, &out); err != nil {
+		t.Fatalf("cmdService crashes failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "Cadence Daemon Crash Dumps:") {
+		t.Errorf("expected crash dumps header, got: %s", out.String())
+	}
+
+	// Unknown subcommand
+	out.Reset()
+	if err := cmdService(context.Background(), client, []string{"invalid_subcommand"}, &out); err == nil {
+		t.Fatalf("expected error for invalid subcommand, got nil")
+	}
+}

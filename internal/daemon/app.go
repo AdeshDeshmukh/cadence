@@ -39,6 +39,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/search"
 	"github.com/AdeshDeshmukh/cadence/internal/selection"
 	"github.com/AdeshDeshmukh/cadence/internal/storage"
+	"github.com/AdeshDeshmukh/cadence/internal/supervisor"
 	"github.com/AdeshDeshmukh/cadence/internal/system"
 	"github.com/AdeshDeshmukh/cadence/internal/vad"
 	"github.com/AdeshDeshmukh/cadence/internal/worker"
@@ -617,6 +618,20 @@ func (a *App) Start(ctx context.Context) error {
 	defer a.mu.Unlock()
 
 	a.ctx, a.cancel = context.WithCancel(ctx)
+
+	// Crash recovery: check for any dangling uncommitted session from a previous crash/restart
+	if a.store != nil {
+		if recs, err := a.store.ListRecoveries(20); err == nil {
+			for _, r := range recs {
+				if r.State == "uncommitted" || r.State == "recording" {
+					r.State = "recovered_from_crash"
+					r.Error = "daemon process crashed or restarted while session was active"
+					r.UpdatedAt = time.Now()
+					_ = a.store.SaveRecovery(r)
+				}
+			}
+		}
+	}
 
 	if a.workerMgr != nil {
 		if err := a.workerMgr.Start(a.ctx); err != nil {
@@ -2828,6 +2843,14 @@ func (a *App) Handle(ctx context.Context, req ipc.Request) (any, error) {
 			return nil, fmt.Errorf("clear recoveries: %w", err)
 		}
 		return map[string]any{"ok": true}, nil
+
+	case "crashes":
+		dumps, _ := supervisor.ReadCrashDumps(supervisor.DefaultCrashDir())
+		return map[string]any{
+			"ok":      true,
+			"crashes": dumps,
+			"count":   len(dumps),
+		}, nil
 
 	case "benchmark_stats":
 		a.mu.Lock()
