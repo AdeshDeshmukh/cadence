@@ -29,6 +29,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/plugins"
 	"github.com/AdeshDeshmukh/cadence/internal/polish"
 	"github.com/AdeshDeshmukh/cadence/internal/postprocess"
+	"github.com/AdeshDeshmukh/cadence/internal/security"
 	"github.com/AdeshDeshmukh/cadence/internal/selection"
 	"github.com/AdeshDeshmukh/cadence/internal/storage"
 	"github.com/AdeshDeshmukh/cadence/internal/system"
@@ -84,6 +85,7 @@ Commands:
   context [show|set|clear] Show or manage developer/code editor context (file, language, selection)
   terminal [status|hook] Inspect terminal/shell context or generate shell integration hooks
   app                Show detected active foreground application and category
+  secret <subcommand> Manage API keys and secrets in system keychain (list, get, set, delete)
   config [show|path] Inspect configuration and system file paths
   doctor             Perform diagnostics on system, daemon, and storage
   version            Print the version of cadence
@@ -430,6 +432,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "doctor":
 		if err := cmdDoctor(ctx, cfg, client, stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "secret":
+		if err := cmdSecret(args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -6456,4 +6465,82 @@ func showMCPInfo(out io.Writer) {
 	fmt.Fprintln(out, "      }")
 	fmt.Fprintln(out, "    }")
 	fmt.Fprintln(out, "  }")
+}
+
+func cmdSecret(args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: cadence secret [list|get|set|delete] <arguments>")
+	}
+
+	store := security.NewDefaultSecretStore()
+	subcmd := strings.ToLower(args[0])
+
+	switch subcmd {
+	case "list":
+		keys, err := store.List()
+		if err != nil {
+			return fmt.Errorf("list secrets: %w", err)
+		}
+		if len(keys) == 0 {
+			fmt.Fprintln(out, "No secrets currently stored in keychain.")
+			return nil
+		}
+		fmt.Fprintln(out, "Stored Secrets:")
+		for _, k := range keys {
+			fmt.Fprintf(out, "  • %s\n", k)
+		}
+		return nil
+
+	case "get":
+		if len(args) < 2 {
+			return errors.New("usage: cadence secret get <key>")
+		}
+		key := args[1]
+		val, err := store.Get(key)
+		if err != nil {
+			return fmt.Errorf("get secret %q: %w", key, err)
+		}
+		fmt.Fprintf(out, "%s=%s\n", key, val)
+		return nil
+
+	case "set":
+		if len(args) < 2 {
+			return errors.New("usage: cadence secret set <key> [value]")
+		}
+		key := args[1]
+		var val string
+		if len(args) >= 3 {
+			val = args[2]
+		} else {
+			fmt.Print("Enter secret value: ")
+			reader := bufio.NewReader(os.Stdin)
+			line, err := reader.ReadString('\n')
+			if err != nil && !errors.Is(err, io.EOF) {
+				return fmt.Errorf("read secret: %w", err)
+			}
+			val = strings.TrimRight(line, "\r\n")
+		}
+		if val == "" {
+			return errors.New("secret value cannot be empty")
+		}
+		if err := store.Set(key, val); err != nil {
+			return fmt.Errorf("save secret %q: %w", key, err)
+		}
+		fmt.Fprintf(out, "Secret %q stored successfully in system keychain.\n", key)
+		return nil
+
+	case "delete", "remove", "rm":
+		if len(args) < 2 {
+			return errors.New("usage: cadence secret delete <key>")
+		}
+		key := args[1]
+		if err := store.Delete(key); err != nil {
+			return fmt.Errorf("delete secret %q: %w", key, err)
+		}
+		fmt.Fprintf(out, "Secret %q deleted successfully from system keychain.\n", key)
+		return nil
+
+	default:
+		return fmt.Errorf("unknown secret subcommand: %s (expected list, get, set, delete)", subcmd)
+	}
 }

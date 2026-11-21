@@ -9,9 +9,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
+
+	"github.com/AdeshDeshmukh/cadence/internal/security"
 )
 
 // DefaultOpenAISystemPrompt provides standard instructions for polishing dictation.
@@ -125,11 +126,7 @@ func NewOpenAIPolisher(opts ...OpenAIOption) *OpenAIPolisher {
 	}
 
 	if o.apiKey == "" {
-		if k := os.Getenv("CADENCE_OPENAI_API_KEY"); k != "" {
-			o.apiKey = k
-		} else if k := os.Getenv("OPENAI_API_KEY"); k != "" {
-			o.apiKey = k
-		}
+		o.apiKey = security.ResolveSecret(security.KeyOpenAI, "", "CADENCE_OPENAI_API_KEY", "OPENAI_API_KEY")
 	}
 
 	return o
