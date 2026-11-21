@@ -33,7 +33,7 @@ build_binary() {
         lipo -create -output "${out_bin}" "${TMP_DIR}/${name}-amd64" "${TMP_DIR}/${name}-arm64"
     else
         echo "  Notice: lipo not found in PATH; using Go-native Mach-O fat assembler..."
-        go run -tags build ./scripts/pack_universal.go "${TMP_DIR}/${name}-arm64" "${TMP_DIR}/${name}-amd64" "${out_bin}"
+        go run ./scripts/pack_universal.go "${TMP_DIR}/${name}-arm64" "${TMP_DIR}/${name}-amd64" "${out_bin}"
     fi
 
     chmod +x "${out_bin}"
