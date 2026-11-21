@@ -33,6 +33,7 @@ import (
 	"github.com/AdeshDeshmukh/cadence/internal/security"
 	"github.com/AdeshDeshmukh/cadence/internal/selection"
 	"github.com/AdeshDeshmukh/cadence/internal/storage"
+	"github.com/AdeshDeshmukh/cadence/internal/supervisor"
 	"github.com/AdeshDeshmukh/cadence/internal/system"
 	"github.com/AdeshDeshmukh/cadence/pkg/version"
 )
@@ -89,6 +90,7 @@ Commands:
   secret <subcommand> Manage API keys and secrets in system keychain (list, get, set, delete)
   model [subcommand]  Manage and verify speech/VAD model cryptographic integrity (list, verify, info)
   privacy [subcommand] Inspect, audit, and manage on-device privacy policies (status, audit, set, purge)
+  service [subcommand] Manage daemon OS service (status, install, uninstall, definition, crashes)
   config [show|path] Inspect configuration and system file paths
   doctor             Perform diagnostics on system, daemon, and storage
   audit              Run dependency security and supply-chain integrity audit
@@ -464,6 +466,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	case "privacy":
 		if err := cmdPrivacy(ctx, cfg, client, args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+
+	case "service":
+		if err := cmdService(ctx, client, args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -6858,5 +6867,88 @@ func cmdPrivacy(ctx context.Context, cfg config.Config, client ipc.Client, args 
 
 	default:
 		return fmt.Errorf("unknown privacy action: %s (expected status, audit, purge, set)", action)
+	}
+}
+
+func cmdService(ctx context.Context, client ipc.Client, args []string, out io.Writer) error {
+	mgr := supervisor.NewServiceManager()
+	sub := "status"
+	if len(args) > 0 {
+		sub = strings.ToLower(args[0])
+	}
+
+	switch sub {
+	case "status":
+		status, err := mgr.Status()
+		if err != nil {
+			return fmt.Errorf("failed to get service status: %w", err)
+		}
+		fmt.Fprintln(out, "Cadence Daemon Service Status:")
+		fmt.Fprintf(out, "  Platform:     %s\n", status.Platform)
+		fmt.Fprintf(out, "  Service Type: %s\n", status.ServiceType)
+		fmt.Fprintf(out, "  Installed:    %t\n", status.Installed)
+		fmt.Fprintf(out, "  Running:      %t\n", status.Running)
+		if status.PID > 0 {
+			fmt.Fprintf(out, "  PID:          %d\n", status.PID)
+		}
+		fmt.Fprintf(out, "  File Path:    %s\n", status.FilePath)
+		return nil
+
+	case "install":
+		execPath := ""
+		if len(args) > 1 {
+			execPath = args[1]
+		}
+		if execPath == "" {
+			if exe, err := exec.LookPath("cadenced"); err == nil {
+				execPath = exe
+			} else {
+				execPath = "/usr/local/bin/cadenced"
+			}
+		}
+		if err := mgr.Install(execPath); err != nil {
+			return fmt.Errorf("failed to install service: %w", err)
+		}
+		fmt.Fprintf(out, "Successfully installed cadenced service (%s) at %s\n", mgr.ServiceFilePath(), execPath)
+		return nil
+
+	case "uninstall":
+		if err := mgr.Uninstall(); err != nil {
+			return fmt.Errorf("failed to uninstall service: %w", err)
+		}
+		fmt.Fprintf(out, "Successfully uninstalled cadenced service (%s)\n", mgr.ServiceFilePath())
+		return nil
+
+	case "definition":
+		execPath := ""
+		if len(args) > 1 {
+			execPath = args[1]
+		}
+		if execPath == "" {
+			execPath = "/usr/local/bin/cadenced"
+		}
+		def := mgr.Definition(execPath)
+		fmt.Fprint(out, def)
+		return nil
+
+	case "crashes":
+		dumps, _ := supervisor.ReadCrashDumps("")
+		fmt.Fprintln(out, "Cadence Daemon Crash Dumps:")
+		if len(dumps) == 0 {
+			fmt.Fprintln(out, "  No crash dumps found.")
+			return nil
+		}
+		for i, d := range dumps {
+			fmt.Fprintf(out, "  [%d] %s (%s)\n", i+1, d.ID, d.Timestamp.Format(time.RFC3339))
+			fmt.Fprintf(out, "      Reason:     %s\n", d.Reason)
+			if d.Error != "" {
+				fmt.Fprintf(out, "      Error:      %s\n", d.Error)
+			}
+			fmt.Fprintf(out, "      Goroutines: %d, SysMem: %d KB\n", d.NumGoroutines, d.SysBytes/1024)
+		}
+		return nil
+
+	default:
+		return fmt.Errorf("unknown service subcommand: %s (expected status, install, uninstall, definition, crashes)", sub)
 	}
 }
